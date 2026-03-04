@@ -1,0 +1,50 @@
+package com.argsment.anywhere.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+private val iconColors = mapOf(
+    "Telegram" to Color(0xFF2AABEE),
+    "Netflix" to Color(0xFFE50914),
+    "YouTube" to Color(0xFFFF0000),
+    "Disney+" to Color(0xFF113CCF),
+    "TikTok" to Color(0xFF000000),
+    "ChatGPT" to Color(0xFF10A37F),
+    "Claude" to Color(0xFFD97706),
+)
+
+@Composable
+fun AppIconView(
+    name: String,
+    modifier: Modifier = Modifier
+) {
+    val bgColor = iconColors[name] ?: MaterialTheme.colorScheme.primary
+    val initial = name.firstOrNull()?.uppercase() ?: "?"
+
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = initial,
+            color = Color.White,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
