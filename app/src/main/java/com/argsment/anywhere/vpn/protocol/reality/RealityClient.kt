@@ -30,8 +30,6 @@ private const val TAG = "RealityClient"
  *
  * After a successful handshake, returns a [TlsRecordConnection] that wraps
  * the underlying [NioSocket] with TLS record encryption/decryption.
- *
- * Port of iOS RealityClient.swift (653 lines).
  */
 class RealityClient(
     private val configuration: RealityConfiguration

@@ -5,7 +5,6 @@ import java.util.UUID
 
 /**
  * VLESS command types.
- * Port of iOS VLESSCommand enum.
  */
 enum class VlessCommand(val value: Byte) {
     TCP(0x01),
@@ -19,7 +18,6 @@ enum class VlessCommand(val value: Byte) {
 
 /**
  * VLESS address types.
- * Port of iOS VLESSAddressType enum.
  */
 enum class VlessAddressType(val value: Byte) {
     IPV4(0x01),
@@ -33,7 +31,6 @@ enum class VlessAddressType(val value: Byte) {
 
 /**
  * VLESS protocol encoder/decoder.
- * Port of iOS VLESSProtocol struct.
  */
 object VlessProtocol {
 

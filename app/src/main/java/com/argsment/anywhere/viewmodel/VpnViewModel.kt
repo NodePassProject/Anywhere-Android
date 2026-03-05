@@ -105,15 +105,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    val statusText: String
-        get() = when (_vpnStatus.value) {
-            VpnStatus.DISCONNECTED -> "Disconnected"
-            VpnStatus.CONNECTING -> "Connecting\u2026"
-            VpnStatus.CONNECTED -> "Connected"
-            VpnStatus.DISCONNECTING -> "Disconnecting\u2026"
-            VpnStatus.REASSERTING -> "Reconnecting\u2026"
-        }
-
     val isButtonDisabled: Boolean
         get() = configRepository.getAll().isEmpty() ||
             (_vpnStatus.value != VpnStatus.CONNECTED && _vpnStatus.value != VpnStatus.DISCONNECTED)
@@ -123,6 +114,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         prefs.getString("selectedConfigurationId", null)?.let { id ->
             _selectedConfigId.value = runCatching { UUID.fromString(id) }.getOrNull()
         }
+        ensureValidSelection()
     }
 
     val selectedConfiguration: VlessConfiguration?
@@ -395,6 +387,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteSubscription(subscription: Subscription) {
         subscriptionRepository.delete(subscription.id, configRepository)
+        ensureValidSelection()
         checkOrphanedRuleSets()
     }
 
@@ -414,6 +407,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         result.configurations.forEach { config ->
             configRepository.add(config.copy(subscriptionId = subscription.id))
         }
+        ensureValidSelection()
     }
 
     // =========================================================================
@@ -474,6 +468,15 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     var bypassCountryCode: String
         get() = prefs.getString("bypassCountryCode", "") ?: ""
         set(value) = prefs.edit().putString("bypassCountryCode", value).apply()
+
+    private fun ensureValidSelection() {
+        val selectedId = _selectedConfigId.value
+        if (selectedId == null || configRepository.get(selectedId) == null) {
+            val newId = configRepository.getAll().firstOrNull()?.id
+            _selectedConfigId.value = newId
+            prefs.edit().putString("selectedConfigurationId", newId?.toString()).apply()
+        }
+    }
 
     private fun checkOrphanedRuleSets() {
         val configIds = configRepository.getAll().map { it.id.toString() }.toSet()

@@ -34,12 +34,11 @@ sealed class NioSocketError(message: String) : IOException(message) {
 }
 
 /**
- * Non-blocking socket using Java NIO SocketChannel + shared Selector.
+ * Non-blocking TCP socket using a shared selector thread for all socket I/O.
  *
- * Port of iOS BSDSocket.swift. Uses a single shared selector thread for
- * event-driven I/O across all socket instances, matching the efficient
- * GCD DispatchSource model used on iOS. This avoids per-socket thread
- * creation which causes GC pressure and native OOM with many connections.
+ * Uses a single shared selector thread for event-driven I/O across all socket
+ * instances. This avoids per-socket thread creation which causes GC pressure
+ * and native OOM with many connections.
  *
  * Socket options follow Xray-core's sockopt conventions:
  * - TCP_NODELAY enabled

@@ -77,8 +77,7 @@ class LwipUdpFlow(
         }
 
         // Mux path: send raw payload (mux framing handled by MuxSession).
-        // Use sendAsync to check closed synchronously on the lwipExecutor,
-        // matching the iOS non-blocking send pattern.
+        // Use sendAsync to check closed synchronously on the lwipExecutor.
         if (muxSession != null) {
             muxSession!!.sendAsync(payload)
             return
@@ -178,8 +177,7 @@ class LwipUdpFlow(
                             }
                         }
 
-                        // Send buffered raw payloads synchronously (closed check +
-                        // frame encoding on the lwipExecutor, matching iOS behavior).
+                        // Send buffered raw payloads synchronously on the lwipExecutor.
                         // Using sendAsync avoids the race where closeAll() could run
                         // between coroutine scheduling and execution.
                         val buffered = pendingData.toList()

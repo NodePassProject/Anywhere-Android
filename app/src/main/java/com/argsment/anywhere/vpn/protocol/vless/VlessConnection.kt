@@ -14,7 +14,6 @@ private const val TAG = "VlessConnection"
 
 /**
  * TLS version constants matching TLS protocol version numbers.
- * Port of iOS TLSVersion enum.
  */
 enum class TlsVersion(val value: Int) {
     TLS12(0x0303),
@@ -23,7 +22,6 @@ enum class TlsVersion(val value: Int) {
 
 /**
  * Interface for all VLESS connection types.
- * Port of iOS VLESSConnectionProtocol.
  */
 interface VlessConnectionProtocol {
     val isConnected: Boolean
@@ -38,7 +36,6 @@ interface VlessConnectionProtocol {
 
 /**
  * Abstract base class providing common VLESS connection functionality.
- * Port of iOS VLESSConnection class.
  *
  * Subclasses must override [isConnected], [sendRaw], [sendRawAsync],
  * [receiveRaw], and [cancel].
@@ -142,7 +139,6 @@ abstract class VlessConnection : VlessConnectionProtocol {
 
 /**
  * VLESS connection over a direct NioSocket transport.
- * Port of iOS VLESSDirectConnection.
  */
 open class VlessDirectConnection(val connection: NioSocket) : VlessConnection() {
 
@@ -174,7 +170,6 @@ open class VlessDirectConnection(val connection: NioSocket) : VlessConnection() 
 
 /**
  * VLESS UDP connection over a direct NioSocket with length-prefixed packets.
- * Port of iOS VLESSDirectUDPConnection.
  */
 class VlessDirectUdpConnection(connection: NioSocket) : VlessDirectConnection(connection) {
 
@@ -218,7 +213,6 @@ class VlessDirectUdpConnection(connection: NioSocket) : VlessDirectConnection(co
 
 /**
  * VLESS connection over an HttpUpgradeConnection transport.
- * Port of iOS VLESSHTTPUpgradeConnection.
  */
 open class VlessHttpUpgradeConnection(
     private val huConnection: HttpUpgradeConnection
@@ -240,7 +234,6 @@ open class VlessHttpUpgradeConnection(
 
 /**
  * VLESS UDP connection over HttpUpgradeConnection with length-prefixed packets.
- * Port of iOS VLESSHTTPUpgradeUDPConnection.
  */
 class VlessHttpUpgradeUdpConnection(
     huConnection: HttpUpgradeConnection
@@ -286,7 +279,6 @@ class VlessHttpUpgradeUdpConnection(
 
 /**
  * VLESS connection over an XHttpConnection transport.
- * Port of iOS VLESSXHTTPConnection.
  */
 open class VlessXHttpConnection(
     private val xhttpConnection: XHttpConnection
@@ -308,7 +300,6 @@ open class VlessXHttpConnection(
 
 /**
  * VLESS UDP connection over XHttpConnection with length-prefixed packets.
- * Port of iOS VLESSXHTTPUDPConnection.
  */
 class VlessXHttpUdpConnection(
     xhttpConnection: XHttpConnection
@@ -354,7 +345,6 @@ class VlessXHttpUdpConnection(
 
 /**
  * VLESS connection over a standard TLS TlsRecordConnection transport.
- * Port of iOS VLESSTLSConnection.
  */
 open class VlessTlsConnection(
     private val tlsConnection: TlsRecordConnection
@@ -391,7 +381,6 @@ open class VlessTlsConnection(
 
 /**
  * VLESS UDP connection over TLS with length-prefixed packets.
- * Port of iOS VLESSTLSUDPConnection.
  */
 class VlessTlsUdpConnection(
     tlsConnection: TlsRecordConnection
@@ -437,7 +426,6 @@ class VlessTlsUdpConnection(
 
 /**
  * VLESS connection over a WebSocketConnection transport.
- * Port of iOS VLESSWebSocketConnection.
  */
 open class VlessWebSocketConnection(
     private val wsConnection: WebSocketConnection
@@ -459,7 +447,6 @@ open class VlessWebSocketConnection(
 
 /**
  * VLESS UDP connection over WebSocket with length-prefixed packets.
- * Port of iOS VLESSWebSocketUDPConnection.
  */
 class VlessWebSocketUdpConnection(
     wsConnection: WebSocketConnection
@@ -505,7 +492,6 @@ class VlessWebSocketUdpConnection(
 
 /**
  * VLESS connection over a Reality TlsRecordConnection transport.
- * Port of iOS VLESSRealityConnection.
  */
 open class VlessRealityConnection(
     private val realityConnection: TlsRecordConnection
@@ -543,7 +529,6 @@ open class VlessRealityConnection(
 
 /**
  * VLESS UDP connection over Reality with length-prefixed packets.
- * Port of iOS VLESSRealityUDPConnection.
  */
 class VlessRealityUdpConnection(
     realityConnection: TlsRecordConnection

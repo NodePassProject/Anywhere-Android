@@ -15,8 +15,6 @@ private const val TAG = "HttpUpgradeConnection"
  * passes data through as raw TCP bytes (no WebSocket framing).
  *
  * Suspend-based transport abstraction avoids modifying [NioSocket] or [TlsRecordConnection].
- *
- * Port of iOS HTTPUpgradeConnection.swift (260 lines) + HTTPUpgradeConfiguration.swift (58 lines).
  */
 class HttpUpgradeConnection private constructor(
     private val configuration: HttpUpgradeConfiguration,
@@ -282,7 +280,6 @@ class HttpUpgradeConnection private constructor(
 
 /**
  * HTTP upgrade transport errors.
- * Port of iOS HTTPUpgradeError enum.
  */
 sealed class HttpUpgradeError(message: String) : Exception(message) {
     class UpgradeFailed(reason: String) : HttpUpgradeError("HTTP upgrade failed: $reason")

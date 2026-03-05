@@ -9,7 +9,6 @@ private const val TAG = "DirectTCP"
 /**
  * Direct TCP relay over NioSocket.
  * connect/receive/send/cancel.
- * Port of iOS DirectTCPRelay class.
  */
 class DirectTcpRelay {
 

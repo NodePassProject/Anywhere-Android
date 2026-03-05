@@ -338,7 +338,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     override fun onOutput(packet: ByteArray, length: Int, isIpv6: Boolean) {
         totalBytesIn.addAndGet(length.toLong())
         // Write synchronously — TUN writes are fast kernel buffer copies.
-        // Matches iOS behavior (writePackets from lwipQueue callback).
         try {
             tunOutput?.write(packet, 0, length)
         } catch (e: Exception) {
@@ -539,10 +538,9 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
         // Build fake IP bytes for the response.
         // Only return fake IPv4 for A queries. AAAA queries always get NODATA
-        // so apps fall back to IPv4 fake IPs. On Android, omitting fc00::/7 from
-        // VPN routes causes fake IPv6 packets to fall through to the physical
-        // network and time out slowly (unlike iOS excludedRoutes which fails
-        // immediately). Returning NODATA for AAAA avoids this entirely.
+        // so apps fall back to IPv4 fake IPs. Omitting fc00::/7 from VPN routes
+        // causes fake IPv6 packets to fall through to the physical network and
+        // time out slowly. Returning NODATA for AAAA avoids this entirely.
         val fakeIpBytes: ByteArray? = when (qtype) {
             1 -> FakeIpPool.ipv4Bytes(offset)
             else -> null  // AAAA → always NODATA for routed domains

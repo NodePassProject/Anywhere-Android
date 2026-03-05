@@ -8,7 +8,6 @@ import java.io.ByteArrayOutputStream
 
 /**
  * Session status values matching Xray-core SessionStatusNew/Keep/End/KeepAlive.
- * Port of iOS MuxSessionStatus enum.
  */
 enum class MuxSessionStatus(val value: Int) {
     NEW(0x01),
@@ -23,7 +22,6 @@ enum class MuxSessionStatus(val value: Int) {
 
 /**
  * Frame option flags (bitmask).
- * Port of iOS MuxOption OptionSet.
  */
 object MuxOption {
     const val DATA: Int = 0x01
@@ -32,7 +30,6 @@ object MuxOption {
 
 /**
  * Network type for mux sessions.
- * Port of iOS MuxNetwork enum.
  */
 enum class MuxNetwork(val value: Int) {
     TCP(0x01),
@@ -62,7 +59,6 @@ private enum class MuxAddressType(val value: Int) {
 
 /**
  * Metadata portion of a mux frame.
- * Port of iOS MuxFrameMetadata struct.
  */
 data class MuxFrameMetadata(
     val sessionID: Int,          // UInt16 range
@@ -316,7 +312,6 @@ private fun parseIPv6(address: String): ByteArray? {
 
 /**
  * Encodes a complete mux frame (metadata length + metadata + optional payload).
- * Port of iOS encodeMuxFrame() function.
  */
 fun encodeMuxFrame(metadata: MuxFrameMetadata, payload: ByteArray?): ByteArray {
     val metaBytes = metadata.encode()
@@ -350,7 +345,6 @@ fun encodeMuxFrame(metadata: MuxFrameMetadata, payload: ByteArray?): ByteArray {
 
 /**
  * Streaming parser that buffers partial reads and emits complete frames.
- * Port of iOS MuxFrameParser class.
  */
 class MuxFrameParser {
     private var buffer = ByteArrayOutputStream()

@@ -1,8 +1,6 @@
 package com.argsment.anywhere.ui.proxy
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +19,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -32,13 +31,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -48,9 +44,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.Subscription
@@ -62,6 +57,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ProxyListScreen(viewModel: VpnViewModel) {
+    val context = LocalContext.current
     val configurations by viewModel.configRepository.configurations.collectAsState()
     val subscriptions by viewModel.subscriptionRepository.subscriptions.collectAsState()
     val selectedConfigId by viewModel.selectedConfigId.collectAsState()
@@ -94,7 +90,7 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                 actions = {
                     IconButton(onClick = { viewModel.testAllLatencies() }) {
                         Icon(
-                            painter = androidx.compose.ui.res.painterResource(android.R.drawable.ic_menu_rotate),
+                            imageVector = Icons.Default.Speed,
                             contentDescription = stringResource(R.string.test_all)
                         )
                     }
@@ -163,7 +159,7 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                                         try {
                                             viewModel.updateSubscription(subscription)
                                         } catch (e: Exception) {
-                                            subscriptionErrorMessage = e.message ?: "Unknown error"
+                                            subscriptionErrorMessage = e.message ?: context.getString(R.string.unknown_error)
                                             showSubscriptionError = true
                                         }
                                         updatingSubscriptionId = null
@@ -365,6 +361,7 @@ private fun ConfigurationRow(
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.test_latency)) },
+                leadingIcon = { Icon(Icons.Default.Speed, contentDescription = null) },
                 onClick = {
                     showMenu = false
                     onTestLatency()

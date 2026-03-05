@@ -1,21 +1,70 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ============================================================================
+# NativeBridge — JNI methods called from C and callback interface
+# ============================================================================
+-keep class com.argsment.anywhere.vpn.NativeBridge { *; }
+-keep interface com.argsment.anywhere.vpn.NativeBridge$LwipCallback { *; }
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ============================================================================
+# VPN Service + Binder (accessed via reflection by Android framework)
+# ============================================================================
+-keep class com.argsment.anywhere.vpn.AnywhereVpnService { *; }
+-keep class com.argsment.anywhere.vpn.AnywhereVpnService$LocalBinder { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ============================================================================
+# @Serializable data classes, enums, and custom serializers
+# ============================================================================
+-keep class com.argsment.anywhere.data.model.VlessConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.TlsConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.RealityConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.WebSocketConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.HttpUpgradeConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.XHttpConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.XHttpMode { *; }
+-keep class com.argsment.anywhere.data.model.TlsFingerprint { *; }
+-keep class com.argsment.anywhere.data.model.Subscription { *; }
+-keep class com.argsment.anywhere.data.model.DomainRule { *; }
+-keep class com.argsment.anywhere.data.model.DomainRuleType { *; }
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Custom serializers
+-keep class com.argsment.anywhere.data.model.UuidSerializer { *; }
+-keep class com.argsment.anywhere.data.model.Base64UrlByteArraySerializer { *; }
+-keep class com.argsment.anywhere.data.model.HexByteArraySerializer { *; }
+
+# Generated $$serializer companion classes
+-keepclassmembers class com.argsment.anywhere.data.model.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.argsment.anywhere.data.model.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+
+# ============================================================================
+# Compose Navigation route objects (serialized for type-safe nav)
+# ============================================================================
+-keep class com.argsment.anywhere.ui.navigation.HomeRoute { *; }
+-keep class com.argsment.anywhere.ui.navigation.ProxiesRoute { *; }
+-keep class com.argsment.anywhere.ui.navigation.SettingsRoute { *; }
+
+# ============================================================================
+# kotlinx.serialization infrastructure
+# ============================================================================
+-keepattributes *Annotation*, InnerClasses
+-dontnote kotlinx.serialization.**
+-keepclassmembers class kotlinx.serialization.json.** { *** Companion; }
+-keepclasseswithmembers class kotlinx.serialization.json.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+
+# ============================================================================
+# Standard enum keepclassmembers
+# ============================================================================
+-keepclassmembers enum com.argsment.anywhere.** {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+
+# ============================================================================
+# Crash reporting — preserve source file and line numbers
+# ============================================================================
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

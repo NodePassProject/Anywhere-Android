@@ -8,7 +8,6 @@ import java.security.spec.ECGenParameterSpec
 
 /**
  * TLS ClientHello builder with browser-specific fingerprint emulation.
- * Port of iOS TLSClientHelloBuilder.swift.
  *
  * Each fingerprint produces a ClientHello matching the corresponding browser's
  * real TLS implementation (cipher suites, extensions, ordering) as defined by
@@ -16,7 +15,7 @@ import java.security.spec.ECGenParameterSpec
  */
 object TlsClientHelloBuilder {
 
-    // MARK: - GREASE
+    // -- GREASE --
 
     private val greaseTable: IntArray = intArrayOf(
         0x0A0A, 0x1A1A, 0x2A2A, 0x3A3A, 0x4A4A, 0x5A5A, 0x6A6A, 0x7A7A,
@@ -35,7 +34,7 @@ object TlsClientHelloBuilder {
         return (value and 0x0F0F) == 0x0A0A
     }
 
-    // MARK: - Deterministic Pseudo-Random Derivation
+    // -- Deterministic Pseudo-Random Derivation --
 
     /**
      * Derives deterministic pseudo-random bytes from the connection random + label.
@@ -60,7 +59,7 @@ object TlsClientHelloBuilder {
         return result
     }
 
-    // MARK: - Generic Extension Helpers
+    // -- Generic Extension Helpers --
 
     /** Appends a UInt16 in big-endian to a ByteArray builder. */
     private fun MutableList<Byte>.appendU16(value: Int) {
@@ -82,7 +81,7 @@ object TlsClientHelloBuilder {
         return ext(type, ByteArray(0))
     }
 
-    // MARK: - Individual Extension Builders
+    // -- Individual Extension Builders --
 
     /** 0x0000 -- Server Name Indication (SNI). */
     fun buildSNIExtension(serverName: String): ByteArray {
@@ -244,7 +243,7 @@ object TlsClientHelloBuilder {
     /** GREASE extension (random type, empty data). */
     private fun greaseExt(value: Int): ByteArray = ext(value)
 
-    // MARK: - Cipher Suite Serialization
+    // -- Cipher Suite Serialization --
 
     private fun cipherSuitesData(suites: IntArray): ByteArray {
         val data = mutableListOf<Byte>()
@@ -252,7 +251,7 @@ object TlsClientHelloBuilder {
         return data.toByteArray()
     }
 
-    // MARK: - BoringSSL Padding
+    // -- BoringSSL Padding --
 
     /**
      * Calculates BoringSSL-style padding: if the full record (5 + ClientHello) is 256-511 bytes,
@@ -265,7 +264,7 @@ object TlsClientHelloBuilder {
         return if (needed >= 5) (needed - 4) else 1
     }
 
-    // MARK: - Chrome Extension Shuffling
+    // -- Chrome Extension Shuffling --
 
     /**
      * Shuffles extension data blocks deterministically for the Chrome fingerprint.
@@ -308,7 +307,7 @@ object TlsClientHelloBuilder {
         }
     }
 
-    // MARK: - P256 Key Derivation (Firefox)
+    // -- P256 Key Derivation (Firefox) --
 
     /**
      * Derives a deterministic P256 public key from the connection random.
@@ -348,7 +347,7 @@ object TlsClientHelloBuilder {
         }
     }
 
-    // MARK: - Public API
+    // -- Public API --
 
     /**
      * Build a TLS ClientHello with browser-specific fingerprint emulation.
@@ -439,7 +438,7 @@ object TlsClientHelloBuilder {
         return ch.toByteArray()
     }
 
-    // MARK: - Per-Browser Fingerprint Dispatch
+    // -- Per-Browser Fingerprint Dispatch --
 
     private data class FingerprintParts(
         val cipherSuites: ByteArray,
@@ -464,7 +463,7 @@ object TlsClientHelloBuilder {
         }
     }
 
-    // MARK: - Chrome 120
+    // -- Chrome 120 --
 
     private fun buildChrome120(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
@@ -528,7 +527,7 @@ object TlsClientHelloBuilder {
         return FingerprintParts(suites, extensionsData, true)
     }
 
-    // MARK: - Firefox 120
+    // -- Firefox 120 --
 
     private fun buildFirefox120(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
@@ -586,7 +585,7 @@ object TlsClientHelloBuilder {
         return FingerprintParts(suites, extensionsData, false) // No BoringSSL padding
     }
 
-    // MARK: - Safari 16.0
+    // -- Safari 16.0 --
 
     private fun buildSafari16(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
@@ -643,7 +642,7 @@ object TlsClientHelloBuilder {
         return FingerprintParts(suites, extensionsData, true)
     }
 
-    // MARK: - iOS 14
+    // -- iOS 14 --
 
     private fun buildIOS14(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
@@ -681,7 +680,7 @@ object TlsClientHelloBuilder {
             signatureAlgorithmsExt(intArrayOf(
                 0x0403, 0x0804, 0x0401,
                 0x0503, 0x0203,
-                0x0805, 0x0805,                               // Intentional duplicate (real iOS)
+                0x0805, 0x0805,                               // Intentional duplicate (real iOS 14 TLS client)
                 0x0501,
                 0x0806, 0x0601,
                 0x0201
@@ -700,7 +699,7 @@ object TlsClientHelloBuilder {
         return FingerprintParts(suites, extensionsData, true)
     }
 
-    // MARK: - Edge 106
+    // -- Edge 106 --
 
     private fun buildEdge106(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
@@ -754,7 +753,7 @@ object TlsClientHelloBuilder {
         return FingerprintParts(suites, extensionsData, true)
     }
 
-    // MARK: - Helpers
+    // -- Helpers --
 
     /** Concatenate a list of byte arrays into a single byte array. */
     private fun concatenateArrays(arrays: List<ByteArray>): ByteArray {

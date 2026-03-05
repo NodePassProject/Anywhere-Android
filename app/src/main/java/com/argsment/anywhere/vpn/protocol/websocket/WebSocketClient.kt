@@ -22,8 +22,6 @@ private const val TAG = "WebSocketConnection"
  * WebSocket connection implementing RFC 6455 framing over an arbitrary transport.
  *
  * Suspend-based transport abstraction avoids modifying [NioSocket] or [TlsRecordConnection].
- *
- * Port of iOS WebSocketConnection.swift (474 lines) + WebSocketConfiguration.swift (73 lines).
  */
 class WebSocketConnection private constructor(
     private val configuration: WebSocketConfiguration,
@@ -440,10 +438,6 @@ class WebSocketConnection private constructor(
         }
     }
 
-    // handleFrameResult and receiveMore removed — logic inlined into receive() loop
-    // to eliminate mutual recursion (handleFrameResult → receive → receiveMore → handleFrameResult)
-    // that could cause StackOverflowError from consecutive Ping/Pong frames.
-
     // =========================================================================
     // Buffer Helpers
     // =========================================================================
@@ -494,7 +488,6 @@ class WebSocketConnection private constructor(
 
 /**
  * WebSocket transport errors.
- * Port of iOS WebSocketError enum.
  */
 sealed class WebSocketError(message: String) : Exception(message) {
     class UpgradeFailed(reason: String) : WebSocketError("WebSocket upgrade failed: $reason")

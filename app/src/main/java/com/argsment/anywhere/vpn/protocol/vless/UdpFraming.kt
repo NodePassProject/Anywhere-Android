@@ -3,8 +3,6 @@ package com.argsment.anywhere.vpn.protocol.vless
 /**
  * UDP packet framing capabilities.
  * UDP packets are length-prefixed with 2 bytes (big-endian).
- *
- * Port of iOS UDPFraming.swift protocol/extension.
  */
 object UdpFraming {
 

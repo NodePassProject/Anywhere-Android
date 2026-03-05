@@ -45,19 +45,20 @@ object SocketProtector {
 
     /**
      * Protect a socket file descriptor from VPN routing.
-     * Returns true on success, false if no protector is registered or protection failed.
+     * Returns true on success. When no protector is registered (VPN not running),
+     * returns true because no protection is needed.
      */
     fun protect(fd: Int): Boolean {
-        return fdProtector?.invoke(fd) ?: false
+        return fdProtector?.invoke(fd) ?: true
     }
 
     /** Protect a TCP socket from VPN routing. */
     fun protect(socket: Socket): Boolean {
-        return socketProtector?.invoke(socket) ?: false
+        return socketProtector?.invoke(socket) ?: true
     }
 
     /** Protect a UDP socket from VPN routing. */
     fun protect(socket: DatagramSocket): Boolean {
-        return datagramProtector?.invoke(socket) ?: false
+        return datagramProtector?.invoke(socket) ?: true
     }
 }

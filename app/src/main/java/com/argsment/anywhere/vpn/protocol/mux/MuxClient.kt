@@ -19,7 +19,6 @@ private const val TAG = "MuxClient"
  * Single mux connection over VLESS with session management.
  * Write serialization, receive loop with frame parsing, 16s idle timeout.
  * XUDP support.
- * Port of iOS MuxClient class.
  */
 class MuxClient(
     val configuration: VlessConfiguration,

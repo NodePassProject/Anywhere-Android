@@ -14,7 +14,6 @@ private const val TAG = "TlsRecordConn"
 
 /**
  * TLS 1.3 application-layer record encryption/decryption wrapper.
- * Port of iOS TLSRecordConnection.swift.
  *
  * Encrypts outgoing data into TLS Application Data records using AES-GCM
  * and decrypts incoming records. Sequence numbers are tracked independently
@@ -51,7 +50,7 @@ class TlsRecordConnection(
     private var receiveBufferLen = 0
     private val receiveLock = ReentrantLock()
 
-    // MARK: - Send (Encrypted)
+    // -- Send (Encrypted) --
 
     /**
      * Sends data through the TLS tunnel, encrypting it as TLS Application Data records.
@@ -75,7 +74,7 @@ class TlsRecordConnection(
         }
     }
 
-    // MARK: - Receive (Encrypted)
+    // -- Receive (Encrypted) --
 
     /**
      * Receives and decrypts data from the TLS tunnel.
@@ -97,7 +96,7 @@ class TlsRecordConnection(
         return fetchMore()
     }
 
-    // MARK: - Send / Receive (Raw, Unencrypted)
+    // -- Send / Receive (Raw, Unencrypted) --
 
     /**
      * Receives raw data without decryption (for Vision direct-copy mode).
@@ -137,7 +136,7 @@ class TlsRecordConnection(
         conn.sendAsync(data)
     }
 
-    // MARK: - Cancel
+    // -- Cancel --
 
     /**
      * Closes the connection and releases all resources.
@@ -199,7 +198,7 @@ class TlsRecordConnection(
         }
     }
 
-    // MARK: - Internal Buffer Processing
+    // -- Internal Buffer Processing --
 
     /** Result of processing buffered TLS records. */
     private sealed class BufferResult {
@@ -363,7 +362,7 @@ class TlsRecordConnection(
         return null
     }
 
-    // MARK: - TLS Record Crypto
+    // -- TLS Record Crypto --
 
     /**
      * Encrypts plaintext into one or more TLS Application Data records.

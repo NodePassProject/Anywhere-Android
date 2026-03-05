@@ -52,9 +52,18 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.isSystemInDarkTheme
 import com.argsment.anywhere.R
 import com.argsment.anywhere.ui.components.PowerButton
 import com.argsment.anywhere.ui.components.TrafficStatsRow
+import com.argsment.anywhere.ui.theme.GradientConnectedEndDark
+import com.argsment.anywhere.ui.theme.GradientConnectedEndLight
+import com.argsment.anywhere.ui.theme.GradientConnectedStartDark
+import com.argsment.anywhere.ui.theme.GradientConnectedStartLight
+import com.argsment.anywhere.ui.theme.GradientDisconnectedEndDark
+import com.argsment.anywhere.ui.theme.GradientDisconnectedEndLight
+import com.argsment.anywhere.ui.theme.GradientDisconnectedStartDark
+import com.argsment.anywhere.ui.theme.GradientDisconnectedStartLight
 import com.argsment.anywhere.ui.proxy.AddProxyScreen
 import com.argsment.anywhere.ui.proxy.ProxyEditorScreen
 import com.argsment.anywhere.viewmodel.VpnStatus
@@ -84,13 +93,24 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
     var showingConfigPicker by remember { mutableStateOf(false) }
 
     // Background gradient colors
+    val isDark = isSystemInDarkTheme()
     val gradientStart by animateColorAsState(
-        targetValue = if (isConnected) Color(0xFF1A237E) else Color(0xFFF5F5F5),
+        targetValue = when {
+            isConnected && isDark -> GradientConnectedStartDark
+            isConnected -> GradientConnectedStartLight
+            isDark -> GradientDisconnectedStartDark
+            else -> GradientDisconnectedStartLight
+        },
         animationSpec = tween(600),
         label = "gradientStart"
     )
     val gradientEnd by animateColorAsState(
-        targetValue = if (isConnected) Color(0xFF006064) else Color(0xFFE0E0E0),
+        targetValue = when {
+            isConnected && isDark -> GradientConnectedEndDark
+            isConnected -> GradientConnectedEndLight
+            isDark -> GradientDisconnectedEndDark
+            else -> GradientDisconnectedEndLight
+        },
         animationSpec = tween(600),
         label = "gradientEnd"
     )
@@ -126,8 +146,15 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
             Spacer(modifier = Modifier.height(16.dp))
 
             // Status text
+            val statusTextRes = when (vpnStatus) {
+                VpnStatus.DISCONNECTED -> R.string.disconnected
+                VpnStatus.CONNECTING -> R.string.connecting
+                VpnStatus.CONNECTED -> R.string.connected
+                VpnStatus.DISCONNECTING -> R.string.disconnecting
+                VpnStatus.REASSERTING -> R.string.reconnecting
+            }
             Text(
-                text = viewModel.statusText,
+                text = stringResource(statusTextRes),
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Medium),
                 color = if (isConnected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
             )

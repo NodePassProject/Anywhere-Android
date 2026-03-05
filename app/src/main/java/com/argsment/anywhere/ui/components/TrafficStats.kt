@@ -17,8 +17,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.argsment.anywhere.R
 
 @Composable
 fun TrafficStatsRow(
@@ -37,7 +39,7 @@ fun TrafficStatsRow(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = Icons.Filled.KeyboardArrowUp,
-                contentDescription = "Upload",
+                contentDescription = stringResource(R.string.upload),
                 tint = contentColor.copy(alpha = 0.7f)
             )
             Spacer(modifier = Modifier.width(6.dp))
@@ -53,7 +55,7 @@ fun TrafficStatsRow(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = Icons.Filled.KeyboardArrowDown,
-                contentDescription = "Download",
+                contentDescription = stringResource(R.string.download),
                 tint = contentColor.copy(alpha = 0.7f)
             )
             Spacer(modifier = Modifier.width(6.dp))

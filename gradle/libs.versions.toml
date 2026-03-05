@@ -11,7 +11,7 @@ composeBom = "2024.09.00"
 navigationCompose = "2.9.0"
 kotlinxSerialization = "1.8.0"
 camerax = "1.4.1"
-mlkitBarcode = "17.3.0"
+mlkitBarcode = "18.3.1"
 coroutines = "1.10.1"
 
 [libraries]
@@ -35,7 +35,7 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 camerax-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
 camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
 camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
-mlkit-barcode = { module = "com.google.mlkit:barcode-scanning", version.ref = "mlkitBarcode" }
+mlkit-barcode = { module = "com.google.android.gms:play-services-mlkit-barcode-scanning", version.ref = "mlkitBarcode" }
 coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 
 [plugins]

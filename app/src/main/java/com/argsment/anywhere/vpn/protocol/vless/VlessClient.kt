@@ -29,8 +29,6 @@ private const val TAG = "VlessClient"
  * security selection (None / TLS / Reality), and flow control (None / Vision).
  *
  * Retry logic: 5 attempts with linear backoff 0/200/400/600/800ms (matching Xray-core).
- *
- * Port of iOS VLESSClient class.
  */
 class VlessClient(private val configuration: VlessConfiguration) {
 

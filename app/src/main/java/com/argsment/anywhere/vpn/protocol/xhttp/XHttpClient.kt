@@ -38,8 +38,6 @@ class TransportClosures(
  *
  * Uses the same transport abstraction as [com.argsment.anywhere.vpn.protocol.websocket.WebSocketConnection]
  * and [com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection].
- *
- * Port of iOS XHTTPConnection.swift (1123 lines) + XHTTPConfiguration.swift (109 lines).
  */
 class XHttpConnection private constructor(
     val configuration: XHttpConfiguration,
@@ -171,7 +169,7 @@ class XHttpConnection private constructor(
         }
     }
 
-    // MARK: stream-one Setup
+    // -- stream-one Setup --
 
     private suspend fun performStreamOneSetup() {
         val sb = StringBuilder()
@@ -196,7 +194,7 @@ class XHttpConnection private constructor(
         receiveResponseHeaders()
     }
 
-    // MARK: packet-up Setup
+    // -- packet-up Setup --
 
     private suspend fun performPacketUpSetup() {
         // Send GET request on the download connection
@@ -361,7 +359,7 @@ class XHttpConnection private constructor(
         }
     }
 
-    // MARK: stream-one Send
+    // -- stream-one Send --
 
     /**
      * Sends data as a chunked-encoded chunk on the stream-one POST.
@@ -371,7 +369,7 @@ class XHttpConnection private constructor(
         downloadSend(chunk)
     }
 
-    // MARK: packet-up Send
+    // -- packet-up Send --
 
     /**
      * Sends data as a POST request with sequence number on the upload connection.
@@ -588,7 +586,7 @@ class XHttpConnection private constructor(
         private const val H2_CONN_WINDOW_SIZE: Int = 1_073_741_824  // 1GB
     }
 
-    // MARK: HTTP/2 Frame I/O
+    // -- HTTP/2 Frame I/O --
 
     /**
      * Builds an HTTP/2 frame.
@@ -674,7 +672,7 @@ class XHttpConnection private constructor(
         }
     }
 
-    // MARK: HTTP/2 HPACK Encoder (simplified, no Huffman)
+    // -- HTTP/2 HPACK Encoder (simplified, no Huffman) --
 
     /**
      * Encodes an integer with the given prefix bit width (RFC 7541 S5.1).
@@ -787,7 +785,7 @@ class XHttpConnection private constructor(
         return false
     }
 
-    // MARK: HTTP/2 Setup
+    // -- HTTP/2 Setup --
 
     /**
      * Performs HTTP/2 connection setup: sends preface + SETTINGS + WINDOW_UPDATE,
@@ -925,7 +923,7 @@ class XHttpConnection private constructor(
         }
     }
 
-    // MARK: HTTP/2 Send
+    // -- HTTP/2 Send --
 
     /**
      * Sends data as HTTP/2 DATA frame(s) on stream 1.
@@ -949,7 +947,7 @@ class XHttpConnection private constructor(
         }
     }
 
-    // MARK: HTTP/2 Receive
+    // -- HTTP/2 Receive --
 
     /**
      * Receives data from HTTP/2 DATA frames on stream 1.
@@ -1123,8 +1121,6 @@ class XHttpConnection private constructor(
  *
  * Handles partial reads: data can be fed incrementally and chunks extracted
  * as they become complete.
- *
- * Port of iOS ChunkedTransferDecoder struct.
  */
 class ChunkedTransferDecoder {
     private var buffer = ByteArray(0)
@@ -1227,8 +1223,6 @@ class ChunkedTransferDecoder {
 
 /**
  * Chunked transfer encoding encoder (HTTP/1.1 RFC 7230 S4.1).
- *
- * Port of iOS ChunkedTransferEncoder enum.
  */
 object ChunkedTransferEncoder {
 
@@ -1265,7 +1259,6 @@ object ChunkedTransferEncoder {
 
 /**
  * XHTTP transport errors.
- * Port of iOS XHTTPError enum.
  */
 sealed class XHttpError(message: String) : Exception(message) {
     class SetupFailed(reason: String) : XHttpError("XHTTP setup failed: $reason")

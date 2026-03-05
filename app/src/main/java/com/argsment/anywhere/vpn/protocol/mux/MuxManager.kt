@@ -6,7 +6,6 @@ import kotlin.coroutines.CoroutineContext
 /**
  * Manages a pool of MuxClient instances.
  * Dispatches sessions to non-full clients, creates new clients as needed.
- * Port of iOS MuxManager class.
  */
 class MuxManager(
     val configuration: VlessConfiguration,

@@ -4,7 +4,6 @@ import com.argsment.anywhere.vpn.NativeBridge
 
 /**
  * TLS 1.3 cipher suite constants.
- * Port of iOS TLSCipherSuite enum.
  */
 object TlsCipherSuite {
     const val TLS_AES_128_GCM_SHA256: Int = 0x1301
@@ -14,7 +13,6 @@ object TlsCipherSuite {
 
 /**
  * TLS 1.3 handshake traffic keys.
- * Port of iOS TLSHandshakeKeys struct.
  */
 data class TlsHandshakeKeys(
     val clientKey: ByteArray,
@@ -45,7 +43,6 @@ data class TlsHandshakeKeys(
 
 /**
  * TLS 1.3 application traffic keys.
- * Port of iOS TLSApplicationKeys struct.
  */
 data class TlsApplicationKeys(
     val clientKey: ByteArray,
@@ -73,7 +70,6 @@ data class TlsApplicationKeys(
 
 /**
  * TLS 1.3 key derivation utilities.
- * Port of iOS TLS13KeyDerivation struct.
  *
  * Delegates all cryptographic operations to [NativeBridge] JNI functions
  * which use OpenSSL/BoringSSL for HKDF-Expand-Label and transcript hashing.

@@ -20,7 +20,7 @@ import kotlinx.serialization.json.Json
  * Android VPN service that creates a TUN interface, runs the lwIP TCP/IP stack,
  * and routes traffic through VLESS proxy connections.
  *
- * Equivalent of iOS PacketTunnelProvider.
+ * Equivalent of a platform packet tunnel provider.
  */
 class AnywhereVpnService : VpnService() {
 
@@ -202,7 +202,6 @@ class AnywhereVpnService : VpnService() {
     // =========================================================================
 
     // Bypass routes — IP ranges excluded from VPN tunnel (sent directly)
-    // Matching iOS PacketTunnelProvider.bypassIPv4Routes
     private data class BypassRoute(val address: String, val prefixLength: Int)
 
     private fun buildTunInterface(config: VlessConfiguration): ParcelFileDescriptor? {
@@ -224,7 +223,7 @@ class AnywhereVpnService : VpnService() {
             .setBlocking(true)
 
         // IPv6: add address, routes (excluding fc00::/7 and fe80::/10), and DNS servers.
-        // Matching iOS PacketTunnelProvider.bypassIPv6Routes:
+        // Excluded ranges:
         //   fc00::/7  — unique-local (includes our fake IPv6 range fc00::x)
         //   fe80::/10 — link-local
         // Excluding fc00::/7 ensures fake IPv6 IPs fail fast (no route),
@@ -249,9 +248,8 @@ class AnywhereVpnService : VpnService() {
         // On Android, bypass is achieved by:
         // 1. Route 0.0.0.0/0 captures all traffic into TUN
         // 2. Protecting outbound proxy sockets via VpnService.protect()
-        // The bypass routes from iOS (private ranges) are not needed on Android
-        // because our protocol sockets are protected and lwIP + domain routing
-        // handles the bypass decisions internally.
+        // Private-range bypass routes are not needed because our protocol sockets
+        // are protected and lwIP + domain routing handles bypass decisions internally.
         // The server IP does NOT need a special route — protect() on the proxy
         // socket prevents the routing loop.
 
@@ -274,8 +272,7 @@ class AnywhereVpnService : VpnService() {
      * from handleSettingsChanged. This avoids a deadlock: this callback is
      * invoked on the lwipExecutor, and stack.stop() would block on the same thread.
      *
-     * Matches iOS behavior where reapplyTunnelSettings() only calls
-     * setTunnelNetworkSettings() without touching the lwIP stack.
+     * Only rebuilds the TUN interface without touching the lwIP stack.
      */
     private fun reapplyTunnelSettings(config: VlessConfiguration) {
         val newFd = buildTunInterface(config)

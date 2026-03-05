@@ -171,7 +171,7 @@ fun AddProxyScreen(
                                 val config = VlessConfiguration.fromUrl(trimmed)
                                 onImport(config)
                             } catch (e: Exception) {
-                                linkErrorMessage = e.message ?: "Invalid URL"
+                                linkErrorMessage = e.message ?: context.getString(R.string.invalid_url)
                                 showLinkError = true
                             }
                         } else {
@@ -193,7 +193,7 @@ fun AddProxyScreen(
                                     )
                                     onSubscriptionImport(result.configurations, subscription)
                                 } catch (e: Exception) {
-                                    linkErrorMessage = e.message ?: "Import failed"
+                                    linkErrorMessage = e.message ?: context.getString(R.string.import_failed)
                                     showLinkError = true
                                 }
                                 isLoading = false
@@ -239,11 +239,11 @@ fun AddProxyScreen(
                         val config = VlessConfiguration.fromUrl(trimmed)
                         onImport(config)
                     } catch (e: Exception) {
-                        linkErrorMessage = e.message ?: "Invalid QR code"
+                        linkErrorMessage = e.message ?: context.getString(R.string.invalid_qr_code)
                         showLinkError = true
                     }
                 } else {
-                    linkErrorMessage = "QR code does not contain a VLESS link"
+                    linkErrorMessage = context.getString(R.string.qr_code_not_vless)
                     showLinkError = true
                 }
             },

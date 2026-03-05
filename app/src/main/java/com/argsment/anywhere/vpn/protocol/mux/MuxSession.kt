@@ -8,7 +8,6 @@ private const val TAG = "MuxSession"
 /**
  * Individual mux session with send (Keep frame) and close (End frame).
  * Data/close delivery from demuxer.
- * Port of iOS MuxSession class.
  */
 class MuxSession(
     val sessionID: Int,           // UInt16 range

@@ -43,7 +43,6 @@ private val TLS13_CIPHER_SUITES = setOf<Int>(
 
 /**
  * Tracks TLS detection and padding state for Vision.
- * Port of iOS VisionTrafficState class.
  */
 class VisionTrafficState(
     val userUUID: ByteArray,
@@ -121,7 +120,6 @@ private val secureRandom = SecureRandom()
 /**
  * Add Vision padding to data.
  * Format: [UUID (16 bytes, first packet only)] [command (1)] [contentLen (2)] [paddingLen (2)] [content] [padding]
- * Port of iOS visionPadding() function.
  */
 fun visionPadding(data: ByteArray?, command: VisionCommand, state: VisionTrafficState, longPadding: Boolean): ByteArray {
     val contentLen = data?.size ?: 0
@@ -181,7 +179,6 @@ fun visionPadding(data: ByteArray?, command: VisionCommand, state: VisionTraffic
 /**
  * Remove Vision padding from data and extract content.
  * Returns the extracted content data.
- * Port of iOS visionUnpadding() function.
  *
  * Note: [data] is consumed in-place and its contents may be modified.
  * Returns a new ByteArray with the extracted content.
@@ -277,7 +274,6 @@ class DataCursor(private val data: ByteArray, private var offset: Int = 0) {
 
 /**
  * Filter and detect TLS 1.3 in traffic (for incoming server responses).
- * Port of iOS visionFilterTLS() function.
  */
 fun visionFilterTLS(data: ByteArray, state: VisionTrafficState) {
     if (state.numberOfPacketsToFilter <= 0) return
@@ -334,7 +330,6 @@ fun visionFilterTLS(data: ByteArray, state: VisionTrafficState) {
 
 /**
  * Detect TLS Client Hello in outgoing data (doesn't decrement counter).
- * Port of iOS visionDetectClientHello() function.
  */
 fun visionDetectClientHello(data: ByteArray, state: VisionTrafficState) {
     if (data.size < 6) return
@@ -347,7 +342,6 @@ fun visionDetectClientHello(data: ByteArray, state: VisionTrafficState) {
 
 /**
  * Check if data contains only complete TLS application data records.
- * Port of iOS isCompleteTLSRecord() function.
  */
 fun isCompleteTlsRecord(data: ByteArray): Boolean {
     if (data.size < 5) return false
@@ -386,7 +380,6 @@ private fun containsSubarray(data: ByteArray, fromIndex: Int, toIndex: Int, sub:
 
 /**
  * VLESS connection with Vision flow control.
- * Port of iOS VLESSVisionConnection class.
  */
 class VlessVisionConnection(
     private val innerConnection: VlessConnection,

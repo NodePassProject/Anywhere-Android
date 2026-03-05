@@ -20,7 +20,6 @@ private const val TAG = "DirectUDP"
 /**
  * Direct UDP relay with DNS resolution.
  * Non-blocking connected UDP socket using a shared selector thread.
- * Port of iOS DirectUDPRelay class.
  */
 class DirectUdpRelay {
 
@@ -154,7 +153,7 @@ class DirectUdpRelay {
             val buffer = ByteBuffer.wrap(data)
             ch.write(buffer)
         } catch (e: Exception) {
-            // UDP send errors are silently ignored (matching iOS behavior)
+            // UDP send errors are silently ignored
         }
     }
 

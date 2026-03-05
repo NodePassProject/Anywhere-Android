@@ -71,6 +71,12 @@
     <string name="update_failed">Update Failed</string>
     <string name="vpn">VPN</string>
     <string name="vpn_error">VPN Error</string>
+    <string name="upload">Upload</string>
+    <string name="download">Download</string>
+    <string name="invalid_url">Invalid URL</string>
+    <string name="invalid_qr_code">Invalid QR code</string>
+    <string name="qr_code_not_vless">QR code does not contain a VLESS link</string>
+    <string name="unknown_error">Unknown error</string>
 
     <!-- Formatted strings -->
     <string name="latency_ms">%d ms</string>

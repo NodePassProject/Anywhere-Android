@@ -28,7 +28,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
@@ -296,7 +295,7 @@ private fun CountryBypassPicker(
     var expanded by remember { mutableStateOf(false) }
 
     val displayText = if (selectedCode.isEmpty()) {
-        "Disable"
+        stringResource(R.string.disable)
     } else {
         val locale = Locale("", selectedCode)
         "${flagForCountryCode(selectedCode)} ${locale.displayCountry}"
