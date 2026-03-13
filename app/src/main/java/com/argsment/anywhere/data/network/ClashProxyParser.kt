@@ -1,12 +1,14 @@
 package com.argsment.anywhere.data.network
 
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
+import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.data.model.TlsFingerprint
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.WebSocketConfiguration
 import com.argsment.anywhere.vpn.NativeBridge
+import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksCipher
 import com.argsment.anywhere.vpn.util.base64UrlToByteArrayOrNull
 import com.argsment.anywhere.vpn.util.hexToByteArrayOrNull
 import org.json.JSONArray
@@ -16,7 +18,7 @@ import java.util.UUID
 object ClashProxyParser {
 
     data class ParseResult(
-        val configurations: List<VlessConfiguration>,
+        val configurations: List<ProxyConfiguration>,
         val skippedCount: Int
     )
 
@@ -35,7 +37,7 @@ object ClashProxyParser {
         val proxies = root.optJSONArray("proxies")
             ?: throw ParseError.MissingProxiesKey()
 
-        val configurations = mutableListOf<VlessConfiguration>()
+        val configurations = mutableListOf<ProxyConfiguration>()
         var skippedCount = 0
 
         for (i in 0 until proxies.length()) {
@@ -55,8 +57,10 @@ object ClashProxyParser {
         return ParseResult(configurations, skippedCount)
     }
 
-    private fun parseProxy(node: JSONObject): VlessConfiguration? {
-        if (node.optString("type") != "vless") return null
+    private fun parseProxy(node: JSONObject): ProxyConfiguration? {
+        val proxyType = node.optString("type")
+        if (proxyType == "ss") return parseShadowsocksProxy(node)
+        if (proxyType != "vless") return null
 
         val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
         val server = node.optString("server").takeIf { it.isNotEmpty() } ?: return null
@@ -145,7 +149,7 @@ object ClashProxyParser {
             wsConfig = WebSocketConfiguration(host = wsHost, path = wsPath, headers = wsHeaders)
         }
 
-        return VlessConfiguration(
+        return ProxyConfiguration(
             name = name,
             serverAddress = server,
             serverPort = port,
@@ -157,6 +161,85 @@ object ClashProxyParser {
             tls = tlsConfig,
             reality = realityConfig,
             websocket = wsConfig
+        )
+    }
+
+    private fun parseShadowsocksProxy(node: JSONObject): ProxyConfiguration? {
+        val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
+        val server = node.optString("server").takeIf { it.isNotEmpty() } ?: return null
+        val password = node.optString("password").takeIf { it.isNotEmpty() } ?: return null
+        val cipher = node.optString("cipher").takeIf { it.isNotEmpty() } ?: return null
+
+        // Validate cipher is supported
+        ShadowsocksCipher.fromMethod(cipher) ?: return null
+
+        val portInt = node.optInt("port", -1)
+        if (portInt <= 0 || portInt > UShort.MAX_VALUE.toInt()) return null
+        val port = portInt.toUShort()
+
+        // Transport: tcp (default) or ws; skip h2/grpc
+        val network = node.optString("network", "").takeIf { it.isNotEmpty() }
+            ?: node.optString("plugin-opts-network", "tcp")
+        if (network == "h2" || network == "grpc") return null
+        val transport = if (network == "ws") "ws" else "tcp"
+
+        // TLS
+        val tlsEnabled = node.optBoolean("tls", false)
+        val security = if (tlsEnabled) "tls" else "none"
+
+        var tlsConfig: TlsConfiguration? = null
+        if (tlsEnabled) {
+            val sni = node.optString("servername", "").takeIf { it.isNotEmpty() }
+                ?: node.optString("sni", "").takeIf { it.isNotEmpty() }
+                ?: server
+            val alpn = node.optJSONArray("alpn")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }
+            }?.takeIf { it.isNotEmpty() }
+            val clientFP = node.optString("client-fingerprint", "").takeIf { it.isNotEmpty() }
+            val fingerprint = TlsFingerprint.fromRaw(mapFingerprint(clientFP))
+
+            tlsConfig = TlsConfiguration(
+                serverName = sni,
+                alpn = alpn,
+                allowInsecure = node.optBoolean("skip-cert-verify", false),
+                fingerprint = fingerprint
+            )
+        }
+
+        // WebSocket
+        var wsConfig: WebSocketConfiguration? = null
+        if (transport == "ws") {
+            var wsPath = "/"
+            var wsHost = server
+            val wsHeaders = mutableMapOf<String, String>()
+
+            node.optJSONObject("ws-opts")?.let { woNode ->
+                wsPath = woNode.optString("path", "/")
+                woNode.optJSONObject("headers")?.let { headers ->
+                    for (key in headers.keys()) {
+                        val value = headers.optString(key, "")
+                        wsHeaders[key] = value
+                        if (key == "Host") wsHost = value
+                    }
+                }
+            }
+
+            wsConfig = WebSocketConfiguration(host = wsHost, path = wsPath, headers = wsHeaders)
+        }
+
+        return ProxyConfiguration(
+            name = name,
+            serverAddress = server,
+            serverPort = port,
+            uuid = UUID.randomUUID(),
+            encryption = "none",
+            transport = transport,
+            security = security,
+            tls = tlsConfig,
+            websocket = wsConfig,
+            outboundProtocol = OutboundProtocol.SHADOWSOCKS,
+            ssPassword = password,
+            ssMethod = cipher
         )
     }
 

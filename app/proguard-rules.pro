@@ -13,7 +13,10 @@
 # ============================================================================
 # @Serializable data classes, enums, and custom serializers
 # ============================================================================
--keep class com.argsment.anywhere.data.model.VlessConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.ProxyConfiguration { *; }
+-keep class com.argsment.anywhere.data.model.OutboundProtocol { *; }
+-keep class com.argsment.anywhere.data.model.NaiveProtocol { *; }
+-keep class com.argsment.anywhere.data.model.ProxyChain { *; }
 -keep class com.argsment.anywhere.data.model.TlsConfiguration { *; }
 -keep class com.argsment.anywhere.data.model.RealityConfiguration { *; }
 -keep class com.argsment.anywhere.data.model.WebSocketConfiguration { *; }
@@ -43,6 +46,7 @@
 # ============================================================================
 -keep class com.argsment.anywhere.ui.navigation.HomeRoute { *; }
 -keep class com.argsment.anywhere.ui.navigation.ProxiesRoute { *; }
+-keep class com.argsment.anywhere.ui.navigation.ChainsRoute { *; }
 -keep class com.argsment.anywhere.ui.navigation.SettingsRoute { *; }
 
 # ============================================================================

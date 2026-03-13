@@ -139,6 +139,10 @@ object NativeBridge {
     @JvmStatic
     external fun nativeBlake3KeyedHash(key: ByteArray, input: ByteArray): ByteArray
 
+    /** Compute BLAKE3 DeriveKey. Uses context string for domain separation. Returns [outLen] bytes. */
+    @JvmStatic
+    external fun nativeBlake3DeriveKey(context: String, input: ByteArray, outLen: Int): ByteArray
+
     // =========================================================================
     // TLS 1.3 Key Derivation
     // =========================================================================

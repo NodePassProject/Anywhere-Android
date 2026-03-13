@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings
@@ -27,6 +28,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.argsment.anywhere.R
 import com.argsment.anywhere.ui.home.HomeScreen
+import com.argsment.anywhere.ui.proxy.ChainListScreen
 import com.argsment.anywhere.ui.proxy.ProxyListScreen
 import com.argsment.anywhere.ui.settings.SettingsScreen
 import com.argsment.anywhere.viewmodel.VpnViewModel
@@ -35,6 +37,7 @@ import kotlinx.serialization.Serializable
 // Navigation routes
 @Serializable object HomeRoute
 @Serializable object ProxiesRoute
+@Serializable object ChainsRoute
 @Serializable object SettingsRoute
 
 data class TopLevelRoute(
@@ -60,6 +63,12 @@ fun AppNavigation(viewModel: VpnViewModel) {
             route = ProxiesRoute,
             selectedIcon = ImageVector.vectorResource(R.drawable.ic_network_filled),
             unselectedIcon = ImageVector.vectorResource(R.drawable.ic_network_outlined)
+        ),
+        TopLevelRoute(
+            titleResId = R.string.chains,
+            route = ChainsRoute,
+            selectedIcon = Icons.Filled.Link,
+            unselectedIcon = Icons.Filled.Link
         ),
         TopLevelRoute(
             titleResId = R.string.settings,
@@ -113,6 +122,11 @@ fun AppNavigation(viewModel: VpnViewModel) {
             composable<ProxiesRoute> {
                 Box(modifier = Modifier.padding(innerPadding)) {
                     ProxyListScreen(viewModel = viewModel)
+                }
+            }
+            composable<ChainsRoute> {
+                Box(modifier = Modifier.padding(innerPadding)) {
+                    ChainListScreen(viewModel = viewModel)
                 }
             }
             composable<SettingsRoute> {

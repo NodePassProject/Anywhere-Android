@@ -13,7 +13,7 @@ import android.content.pm.ServiceInfo
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.argsment.anywhere.MainActivity
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import kotlinx.serialization.json.Json
 
 /**
@@ -26,7 +26,7 @@ class AnywhereVpnService : VpnService() {
 
     private var lwipStack: LwipStack? = null
     private var tunFd: ParcelFileDescriptor? = null
-    private var currentConfig: VlessConfiguration? = null
+    private var currentConfig: ProxyConfiguration? = null
     private val json = Json { ignoreUnknownKeys = true }
 
     // Binder for activity communication
@@ -61,7 +61,7 @@ class AnywhereVpnService : VpnService() {
                 }
 
                 val config = runCatching {
-                    json.decodeFromString(VlessConfiguration.serializer(), configJson)
+                    json.decodeFromString(ProxyConfiguration.serializer(), configJson)
                 }.getOrNull()
 
                 if (config == null) {
@@ -76,7 +76,7 @@ class AnywhereVpnService : VpnService() {
             ACTION_SWITCH_CONFIG -> {
                 val configJson = intent.getStringExtra(EXTRA_CONFIG) ?: return START_NOT_STICKY
                 val config = runCatching {
-                    json.decodeFromString(VlessConfiguration.serializer(), configJson)
+                    json.decodeFromString(ProxyConfiguration.serializer(), configJson)
                 }.getOrNull() ?: return START_NOT_STICKY
                 currentConfig = config
                 lwipStack?.switchConfiguration(config)
@@ -109,7 +109,7 @@ class AnywhereVpnService : VpnService() {
     // VPN Setup
     // =========================================================================
 
-    private fun startVpn(config: VlessConfiguration) {
+    private fun startVpn(config: ProxyConfiguration) {
         Log.i(TAG, "[VPN] Starting tunnel to ${config.serverAddress}:${config.serverPort} " +
                 "(connect: ${config.connectAddress}), security: ${config.security}, transport: ${config.transport}")
 
@@ -184,7 +184,7 @@ class AnywhereVpnService : VpnService() {
 
         val configs = runCatching {
             val text = configFile.readText()
-            json.decodeFromString<List<VlessConfiguration>>(text)
+            json.decodeFromString<List<ProxyConfiguration>>(text)
         }.getOrNull()
 
         val config = configs?.find { it.id.toString() == configId }
@@ -204,7 +204,7 @@ class AnywhereVpnService : VpnService() {
     // Bypass routes — IP ranges excluded from VPN tunnel (sent directly)
     private data class BypassRoute(val address: String, val prefixLength: Int)
 
-    private fun buildTunInterface(config: VlessConfiguration): ParcelFileDescriptor? {
+    private fun buildTunInterface(config: ProxyConfiguration): ParcelFileDescriptor? {
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
         val ipv6Enabled = prefs.getBoolean("ipv6Enabled", false)
         val remoteAddress = config.connectAddress
@@ -274,7 +274,7 @@ class AnywhereVpnService : VpnService() {
      *
      * Only rebuilds the TUN interface without touching the lwIP stack.
      */
-    private fun reapplyTunnelSettings(config: VlessConfiguration) {
+    private fun reapplyTunnelSettings(config: ProxyConfiguration) {
         val newFd = buildTunInterface(config)
         if (newFd != null) {
             val oldFd = tunFd

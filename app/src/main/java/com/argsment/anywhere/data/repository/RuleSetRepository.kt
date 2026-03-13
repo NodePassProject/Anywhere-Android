@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.argsment.anywhere.data.model.DomainRule
 import com.argsment.anywhere.data.model.DomainRuleType
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,7 +26,8 @@ class RuleSetRepository(private val context: Context) {
     companion object {
         private const val TAG = "RuleSetStore"
         private const val ASSIGNMENTS_KEY = "ruleSetAssignments"
-        private val BUILT_IN = listOf("Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude")
+        private val BUILT_IN = listOf("Direct", "Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock")
+        private val DEFAULT_ASSIGNMENTS = mapOf("Direct" to "DIRECT")
     }
 
     private val prefs: SharedPreferences =
@@ -39,7 +40,7 @@ class RuleSetRepository(private val context: Context) {
     init {
         val assignments = loadAssignments()
         _ruleSets.value = BUILT_IN.map { name ->
-            RuleSet(id = name, name = name, assignedConfigurationId = assignments[name])
+            RuleSet(id = name, name = name, assignedConfigurationId = assignments[name] ?: DEFAULT_ASSIGNMENTS[name])
         }
     }
 
@@ -54,7 +55,7 @@ class RuleSetRepository(private val context: Context) {
         val affected = mutableListOf<String>()
         _ruleSets.value = _ruleSets.value.map { ruleSet ->
             val assignedId = ruleSet.assignedConfigurationId
-            if (assignedId != null && assignedId != "DIRECT" && assignedId !in availableConfigIds) {
+            if (assignedId != null && assignedId != "DIRECT" && assignedId != "REJECT" && assignedId !in availableConfigIds) {
                 affected.add(ruleSet.name)
                 ruleSet.copy(assignedConfigurationId = null)
             } else {
@@ -77,7 +78,7 @@ class RuleSetRepository(private val context: Context) {
     }
 
     fun syncRoutingFile(
-        configurations: List<VlessConfiguration>,
+        configurations: List<ProxyConfiguration>,
         selectedConfigId: String?,
         resolveAddress: (String) -> String?
     ) {
@@ -92,29 +93,43 @@ class RuleSetRepository(private val context: Context) {
             val domainRules = loadRules(ruleSet.name)
             if (domainRules.isEmpty()) continue
 
-            val rulesArray = JSONArray()
+            val domainRulesArray = JSONArray()
+            val ipRulesArray = JSONArray()
             for (rule in domainRules) {
                 val typeStr = when (rule.type) {
                     DomainRuleType.DOMAIN -> "domain"
                     DomainRuleType.DOMAIN_SUFFIX -> "domainSuffix"
                     DomainRuleType.DOMAIN_KEYWORD -> "domainKeyword"
+                    DomainRuleType.IP_CIDR -> "ipCIDR"
+                    DomainRuleType.IP_CIDR6 -> "ipCIDR6"
                 }
-                rulesArray.put(JSONObject().apply {
+                val entry = JSONObject().apply {
                     put("type", typeStr)
                     put("value", rule.value)
-                })
+                }
+                when (rule.type) {
+                    DomainRuleType.IP_CIDR, DomainRuleType.IP_CIDR6 -> ipRulesArray.put(entry)
+                    else -> domainRulesArray.put(entry)
+                }
             }
 
-            val ruleEntry = JSONObject().apply { put("domainRules", rulesArray) }
+            val ruleEntry = JSONObject().apply {
+                put("domainRules", domainRulesArray)
+                if (ipRulesArray.length() > 0) {
+                    put("ipRules", ipRulesArray)
+                }
+            }
 
             if (assignedId == "DIRECT") {
                 ruleEntry.put("action", "direct")
+            } else if (assignedId == "REJECT") {
+                ruleEntry.put("action", "reject")
             } else {
                 val configUuid = runCatching { UUID.fromString(assignedId) }.getOrNull() ?: continue
                 val config = configurations.find { it.id == configUuid } ?: continue
                 ruleEntry.put("action", "proxy")
                 ruleEntry.put("configId", assignedId)
-                val configJson = Json.encodeToString(VlessConfiguration.serializer(), config)
+                val configJson = Json.encodeToString(ProxyConfiguration.serializer(), config)
                 val configObj = JSONObject(configJson)
                 resolveAddress(config.serverAddress)?.let { configObj.put("resolvedIP", it) }
                 configsObj.put(assignedId, configObj)

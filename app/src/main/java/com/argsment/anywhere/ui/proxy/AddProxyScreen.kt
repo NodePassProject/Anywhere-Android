@@ -40,7 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.Subscription
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.network.SubscriptionFetcher
 import kotlinx.coroutines.launch
 import java.net.URL
@@ -55,8 +55,8 @@ private enum class ImportMethod(val titleResId: Int, val iconResId: Int) {
 fun AddProxyScreen(
     onDismiss: () -> Unit,
     onShowManualAdd: () -> Unit,
-    onImport: (VlessConfiguration) -> Unit,
-    onSubscriptionImport: (List<VlessConfiguration>, Subscription) -> Unit
+    onImport: (ProxyConfiguration) -> Unit,
+    onSubscriptionImport: (List<ProxyConfiguration>, Subscription) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -79,7 +79,7 @@ fun AddProxyScreen(
         if (selectedMethod == ImportMethod.LINK && linkURL.isEmpty()) {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
-            if (clip != null && (clip.startsWith("vless://") || clip.startsWith("http://") || clip.startsWith("https://"))) {
+            if (clip != null && (clip.startsWith("vless://") || clip.startsWith("ss://") || clip.startsWith("naive+https://") || clip.startsWith("quic://") || clip.startsWith("http://") || clip.startsWith("https://"))) {
                 linkURL = clip
             }
         }
@@ -150,7 +150,7 @@ fun AddProxyScreen(
                 shape = RoundedCornerShape(24.dp)
             )
             Text(
-                text = stringResource(R.string.supports_vless_link),
+                text = stringResource(R.string.supports_proxy_link),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp, start = 8.dp)
@@ -166,9 +166,9 @@ fun AddProxyScreen(
                     ImportMethod.QR_CODE -> showQrScanner = true
                     ImportMethod.LINK -> {
                         val trimmed = linkURL.trim()
-                        if (trimmed.startsWith("vless://")) {
+                        if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://")) {
                             try {
-                                val config = VlessConfiguration.fromUrl(trimmed)
+                                val config = ProxyConfiguration.fromUrl(trimmed)
                                 onImport(config)
                             } catch (e: Exception) {
                                 linkErrorMessage = e.message ?: context.getString(R.string.invalid_url)
@@ -234,16 +234,16 @@ fun AddProxyScreen(
             onResult = { code ->
                 showQrScanner = false
                 val trimmed = code.trim()
-                if (trimmed.startsWith("vless://")) {
+                if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://")) {
                     try {
-                        val config = VlessConfiguration.fromUrl(trimmed)
+                        val config = ProxyConfiguration.fromUrl(trimmed)
                         onImport(config)
                     } catch (e: Exception) {
                         linkErrorMessage = e.message ?: context.getString(R.string.invalid_qr_code)
                         showLinkError = true
                     }
                 } else {
-                    linkErrorMessage = context.getString(R.string.qr_code_not_vless)
+                    linkErrorMessage = context.getString(R.string.qr_code_not_supported)
                     showLinkError = true
                 }
             },

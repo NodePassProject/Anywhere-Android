@@ -4,7 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.ParcelFileDescriptor
 import android.util.Log
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.InetAddress
@@ -50,7 +50,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     private var tunFd: ParcelFileDescriptor? = null
     private var tunInput: FileInputStream? = null
     private var tunOutput: FileOutputStream? = null
-    var configuration: VlessConfiguration? = null
+    var configuration: ProxyConfiguration? = null
         private set
 
     // Settings (read from SharedPreferences)
@@ -138,7 +138,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
      * @param config      The VLESS proxy configuration
      * @param ipv6        Whether IPv6 is enabled
      */
-    fun start(fd: ParcelFileDescriptor, config: VlessConfiguration, ipv6: Boolean = false) {
+    fun start(fd: ParcelFileDescriptor, config: ProxyConfiguration, ipv6: Boolean = false) {
         Log.i(TAG, "[LwipStack] Starting, ipv6Enabled=$ipv6")
         instance = this
         this.tunFd = fd
@@ -168,6 +168,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             }
 
             domainRouter.loadRoutingConfiguration()
+            domainRouter.loadBypassCountryRules()
             NativeBridge.nativeInit()
             startTimeoutTimer()
             startUdpCleanupTimer()
@@ -207,7 +208,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     }
 
     /** Switches to a new configuration, tearing down all active connections. */
-    fun switchConfiguration(newConfig: VlessConfiguration, ipv6: Boolean? = null) {
+    fun switchConfiguration(newConfig: ProxyConfiguration, ipv6: Boolean? = null) {
         Log.i(TAG, "[LwipStack] Switching configuration")
         lwipExecutor.execute {
             restartStack(newConfig, ipv6 ?: ipv6Enabled)
@@ -263,7 +264,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     }
 
     /** Tears down and restarts the lwIP stack. Must be called on lwipExecutor. */
-    private fun restartStack(config: VlessConfiguration, ipv6: Boolean) {
+    private fun restartStack(config: ProxyConfiguration, ipv6: Boolean) {
         shutdownInternal()
 
         this.configuration = config
@@ -276,6 +277,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
 
         domainRouter.loadRoutingConfiguration()
+        domainRouter.loadBypassCountryRules()
         fakeIpPool.rebuild(domainRouter)
         NativeBridge.nativeInit()
         startTimeoutTimer()
@@ -367,6 +369,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         if (FakeIpPool.isFakeIp(dstIpString)) {
             val entry = fakeIpPool.lookup(dstIpString)
             if (entry != null) {
+                if (entry.isReject) {
+                    Log.d(TAG, "[FakeIP] TCP to ${entry.domain}:$dstPort — REJECT")
+                    return 0L
+                }
                 dstHost = entry.domain
                 forceBypass = entry.isDirect
                 connectionConfig = entry.configuration ?: defaultConfig
@@ -444,6 +450,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         if (FakeIpPool.isFakeIp(dstIpString)) {
             val entry = fakeIpPool.lookup(dstIpString)
             if (entry != null) {
+                if (entry.isReject) {
+                    Log.d(TAG, "[FakeIP] UDP to ${entry.domain}:$dstPort — REJECT")
+                    return
+                }
                 dstHost = entry.domain
                 forceBypass = entry.isDirect
                 flowConfig = entry.configuration ?: defaultConfig
@@ -462,8 +472,29 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
 
         if (udpFlows.size >= MAX_UDP_FLOWS) {
-            Log.e(TAG, "[LwipStack] UDP max flows reached ($MAX_UDP_FLOWS), dropping $flowKey")
-            return
+            // Evict the oldest idle flow instead of dropping the new one.
+            // Prefer evicting DNS flows (port 53) since they're one-shot.
+            var oldestKey: String? = null
+            var oldestTime = Double.MAX_VALUE
+            var oldestDnsKey: String? = null
+            var oldestDnsTime = Double.MAX_VALUE
+            for ((key, flow) in udpFlows) {
+                if (flow.lastActivity < oldestTime) {
+                    oldestTime = flow.lastActivity
+                    oldestKey = key
+                }
+                if (flow.dstPort == 53 && flow.lastActivity < oldestDnsTime) {
+                    oldestDnsTime = flow.lastActivity
+                    oldestDnsKey = key
+                }
+            }
+            val evictKey = oldestDnsKey ?: oldestKey
+            if (evictKey != null) {
+                udpFlows.remove(evictKey)?.close()
+            } else {
+                Log.e(TAG, "[LwipStack] UDP max flows reached ($MAX_UDP_FLOWS), dropping $flowKey")
+                return
+            }
         }
 
         val flow = LwipUdpFlow(
@@ -510,31 +541,38 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         if (!domainRouter.hasRules) return false
 
         // Check routing rules
-        val action = domainRouter.matchDomain(domain) ?: return false
+        val match = domainRouter.matchDomain(domain)
+        val action = match.userAction
+        if (action == null && !match.isBypass) return false
 
         val isDirect: Boolean
-        val routeConfig: VlessConfiguration?
-        when (action) {
-            is RouteAction.Direct -> {
-                isDirect = true
-                routeConfig = null
+        val isReject: Boolean
+        val routeConfig: ProxyConfiguration?
+        if (action is RouteAction.Proxy) {
+            isDirect = false
+            isReject = false
+            val resolved = domainRouter.resolveConfiguration(action)
+            if (resolved == null) {
+                Log.w(TAG, "[FakeIP] Proxy configuration ${action.configId} not found, forwarding DNS normally")
+                return false
             }
-            is RouteAction.Proxy -> {
-                isDirect = false
-                val resolved = domainRouter.resolveConfiguration(action)
-                if (resolved == null) {
-                    Log.w(TAG, "[FakeIP] Proxy configuration ${action.configId} not found, forwarding DNS normally")
-                    return false
-                }
-                // If the routing config matches the default config, use null so the
-                // resolved default config (with connectAddress already set) is used.
-                // The routing.json config has no resolvedIP, which would cause a DNS loop.
-                routeConfig = if (resolved.id == configuration?.id) null else resolved
-            }
+            // If the routing config matches the default config, use null so the
+            // resolved default config (with connectAddress already set) is used.
+            // The routing.json config has no resolvedIP, which would cause a DNS loop.
+            routeConfig = if (resolved.id == configuration?.id) null else resolved
+        } else if (action is RouteAction.Reject) {
+            isDirect = true
+            isReject = true
+            routeConfig = null
+        } else {
+            // Direct or bypass (no user action)
+            isDirect = true
+            isReject = false
+            routeConfig = null
         }
 
         // Allocate offset (same offset for both A and AAAA of the same domain)
-        val (offset, _) = fakeIpPool.allocate(domain, routeConfig, isDirect)
+        val (offset, _) = fakeIpPool.allocate(domain, routeConfig, isDirect, isReject)
 
         // Build fake IP bytes for the response.
         // Only return fake IPv4 for A queries. AAAA queries always get NODATA
@@ -631,14 +669,16 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }, 250, 250, TimeUnit.MILLISECONDS)
     }
 
-    /** Starts the UDP flow cleanup timer (1-second interval, 60-second idle timeout). */
+    /** Starts the UDP flow cleanup timer (1-second interval). */
     private fun startUdpCleanupTimer() {
         udpCleanupTimer = lwipExecutor.scheduleAtFixedRate({
             if (!running) return@scheduleAtFixedRate
             val now = System.nanoTime() / 1_000_000_000.0
             val keysToRemove = mutableListOf<String>()
             for ((key, flow) in udpFlows) {
-                if (now - flow.lastActivity > UDP_IDLE_TIMEOUT_SEC) {
+                // DNS flows (port 53) use a shorter timeout since they're one-shot query/response
+                val timeout = if (flow.dstPort == 53) UDP_DNS_IDLE_TIMEOUT_SEC else UDP_IDLE_TIMEOUT_SEC
+                if (now - flow.lastActivity > timeout) {
                     flow.close()
                     keysToRemove.add(key)
                 }
@@ -661,6 +701,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         private const val MAX_PACKET_POOL_SIZE = 64
         private const val MAX_UDP_FLOWS = 200
         private const val UDP_IDLE_TIMEOUT_SEC = 60.0
+        private const val UDP_DNS_IDLE_TIMEOUT_SEC = 10.0
 
         /** Singleton for callback access. */
         @Volatile

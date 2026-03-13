@@ -1,7 +1,7 @@
 package com.argsment.anywhere.data.network
 
 import android.util.Base64
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
@@ -17,7 +17,7 @@ import javax.net.ssl.X509TrustManager
 object SubscriptionFetcher {
 
     data class Result(
-        val configurations: List<VlessConfiguration>,
+        val configurations: List<ProxyConfiguration>,
         val name: String?,
         val upload: Long?,
         val download: Long?,
@@ -27,7 +27,7 @@ object SubscriptionFetcher {
 
     sealed class FetchError(message: String) : Exception(message) {
         class InvalidUrl : FetchError("Invalid subscription URL.")
-        class NoConfigurations : FetchError("No valid VLESS configurations found in subscription.")
+        class NoConfigurations : FetchError("No valid configurations found in subscription.")
         class NetworkError(message: String) : FetchError("Network error: $message")
     }
 
@@ -77,7 +77,9 @@ object SubscriptionFetcher {
             }.getOrNull()
             val decodedString = decoded?.let { String(it, Charsets.UTF_8) }
 
-            bodyString = if (decodedString != null && decodedString.contains("vless://")) {
+            bodyString = if (decodedString != null && (decodedString.contains("vless://") ||
+                        decodedString.contains("ss://") || decodedString.contains("naive+https://") ||
+                        decodedString.contains("quic://"))) {
                 decodedString
             } else {
                 String(data, Charsets.UTF_8)
@@ -97,12 +99,12 @@ object SubscriptionFetcher {
                 )
             }
 
-            // Parse VLESS lines
+            // Parse proxy URL lines
             val configurations = bodyString
                 .lines()
                 .map { it.trim() }
-                .filter { it.startsWith("vless://") }
-                .mapNotNull { runCatching { VlessConfiguration.fromUrl(it) }.getOrNull() }
+                .filter { it.startsWith("vless://") || it.startsWith("ss://") || it.startsWith("naive+https://") || it.startsWith("quic://") }
+                .mapNotNull { runCatching { ProxyConfiguration.fromUrl(it) }.getOrNull() }
 
             if (configurations.isEmpty()) throw FetchError.NoConfigurations()
 

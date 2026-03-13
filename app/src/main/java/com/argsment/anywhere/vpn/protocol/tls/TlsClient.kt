@@ -3,10 +3,12 @@ package com.argsment.anywhere.vpn.protocol.tls
 import android.util.Log
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.vpn.NativeBridge
+import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.util.NioSocket
 import java.io.IOException
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
+import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import javax.crypto.Cipher
@@ -39,7 +41,16 @@ sealed class TlsError(message: String) : IOException(message) {
  */
 class TlsClient(private val configuration: TlsConfiguration) {
 
-    private var connection: NioSocket? = null
+    companion object {
+        /**
+         * User-trusted certificate SHA-256 fingerprints.
+         * Set by CertificateRepository on app startup; checked when system trust fails.
+         */
+        @Volatile
+        var trustedFingerprints: List<String> = emptyList()
+    }
+
+    private var connection: Transport? = null
 
     // Ephemeral key pair (cleared after handshake)
     private var ephemeralPrivateKey: java.security.PrivateKey? = null
@@ -87,6 +98,21 @@ class TlsClient(private val configuration: TlsConfiguration) {
             throw TlsError.ConnectionFailed(e.message ?: "Unknown error")
         }
 
+        return performTLSHandshake()
+    }
+
+    /**
+     * Performs the TLS 1.3 handshake over an existing transport (for proxy chaining).
+     * The transport is already connected to the server — no TCP connect needed.
+     */
+    suspend fun connect(transport: Transport): TlsRecordConnection {
+        val kpg = KeyPairGenerator.getInstance("X25519")
+        val kp = kpg.generateKeyPair()
+        val encoded = kp.public.encoded
+        ephemeralPublicKeyBytes = encoded.copyOfRange(encoded.size - 32, encoded.size)
+        ephemeralPrivateKey = kp.private
+
+        connection = transport
         return performTLSHandshake()
     }
 
@@ -525,10 +551,11 @@ class TlsClient(private val configuration: TlsConfiguration) {
     /**
      * Validates the server certificate.
      *
-     * Checks the leaf certificate validity period. Chain trust validation is
-     * best-effort (logged, not fatal) because Android's trust store may differ
-     * from iOS's, and the CertificateVerify signature already proves the server
-     * holds the private key for the leaf certificate.
+     * First tries standard system trust evaluation. If that fails, checks
+     * whether the leaf certificate's SHA-256 fingerprint is in the user's
+     * trusted certificate list. Chain trust validation is best-effort
+     * (logged, not fatal) because the CertificateVerify signature already
+     * proves the server holds the private key for the leaf certificate.
      */
     private fun validateCertificate() {
         if (serverCertificates.isEmpty()) {
@@ -560,7 +587,23 @@ class TlsClient(private val configuration: TlsConfiguration) {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Chain trust validation failed (non-fatal): ${e.message}")
+            // System trust failed — check user-trusted certificate fingerprints
+            if (!isUserTrusted(leafCert)) {
+                Log.w(TAG, "Certificate not in user trust store either")
+            }
         }
+    }
+
+    /**
+     * Checks whether the certificate's SHA-256 fingerprint is in the user's trusted list.
+     */
+    private fun isUserTrusted(certificate: X509Certificate): Boolean {
+        val trusted = trustedFingerprints
+        if (trusted.isEmpty()) return false
+        val sha256 = MessageDigest.getInstance("SHA-256")
+            .digest(certificate.encoded)
+            .joinToString("") { "%02x".format(it) }
+        return trusted.contains(sha256)
     }
 
     // -- CertificateVerify --

@@ -2,6 +2,7 @@ package com.argsment.anywhere.vpn.util
 
 import android.util.Log
 import com.argsment.anywhere.vpn.SocketProtector
+import com.argsment.anywhere.vpn.protocol.Transport
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
@@ -46,7 +47,7 @@ sealed class NioSocketError(message: String) : IOException(message) {
  *
  * CRITICAL: Must call [SocketProtector.protect] before connect to prevent VPN routing loop.
  */
-class NioSocket {
+class NioSocket : Transport {
 
     enum class State {
         SETUP, READY, FAILED, CANCELLED
@@ -158,17 +159,19 @@ class NioSocket {
             host
         }
 
-        // DNS resolution
-        val addresses: Array<InetAddress> = try {
-            InetAddress.getAllByName(bare)
-        } catch (e: Exception) {
+        // DNS resolution (via cache to avoid redundant lookups)
+        val ipStrings = DnsCache.resolveAll(bare)
+        if (ipStrings.isEmpty()) {
             state = State.FAILED
-            throw NioSocketError.ResolutionFailed(e.message ?: "Unknown error")
+            throw NioSocketError.ResolutionFailed("No addresses returned for $bare")
         }
 
+        val addresses = ipStrings.mapNotNull { ip ->
+            try { InetAddress.getByName(ip) } catch (_: Exception) { null }
+        }
         if (addresses.isEmpty()) {
             state = State.FAILED
-            throw NioSocketError.ResolutionFailed("No addresses returned")
+            throw NioSocketError.ResolutionFailed("No usable addresses for $bare")
         }
 
         // Prefer IPv4 addresses to avoid long timeouts when IPv6 is unreachable.
@@ -284,7 +287,7 @@ class NioSocket {
      * Receives up to 64KB of data from the socket.
      * Returns null on EOF (remote closed).
      */
-    suspend fun receive(): ByteArray? {
+    override suspend fun receive(): ByteArray? {
         val ch = channel ?: throw NioSocketError.NotConnected()
         if (!ch.isOpen) throw NioSocketError.NotConnected()
 
@@ -373,30 +376,47 @@ class NioSocket {
     /**
      * Sends data through the socket with completion tracking.
      */
-    suspend fun send(data: ByteArray) {
+    override suspend fun send(data: ByteArray) {
         val ch = channel ?: throw NioSocketError.NotConnected()
         if (!ch.isOpen) throw NioSocketError.NotConnected()
 
-        // Try immediate write first
-        val buffer = ByteBuffer.wrap(data)
-        try {
-            val written = ch.write(buffer)
-            if (written >= data.size) return // All written immediately
-        } catch (e: IOException) {
-            throw NioSocketError.SendFailed(e.message ?: "Write failed")
-        }
+        // Only attempt immediate write if no pending sends are queued.
+        // Otherwise we must queue behind them to preserve byte stream ordering.
+        // A previous partial write leaves its remainder in pendingSends; writing
+        // directly here would interleave data on the wire and corrupt the stream.
+        if (pendingSends.isEmpty()) {
+            val buffer = ByteBuffer.wrap(data)
+            try {
+                val written = ch.write(buffer)
+                if (written >= data.size) return // All written immediately
+            } catch (e: IOException) {
+                throw NioSocketError.SendFailed(e.message ?: "Write failed")
+            }
 
-        // Partial write or EAGAIN, queue the remaining
-        val offset = buffer.position()
-        suspendCoroutine { cont: Continuation<Unit> ->
-            pendingSends.add(PendingSend(data, offset, cont))
-            // Add OP_WRITE interest so selector drains the queue
-            runOnSelector {
-                val key = selectionKey
-                if (key != null && key.isValid) {
-                    try {
-                        key.interestOps(key.interestOps() or SelectionKey.OP_WRITE)
-                    } catch (_: CancelledKeyException) {}
+            // Partial write, queue the remaining
+            val offset = buffer.position()
+            suspendCoroutine { cont: Continuation<Unit> ->
+                pendingSends.add(PendingSend(data, offset, cont))
+                runOnSelector {
+                    val key = selectionKey
+                    if (key != null && key.isValid) {
+                        try {
+                            key.interestOps(key.interestOps() or SelectionKey.OP_WRITE)
+                        } catch (_: CancelledKeyException) {}
+                    }
+                }
+            }
+        } else {
+            // Queue behind existing pending sends to preserve ordering
+            suspendCoroutine { cont: Continuation<Unit> ->
+                pendingSends.add(PendingSend(data, 0, cont))
+                runOnSelector {
+                    val key = selectionKey
+                    if (key != null && key.isValid) {
+                        try {
+                            key.interestOps(key.interestOps() or SelectionKey.OP_WRITE)
+                        } catch (_: CancelledKeyException) {}
+                    }
                 }
             }
         }
@@ -405,7 +425,7 @@ class NioSocket {
     /**
      * Sends data without waiting for completion.
      */
-    fun sendAsync(data: ByteArray) {
+    override fun sendAsync(data: ByteArray) {
         val ch = channel ?: return
         if (!ch.isOpen) return
 
@@ -473,7 +493,7 @@ class NioSocket {
     /**
      * Closes the socket and cancels all pending operations.
      */
-    fun forceCancel() {
+    override fun forceCancel() {
         running = false
         state = State.CANCELLED
 

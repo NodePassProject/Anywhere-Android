@@ -1,7 +1,8 @@
 package com.argsment.anywhere.vpn.protocol.vless
 
 import android.util.Log
-import com.argsment.anywhere.data.model.VlessError
+import com.argsment.anywhere.data.model.ProxyError
+import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
 import com.argsment.anywhere.vpn.protocol.websocket.WebSocketConnection
@@ -140,10 +141,10 @@ abstract class VlessConnection : VlessConnectionProtocol {
 /**
  * VLESS connection over a direct NioSocket transport.
  */
-open class VlessDirectConnection(val connection: NioSocket) : VlessConnection() {
+open class VlessDirectConnection(val connection: Transport) : VlessConnection() {
 
     override val isConnected: Boolean
-        get() = connection.state == NioSocket.State.READY
+        get() = (connection as? NioSocket)?.state == NioSocket.State.READY || connection !is NioSocket
 
     override suspend fun sendRaw(data: ByteArray) {
         connection.send(data)
@@ -171,7 +172,7 @@ open class VlessDirectConnection(val connection: NioSocket) : VlessConnection() 
 /**
  * VLESS UDP connection over a direct NioSocket with length-prefixed packets.
  */
-class VlessDirectUdpConnection(connection: NioSocket) : VlessDirectConnection(connection) {
+class VlessDirectUdpConnection(connection: Transport) : VlessDirectConnection(connection) {
 
     private val udpState = UdpBufferState()
     private val udpLock = Any()
@@ -353,7 +354,8 @@ open class VlessTlsConnection(
     override val outerTlsVersion: TlsVersion? get() = TlsVersion.TLS13
 
     override val isConnected: Boolean
-        get() = tlsConnection.connection?.state == NioSocket.State.READY
+        get() = (tlsConnection.connection as? NioSocket)?.state == NioSocket.State.READY
+            || tlsConnection.connection !is NioSocket
 
     override suspend fun sendRaw(data: ByteArray) = tlsConnection.send(data)
     override fun sendRawAsync(data: ByteArray) = tlsConnection.sendAsync(data)
@@ -500,7 +502,8 @@ open class VlessRealityConnection(
     override val outerTlsVersion: TlsVersion? get() = TlsVersion.TLS13
 
     override val isConnected: Boolean
-        get() = realityConnection.connection?.state == NioSocket.State.READY
+        get() = (realityConnection.connection as? NioSocket)?.state == NioSocket.State.READY
+            || realityConnection.connection !is NioSocket
 
     override suspend fun sendRaw(data: ByteArray) = realityConnection.send(data)
     override fun sendRawAsync(data: ByteArray) = realityConnection.sendAsync(data)

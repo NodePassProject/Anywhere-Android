@@ -64,7 +64,22 @@
     <string name="test_all">Test All</string>
     <string name="test_latency">Test Latency</string>
     <string name="timeout">timeout</string>
+    <string name="insecure">insecure</string>
+    <string name="reject">REJECT</string>
     <string name="trademarks">Trademarks</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">Country Bypass</string>
+    <string name="country_bypass_description">Route traffic to your home country directly, bypassing the proxy for faster local access.</string>
+    <string name="ad_blocking_title">AD Blocking</string>
+    <string name="ad_blocking_description">Block ads and trackers at the network level for a cleaner browsing experience.</string>
+    <string name="enable_ad_blocking">Enable AD Blocking</string>
+    <string name="get_started">Get Started</string>
+    <string name="next">Next</string>
+    <string name="back">Back</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">Not yet supported</string>
     <string name="transport">Transport</string>
     <string name="unknown">Unknown</string>
     <string name="update">Update</string>
@@ -76,11 +91,73 @@
     <string name="invalid_url">Invalid URL</string>
     <string name="invalid_qr_code">Invalid QR code</string>
     <string name="qr_code_not_vless">QR code does not contain a VLESS link</string>
+    <string name="qr_code_not_supported">QR code does not contain a supported proxy link</string>
     <string name="unknown_error">Unknown error</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">Encrypted DNS</string>
+    <string name="dns_protocol">Protocol</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">DNS Server</string>
+    <string name="dns_server_footer">Leave empty to automatically discover and upgrade to encrypted DNS servers.</string>
+    <string name="encrypted_dns_warning">Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working.</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">IPv6 Connections</string>
+    <string name="ipv6_dns_lookup">IPv6 DNS Lookup</string>
+    <string name="ipv6_connections_footer">Route IPv6 connections through the tunnel.</string>
+    <string name="ipv6_dns_footer">Respond to AAAA DNS queries with IPv6 addresses.</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">Trusted Certificates</string>
+    <string name="no_trusted_certificates">No trusted certificates</string>
+    <string name="add_certificate">Add Certificate</string>
+    <string name="sha256_fingerprint">SHA-256 Fingerprint</string>
+    <string name="sha256_fingerprint_prompt">Enter the SHA-256 fingerprint (64 hex characters) of the certificate to trust.</string>
+    <string name="invalid_fingerprint">Invalid Fingerprint</string>
+    <string name="invalid_fingerprint_message">Invalid fingerprint. Must be a 64-character hex string, or it already exists.</string>
+    <string name="copy">Copy</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.</string>
+    <string name="allow_anyway">Allow Anyway</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">Protocol</string>
+    <string name="password">Password</string>
+    <string name="username">Username</string>
+    <string name="method">Method</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">Copy Link</string>
+    <string name="supports_proxy_link">Supports VLESS, Shadowsocks, NaiveProxy, QUIC, subscription, and Clash links</string>
 
     <!-- Formatted strings -->
     <string name="latency_ms">%d ms</string>
     <string name="routing_rules_reset">The proxy used by the following routing rules was deleted. They have been reset to Default: %1$s</string>
+
+    <!-- Chains -->
+    <string name="chains">Chains</string>
+    <string name="no_chains">No Chains</string>
+    <string name="tap_to_add_chain">Tap + to create a proxy chain.</string>
+    <string name="new_chain">New Chain</string>
+    <string name="edit_chain">Edit Chain</string>
+    <string name="chain_name">Chain Name</string>
+    <string name="add_proxy_to_chain">Add Proxy</string>
+    <string name="proxies_in_chain">Proxies</string>
+    <string name="chain_min_proxies">Add at least 2 proxies to form a chain.</string>
+    <string name="not_enough_proxies">Not Enough Proxies</string>
+    <string name="not_enough_proxies_message">A proxy chain needs at least 2 proxies.</string>
+    <string name="invalid_chain">Invalid chain — some proxies are missing</string>
+    <string name="select_proxy">Select Proxy</string>
+    <string name="no_proxies_available">No Proxies Available</string>
+    <string name="all_proxies_in_chain">All proxies are already in this chain.</string>
+    <string name="entry">Entry</string>
+    <string name="exit">Exit</string>
+    <string name="route_preview">Route Preview</string>
+    <string name="n_proxies">%d proxies</string>
 
     <!-- Notices -->
     <string name="doh_routing_warning">Enabling DNS over HTTPS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries.</string>

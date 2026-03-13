@@ -1,11 +1,14 @@
 package com.argsment.anywhere.vpn
 
 import android.util.Log
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.OutboundProtocol
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.protocol.direct.DirectUdpRelay
 import com.argsment.anywhere.vpn.protocol.mux.MuxNetwork
 import com.argsment.anywhere.vpn.protocol.mux.MuxSession
-import com.argsment.anywhere.vpn.protocol.vless.VlessClient
+import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
+import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksClient
+import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksUdpRelay
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -29,7 +32,7 @@ class LwipUdpFlow(
     val srcIpBytes: ByteArray,   // original source (becomes dst in response)
     val dstIpBytes: ByteArray,   // original destination (becomes src in response)
     val isIpv6: Boolean,
-    val configuration: VlessConfiguration,
+    val configuration: ProxyConfiguration,
     private val forceBypass: Boolean,
     private val lwipExecutor: ScheduledExecutorService
 ) {
@@ -44,11 +47,13 @@ class LwipUdpFlow(
     private var directRelay: DirectUdpRelay? = null
 
     // Non-mux path
-    private var vlessClient: VlessClient? = null
     private var vlessConnection: VlessConnection? = null
 
     // Mux path
     private var muxSession: MuxSession? = null
+
+    // Shadowsocks UDP relay
+    private var ssUdpRelay: ShadowsocksUdpRelay? = null
 
     private var vlessConnecting = false
     private var pendingData = mutableListOf<ByteArray>()  // always raw payloads
@@ -80,6 +85,12 @@ class LwipUdpFlow(
         // Use sendAsync to check closed synchronously on the lwipExecutor.
         if (muxSession != null) {
             muxSession!!.sendAsync(payload)
+            return
+        }
+
+        // Shadowsocks UDP relay: raw payload, per-packet encryption handled by relay
+        if (ssUdpRelay != null) {
+            ssUdpRelay!!.send(payload)
             return
         }
 
@@ -118,10 +129,16 @@ class LwipUdpFlow(
     // -- Connection Setup --
 
     private fun connectVless() {
-        if (vlessConnecting || vlessConnection != null || muxSession != null || directRelay != null || closed) return
+        if (vlessConnecting || vlessConnection != null || muxSession != null || directRelay != null || ssUdpRelay != null || closed) return
 
         if (forceBypass || LwipStack.instance?.shouldBypass(dstHost) == true) {
             connectDirectUdp()
+            return
+        }
+
+        // Route Shadowsocks to its own UDP relay
+        if (configuration.outboundProtocol == OutboundProtocol.SHADOWSOCKS) {
+            connectShadowsocksUdp()
             return
         }
 
@@ -207,12 +224,9 @@ class LwipUdpFlow(
         if (closed) return
         vlessConnecting = true
 
-        val client = VlessClient(configuration)
-        vlessClient = client
-
         scope.launch {
             try {
-                val connection = client.connectUDP(dstHost, dstPort)
+                val connection = ProxyClientFactory.connectUDP(configuration, dstHost, dstPort)
 
                 lwipExecutor.execute {
                     vlessConnecting = false
@@ -254,6 +268,53 @@ class LwipUdpFlow(
                     if (closed) return@execute
                     Log.e(TAG, "[UDP] connect failed: $flowKey: ${e.message}")
                     releaseProtocol()
+                    LwipStack.instance?.udpFlows?.remove(flowKey)
+                }
+            }
+        }
+    }
+
+    private fun connectShadowsocksUdp() {
+        if (closed) return
+        vlessConnecting = true
+
+        val ssClient = ShadowsocksClient(configuration)
+        val relay = ssClient.createUdpRelay(dstHost, dstPort)
+        ssUdpRelay = relay
+
+        scope.launch {
+            try {
+                relay.connect(configuration.connectAddress, configuration.serverPort.toInt())
+
+                lwipExecutor.execute {
+                    vlessConnecting = false
+                    if (closed) {
+                        relay.cancel()
+                        return@execute
+                    }
+
+                    // Send buffered payloads
+                    for (payload in pendingData) {
+                        relay.send(payload)
+                    }
+                    pendingData.clear()
+                    pendingBufferSize = 0
+
+                    // Start receiving responses
+                    scope.launch {
+                        while (!closed) {
+                            val data = relay.receive() ?: break
+                            handleRemoteData(data)
+                        }
+                    }
+                }
+            } catch (_: CancellationException) {
+            } catch (e: Exception) {
+                lwipExecutor.execute {
+                    vlessConnecting = false
+                    if (closed) return@execute
+                    Log.e(TAG, "[UDP] SS connect failed: $flowKey: ${e.message}")
+                    close()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
             }
@@ -351,19 +412,19 @@ class LwipUdpFlow(
 
         val relay = directRelay
         val connection = vlessConnection
-        val client = vlessClient
         val session = muxSession
+        val ssRelay = ssUdpRelay
         directRelay = null
         vlessConnection = null
-        vlessClient = null
         muxSession = null
+        ssUdpRelay = null
         vlessConnecting = false
         pendingData.clear()
         pendingBufferSize = 0
         relay?.cancel()
         connection?.cancel()
-        client?.cancel()
         session?.close()
+        ssRelay?.cancel()
     }
 
     companion object {

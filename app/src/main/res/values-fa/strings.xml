@@ -59,6 +59,7 @@
     <string name="test_all">آزمایش همه</string>
     <string name="test_latency">آزمایش تأخیر</string>
     <string name="timeout">وقفه</string>
+    <string name="insecure">ناامن</string>
     <string name="trademarks">علائم تجاری</string>
     <string name="transport">انتقال</string>
     <string name="unknown">نامشخص</string>
@@ -80,4 +81,68 @@
     <string name="subscription">اشتراک</string>
     <string name="open_source_libraries">کتابخانه‌های متن‌باز</string>
     <string name="supports_vless_link">از لینک VLESS، لینک اشتراک و لینک Clash پشتیبانی می‌کند</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">DNS رمزگذاری‌شده</string>
+    <string name="dns_protocol">پروتکل</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">سرور DNS</string>
+    <string name="dns_server_footer">خالی بگذارید تا سرورهای DNS رمزگذاری‌شده به‌صورت خودکار شناسایی و ارتقا یابند.</string>
+    <string name="encrypted_dns_warning">فعال‌سازی DNS رمزگذاری‌شده زمان انتظار اتصال را افزایش می‌دهد و مانع عملکرد قوانین مسیریابی می‌شود.</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">اتصالات IPv6</string>
+    <string name="ipv6_dns_lookup">جستجوی DNS از طریق IPv6</string>
+    <string name="ipv6_connections_footer">اتصالات IPv6 را از طریق تونل هدایت کنید.</string>
+    <string name="ipv6_dns_footer">به درخواست‌های AAAA DNS با آدرس‌های IPv6 پاسخ دهید.</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">گواهینامه‌های مورد اعتماد</string>
+    <string name="no_trusted_certificates">گواهینامه مورد اعتمادی وجود ندارد</string>
+    <string name="add_certificate">افزودن گواهینامه</string>
+    <string name="sha256_fingerprint">اثر انگشت SHA-256</string>
+    <string name="sha256_fingerprint_prompt">اثر انگشت SHA-256 (۶۴ کاراکتر هگزادسیمال) گواهینامه مورد اعتماد را وارد کنید.</string>
+    <string name="invalid_fingerprint">اثر انگشت نامعتبر</string>
+    <string name="invalid_fingerprint_message">اثر انگشت نامعتبر است. باید یک رشته هگزادسیمال ۶۴ کاراکتری باشد، یا قبلاً وجود دارد.</string>
+    <string name="copy">کپی</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">این کار اعتبارسنجی گواهینامه TLS را نادیده می‌گیرد و اتصالات شما را در برابر حملات MITM آسیب‌پذیر می‌کند.</string>
+    <string name="allow_anyway">به هر حال اجازه بده</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">پروتکل</string>
+    <string name="password">رمز عبور</string>
+    <string name="username">نام کاربری</string>
+    <string name="method">روش</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">کپی لینک</string>
+    <string name="supports_proxy_link">از لینک‌های VLESS، Shadowsocks، NaiveProxy، اشتراک و Clash پشتیبانی می‌کند</string>
+
+    <!-- Phase 9: QR Code -->
+    <string name="qr_code_not_supported">کد QR حاوی لینک پروکسی پشتیبانی‌شده نیست</string>
+
+    <!-- Chains -->
+    <string name="chains">زنجیره‌ها</string>
+    <string name="no_chains">زنجیره‌ای وجود ندارد</string>
+    <string name="tap_to_add_chain">برای ایجاد زنجیره پروکسی روی + بزنید.</string>
+    <string name="new_chain">زنجیره جدید</string>
+    <string name="edit_chain">ویرایش زنجیره</string>
+    <string name="chain_name">نام زنجیره</string>
+    <string name="add_proxy_to_chain">افزودن پروکسی</string>
+    <string name="proxies_in_chain">پروکسی‌ها</string>
+    <string name="chain_min_proxies">حداقل ۲ پروکسی برای تشکیل زنجیره اضافه کنید.</string>
+    <string name="not_enough_proxies">پروکسی‌ها کافی نیست</string>
+    <string name="not_enough_proxies_message">زنجیره پروکسی حداقل به ۲ پروکسی نیاز دارد.</string>
+    <string name="invalid_chain">زنجیره نامعتبر — برخی پروکسی‌ها موجود نیستند</string>
+    <string name="select_proxy">انتخاب پروکسی</string>
+    <string name="no_proxies_available">پروکسی‌ای در دسترس نیست</string>
+    <string name="all_proxies_in_chain">تمام پروکسی‌ها از قبل در این زنجیره هستند.</string>
+    <string name="entry">ورودی</string>
+    <string name="exit">خروجی</string>
+    <string name="route_preview">پیش‌نمایش مسیر</string>
+    <string name="n_proxies">%d پروکسی</string>
 </resources>

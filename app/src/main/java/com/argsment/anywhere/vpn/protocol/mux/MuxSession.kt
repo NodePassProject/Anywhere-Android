@@ -1,7 +1,7 @@
 package com.argsment.anywhere.vpn.protocol.mux
 
 import android.util.Log
-import com.argsment.anywhere.data.model.VlessError
+import com.argsment.anywhere.data.model.ProxyError
 
 private const val TAG = "MuxSession"
 
@@ -30,7 +30,7 @@ class MuxSession(
      * Sends data through the mux connection as a Keep frame with payload.
      */
     suspend fun send(data: ByteArray) {
-        if (closed) throw VlessError.ConnectionFailed("Mux session closed")
+        if (closed) throw ProxyError.ConnectionFailed("Mux session closed")
 
         val frame = encodeKeepFrame(data)
         client.writeFrame(frame)

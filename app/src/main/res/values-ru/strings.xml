@@ -59,6 +59,7 @@
     <string name="test_all">Проверить все</string>
     <string name="test_latency">Проверить задержку</string>
     <string name="timeout">таймаут</string>
+    <string name="insecure">небезопасно</string>
     <string name="trademarks">Товарные знаки</string>
     <string name="transport">Транспорт</string>
     <string name="unknown">Неизвестно</string>
@@ -80,4 +81,68 @@
     <string name="subscription">Подписка</string>
     <string name="open_source_libraries">Библиотеки с открытым кодом</string>
     <string name="supports_vless_link">Поддержка VLESS-ссылки, ссылки подписки и Clash-ссылки</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">Зашифрованный DNS</string>
+    <string name="dns_protocol">Протокол</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">DNS-сервер</string>
+    <string name="dns_server_footer">Оставьте пустым для автоматического обнаружения и перехода на зашифрованные DNS-серверы.</string>
+    <string name="encrypted_dns_warning">Включение зашифрованного DNS увеличит время ожидания подключения и помешает работе правил маршрутизации.</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">Подключения IPv6</string>
+    <string name="ipv6_dns_lookup">DNS-запросы IPv6</string>
+    <string name="ipv6_connections_footer">Направлять IPv6-подключения через туннель.</string>
+    <string name="ipv6_dns_footer">Отвечать на DNS-запросы AAAA адресами IPv6.</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">Доверенные сертификаты</string>
+    <string name="no_trusted_certificates">Нет доверенных сертификатов</string>
+    <string name="add_certificate">Добавить сертификат</string>
+    <string name="sha256_fingerprint">Отпечаток SHA-256</string>
+    <string name="sha256_fingerprint_prompt">Введите отпечаток SHA-256 (64 шестнадцатеричных символа) сертификата для добавления в доверенные.</string>
+    <string name="invalid_fingerprint">Недопустимый отпечаток</string>
+    <string name="invalid_fingerprint_message">Недопустимый отпечаток. Должен быть шестнадцатеричной строкой из 64 символов или он уже существует.</string>
+    <string name="copy">Копировать</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">Это пропустит проверку сертификата TLS, что сделает ваши подключения уязвимыми для атак MITM.</string>
+    <string name="allow_anyway">Разрешить в любом случае</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">Протокол</string>
+    <string name="password">Пароль</string>
+    <string name="username">Имя пользователя</string>
+    <string name="method">Метод</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">Копировать ссылку</string>
+    <string name="supports_proxy_link">Поддержка ссылок VLESS, Shadowsocks, NaiveProxy, подписки и Clash</string>
+
+    <!-- Phase 9: QR Code -->
+    <string name="qr_code_not_supported">QR-код не содержит поддерживаемую ссылку на прокси</string>
+
+    <!-- Chains -->
+    <string name="chains">Цепочки</string>
+    <string name="no_chains">Нет цепочек</string>
+    <string name="tap_to_add_chain">Нажмите +, чтобы создать цепочку прокси.</string>
+    <string name="new_chain">Новая цепочка</string>
+    <string name="edit_chain">Изменить цепочку</string>
+    <string name="chain_name">Название цепочки</string>
+    <string name="add_proxy_to_chain">Добавить прокси</string>
+    <string name="proxies_in_chain">Прокси</string>
+    <string name="chain_min_proxies">Добавьте минимум 2 прокси для создания цепочки.</string>
+    <string name="not_enough_proxies">Недостаточно прокси</string>
+    <string name="not_enough_proxies_message">Для цепочки необходимо минимум 2 прокси.</string>
+    <string name="invalid_chain">Недопустимая цепочка — некоторые прокси отсутствуют</string>
+    <string name="select_proxy">Выбрать прокси</string>
+    <string name="no_proxies_available">Нет доступных прокси</string>
+    <string name="all_proxies_in_chain">Все прокси уже в этой цепочке.</string>
+    <string name="entry">Вход</string>
+    <string name="exit">Выход</string>
+    <string name="route_preview">Предпросмотр маршрута</string>
+    <string name="n_proxies">%d прокси</string>
 </resources>

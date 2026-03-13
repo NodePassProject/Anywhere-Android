@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.mux
 
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import kotlin.coroutines.CoroutineContext
 
 /**
@@ -8,7 +8,7 @@ import kotlin.coroutines.CoroutineContext
  * Dispatches sessions to non-full clients, creates new clients as needed.
  */
 class MuxManager(
-    val configuration: VlessConfiguration,
+    val configuration: ProxyConfiguration,
     private val coroutineContext: CoroutineContext
 ) {
     private val clients = mutableListOf<MuxClient>()

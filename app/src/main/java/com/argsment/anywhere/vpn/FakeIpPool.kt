@@ -1,7 +1,7 @@
 package com.argsment.anywhere.vpn
 
 import android.util.Log
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 
 /**
  * Manages a pool of synthetic ("fake") IP addresses mapped to domain names.
@@ -19,8 +19,9 @@ class FakeIpPool {
 
     data class Entry(
         val domain: String,
-        val configuration: VlessConfiguration?,  // null = DIRECT bypass
-        val isDirect: Boolean
+        val configuration: ProxyConfiguration?,  // null = DIRECT bypass
+        val isDirect: Boolean,
+        val isReject: Boolean = false
     )
 
     // IPv4: 198.18.0.0/15 → offsets 1..131071
@@ -45,8 +46,8 @@ class FakeIpPool {
      * Allocate (or reuse) an offset for the given domain.
      * Use [ipv4Bytes] or [ipv6Bytes] to get the actual address bytes.
      */
-    fun allocate(domain: String, configuration: VlessConfiguration?, isDirect: Boolean): Pair<Int, Entry> {
-        val entry = Entry(domain, configuration, isDirect)
+    fun allocate(domain: String, configuration: ProxyConfiguration?, isDirect: Boolean, isReject: Boolean = false): Pair<Int, Entry> {
+        val entry = Entry(domain, configuration, isDirect, isReject)
 
         // Already allocated? Touch LRU and update entry (configuration may have changed)
         domainToOffset[domain]?.let { offset ->
@@ -101,30 +102,36 @@ class FakeIpPool {
         val domainsToRemove = mutableListOf<String>()
 
         for ((domain, offset) in domainToOffset) {
-            val action = router.matchDomain(domain)
-            if (action == null) {
+            val match = router.matchDomain(domain)
+            val action = match.userAction
+            if (action == null && !match.isBypass) {
                 domainsToRemove.add(domain)
                 continue
             }
 
             val isDirect: Boolean
-            val configuration: VlessConfiguration?
-            when (action) {
-                is RouteAction.Direct -> {
-                    isDirect = true
-                    configuration = null
+            val isReject: Boolean
+            val configuration: ProxyConfiguration?
+            if (action is RouteAction.Proxy) {
+                isDirect = false
+                isReject = false
+                configuration = router.resolveConfiguration(action)
+                if (configuration == null) {
+                    domainsToRemove.add(domain)
+                    continue
                 }
-                is RouteAction.Proxy -> {
-                    isDirect = false
-                    configuration = router.resolveConfiguration(action)
-                    if (configuration == null) {
-                        domainsToRemove.add(domain)
-                        continue
-                    }
-                }
+            } else if (action is RouteAction.Reject) {
+                isDirect = true
+                isReject = true
+                configuration = null
+            } else {
+                // Direct or bypass (no user action)
+                isDirect = true
+                isReject = false
+                configuration = null
             }
 
-            offsetToEntry[offset] = Entry(domain, configuration, isDirect)
+            offsetToEntry[offset] = Entry(domain, configuration, isDirect, isReject)
         }
 
         for (domain in domainsToRemove) {

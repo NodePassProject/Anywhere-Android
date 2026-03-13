@@ -1,8 +1,8 @@
 package com.argsment.anywhere.vpn.protocol.mux
 
 import android.util.Log
-import com.argsment.anywhere.data.model.VlessConfiguration
-import com.argsment.anywhere.data.model.VlessError
+import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.protocol.vless.VlessClient
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import kotlinx.coroutines.CoroutineScope
@@ -21,7 +21,7 @@ private const val TAG = "MuxClient"
  * XUDP support.
  */
 class MuxClient(
-    val configuration: VlessConfiguration,
+    val configuration: ProxyConfiguration,
     private val coroutineContext: CoroutineContext
 ) {
     private val scope = CoroutineScope(coroutineContext)
@@ -73,7 +73,7 @@ class MuxClient(
         port: Int,
         globalID: ByteArray?
     ): MuxSession {
-        if (closed) throw VlessError.ConnectionFailed("Mux client closed")
+        if (closed) throw ProxyError.ConnectionFailed("Mux client closed")
 
         val sessionID: Int
         if (globalID != null) {
@@ -165,7 +165,7 @@ class MuxClient(
         pendingConnections.clear()
         connecting = false
         for (deferred in pending) {
-            deferred.completeExceptionally(VlessError.ConnectionFailed("Mux client closed"))
+            deferred.completeExceptionally(ProxyError.ConnectionFailed("Mux client closed"))
         }
     }
 
@@ -175,7 +175,7 @@ class MuxClient(
 
     private suspend fun connectMux() {
         if (connected) return
-        if (closed) throw VlessError.ConnectionFailed("Mux client closed")
+        if (closed) throw ProxyError.ConnectionFailed("Mux client closed")
 
         // If already connecting, wait for the result
         if (connecting) {
@@ -222,12 +222,12 @@ class MuxClient(
      * Writes a frame with serialization (suspend, waits for completion).
      */
     suspend fun writeFrame(data: ByteArray) {
-        if (closed) throw VlessError.ConnectionFailed("Mux client closed")
+        if (closed) throw ProxyError.ConnectionFailed("Mux client closed")
 
         writeMutex.withLock {
             try {
                 val connection = vlessConnection
-                    ?: throw VlessError.ConnectionFailed("Mux client not connected")
+                    ?: throw ProxyError.ConnectionFailed("Mux client not connected")
                 connection.sendRaw(data)
             } catch (e: Exception) {
                 Log.e(TAG, "Mux write error: ${e.message}")

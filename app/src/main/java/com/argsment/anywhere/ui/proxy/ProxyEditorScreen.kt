@@ -36,13 +36,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
+import com.argsment.anywhere.data.model.NaiveProtocol
+import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.data.model.TlsFingerprint
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.WebSocketConfiguration
 import com.argsment.anywhere.data.model.XHttpConfiguration
 import com.argsment.anywhere.data.model.XHttpMode
@@ -55,10 +58,11 @@ import java.util.UUID
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProxyEditorScreen(
-    configuration: VlessConfiguration?,
-    onSave: (VlessConfiguration) -> Unit,
+    configuration: ProxyConfiguration?,
+    onSave: (ProxyConfiguration) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var selectedProtocol by remember { mutableStateOf(OutboundProtocol.VLESS) }
     var name by remember { mutableStateOf("") }
     var serverAddress by remember { mutableStateOf("") }
     var serverPort by remember { mutableStateOf("") }
@@ -88,17 +92,32 @@ fun ProxyEditorScreen(
     var shortId by remember { mutableStateOf("") }
     var fingerprint by remember { mutableStateOf(TlsFingerprint.CHROME_120) }
 
+    // Shadowsocks fields
+    var ssPassword by remember { mutableStateOf("") }
+    var ssMethod by remember { mutableStateOf("aes-128-gcm") }
+
+    // Naive fields
+    var naiveUsername by remember { mutableStateOf("") }
+    var naivePassword by remember { mutableStateOf("") }
+
+    val isShadowsocks = selectedProtocol == OutboundProtocol.SHADOWSOCKS
+    val isNaive = selectedProtocol.isNaive
     val isReality = security == "reality"
     val isTLS = security == "tls"
 
     val isValid = name.isNotEmpty() &&
             serverAddress.isNotEmpty() &&
             serverPort.toUShortOrNull() != null &&
-            runCatching { UUID.fromString(uuid) }.isSuccess &&
-            (!isReality || (sni.isNotEmpty() && publicKey.isNotEmpty()))
+            when {
+                isNaive -> naiveUsername.isNotEmpty() && naivePassword.isNotEmpty()
+                isShadowsocks -> ssPassword.isNotEmpty()
+                else -> runCatching { UUID.fromString(uuid) }.isSuccess &&
+                        (!isReality || (sni.isNotEmpty() && publicKey.isNotEmpty()))
+            }
 
     LaunchedEffect(configuration) {
         configuration?.let { config ->
+            selectedProtocol = config.outboundProtocol
             name = config.name
             serverAddress = config.serverAddress
             serverPort = config.serverPort.toString()
@@ -126,6 +145,10 @@ fun ProxyEditorScreen(
                 shortId = it.shortId.toHex()
                 fingerprint = it.fingerprint
             }
+            ssPassword = config.ssPassword ?: ""
+            ssMethod = config.ssMethod ?: "aes-128-gcm"
+            naiveUsername = config.naiveUsername ?: ""
+            naivePassword = config.naivePassword ?: ""
         }
     }
 
@@ -146,10 +169,14 @@ fun ProxyEditorScreen(
                 actions = {
                     IconButton(onClick = {
                         val port = serverPort.toUShortOrNull() ?: return@IconButton
-                        val parsedUUID = runCatching { UUID.fromString(uuid) }.getOrNull() ?: return@IconButton
+                        val parsedUUID = if (isShadowsocks || isNaive) {
+                            configuration?.uuid ?: UUID.randomUUID()
+                        } else {
+                            runCatching { UUID.fromString(uuid) }.getOrNull() ?: return@IconButton
+                        }
 
                         var tlsConfiguration: TlsConfiguration? = null
-                        if (isTLS) {
+                        if (isTLS && !isNaive) {
                             val resolvedSNI = tlsSNI.ifEmpty { serverAddress }
                             val alpn = tlsALPN.takeIf { it.isNotEmpty() }?.split(",")
                             tlsConfiguration = TlsConfiguration(
@@ -161,7 +188,7 @@ fun ProxyEditorScreen(
                         }
 
                         var realityConfiguration: RealityConfiguration? = null
-                        if (isReality) {
+                        if (isReality && !isNaive && !isShadowsocks) {
                             val pk = publicKey.base64UrlToByteArrayOrNull() ?: return@IconButton
                             val sid = shortId.hexToByteArrayOrNull() ?: byteArrayOf()
                             realityConfiguration = RealityConfiguration(
@@ -173,7 +200,7 @@ fun ProxyEditorScreen(
                         }
 
                         var xhttpConfiguration: XHttpConfiguration? = null
-                        if (transport == "xhttp") {
+                        if (transport == "xhttp" && !isNaive) {
                             val host = xhttpHost.ifEmpty { serverAddress }
                             val mode = XHttpMode.fromRaw(xhttpMode)
                             xhttpConfiguration = XHttpConfiguration(host = host, path = xhttpPath, mode = mode)
@@ -182,22 +209,35 @@ fun ProxyEditorScreen(
                         val bareAddress = if (serverAddress.startsWith("[") && serverAddress.endsWith("]"))
                             serverAddress.drop(1).dropLast(1) else serverAddress
 
-                        val config = VlessConfiguration(
+                        val naiveProto = when (selectedProtocol) {
+                            OutboundProtocol.NAIVE_HTTP11 -> NaiveProtocol.HTTP11
+                            OutboundProtocol.NAIVE_HTTP2 -> NaiveProtocol.HTTP2
+                            OutboundProtocol.NAIVE_HTTP3 -> NaiveProtocol.HTTP2 // placeholder
+                            else -> null
+                        }
+
+                        val config = ProxyConfiguration(
                             id = configuration?.id ?: UUID.randomUUID(),
                             name = name,
                             serverAddress = bareAddress,
                             serverPort = port,
                             uuid = parsedUUID,
-                            encryption = encryption,
-                            transport = transport,
-                            flow = flow.ifEmpty { null },
-                            security = security,
+                            encryption = if (isShadowsocks || isNaive) "none" else encryption,
+                            transport = if (isNaive) "tcp" else transport,
+                            flow = if (isShadowsocks || isNaive) null else flow.ifEmpty { null },
+                            security = if (isNaive) "none" else security,
                             tls = tlsConfiguration,
                             reality = realityConfiguration,
                             xhttp = xhttpConfiguration,
-                            muxEnabled = muxEnabled,
-                            xudpEnabled = xudpEnabled,
-                            subscriptionId = configuration?.subscriptionId
+                            muxEnabled = if (isShadowsocks || isNaive) false else muxEnabled,
+                            xudpEnabled = if (isShadowsocks || isNaive) false else xudpEnabled,
+                            subscriptionId = configuration?.subscriptionId,
+                            outboundProtocol = selectedProtocol,
+                            ssPassword = if (isShadowsocks) ssPassword else null,
+                            ssMethod = if (isShadowsocks) ssMethod else null,
+                            naiveUsername = if (isNaive) naiveUsername else null,
+                            naivePassword = if (isNaive) naivePassword else null,
+                            naiveProtocol = naiveProto
                         )
                         onSave(config)
                     }, enabled = isValid) {
@@ -224,6 +264,27 @@ fun ProxyEditorScreen(
                 singleLine = true
             )
 
+            // Protocol picker
+            SectionHeader(stringResource(R.string.protocol_label))
+            DropdownField(
+                label = stringResource(R.string.protocol_label),
+                selectedValue = selectedProtocol.name,
+                options = listOf(
+                    OutboundProtocol.VLESS.name to "VLESS",
+                    OutboundProtocol.SHADOWSOCKS.name to "Shadowsocks",
+                    OutboundProtocol.NAIVE_HTTP11.name to "HTTPS (HTTP/1.1)",
+                    OutboundProtocol.NAIVE_HTTP2.name to "HTTP2",
+                    OutboundProtocol.NAIVE_HTTP3.name to "QUIC (${stringResource(R.string.not_yet_supported)})"
+                ),
+                onSelect = { value ->
+                    selectedProtocol = OutboundProtocol.valueOf(value)
+                    if (isShadowsocks || selectedProtocol.isNaive) {
+                        flow = ""
+                        if (security == "reality") security = "none"
+                    }
+                }
+            )
+
             // Server section
             SectionHeader(stringResource(R.string.server))
             OutlinedTextField(
@@ -242,158 +303,213 @@ fun ProxyEditorScreen(
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
             )
-            OutlinedTextField(
-                value = uuid,
-                onValueChange = { uuid = it },
-                label = { Text("UUID") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            DropdownField(
-                label = stringResource(R.string.encryption),
-                selectedValue = encryption,
-                options = listOf("none" to stringResource(R.string.none)),
-                onSelect = { encryption = it }
-            )
 
-            // Transport section
-            SectionHeader(stringResource(R.string.transport))
-            DropdownField(
-                label = stringResource(R.string.transport),
-                selectedValue = transport,
-                options = listOf(
-                    "tcp" to "TCP",
-                    "ws" to "WebSocket",
-                    "httpupgrade" to "HTTPUpgrade",
-                    "xhttp" to "XHTTP"
-                ),
-                onSelect = {
-                    transport = it
-                    if (flow.isNotEmpty() && it != "tcp") flow = ""
-                }
-            )
-
-            if (transport == "xhttp") {
+            // Protocol-specific credential fields
+            if (isNaive) {
                 OutlinedTextField(
-                    value = xhttpHost,
-                    onValueChange = { xhttpHost = it },
-                    label = { Text(stringResource(R.string.host)) },
+                    value = naiveUsername,
+                    onValueChange = { naiveUsername = it },
+                    label = { Text(stringResource(R.string.username)) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
                 OutlinedTextField(
-                    value = xhttpPath,
-                    onValueChange = { xhttpPath = it },
-                    label = { Text(stringResource(R.string.path)) },
+                    value = naivePassword,
+                    onValueChange = { naivePassword = it },
+                    label = { Text(stringResource(R.string.password)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation()
+                )
+            } else if (isShadowsocks) {
+                OutlinedTextField(
+                    value = ssPassword,
+                    onValueChange = { ssPassword = it },
+                    label = { Text(stringResource(R.string.password)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation()
+                )
+                DropdownField(
+                    label = stringResource(R.string.method),
+                    selectedValue = ssMethod,
+                    options = listOf(
+                        "none" to stringResource(R.string.none),
+                        "aes-128-gcm" to "AES-128-GCM",
+                        "aes-256-gcm" to "AES-256-GCM",
+                        "chacha20-ietf-poly1305" to "ChaCha20-Poly1305",
+                        "2022-blake3-aes-128-gcm" to "BLAKE3-AES-128-GCM",
+                        "2022-blake3-aes-256-gcm" to "BLAKE3-AES-256-GCM",
+                        "2022-blake3-chacha20-poly1305" to "BLAKE3-ChaCha20-Poly1305"
+                    ),
+                    onSelect = { ssMethod = it }
+                )
+            } else {
+                // VLESS fields
+                OutlinedTextField(
+                    value = uuid,
+                    onValueChange = { uuid = it },
+                    label = { Text("UUID") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
                 DropdownField(
-                    label = stringResource(R.string.mode),
-                    selectedValue = xhttpMode,
-                    options = listOf(
-                        "auto" to stringResource(R.string.auto),
-                        "packet-up" to "Packet Up",
-                        "stream-one" to "Stream One"
-                    ),
-                    onSelect = { xhttpMode = it }
+                    label = stringResource(R.string.encryption),
+                    selectedValue = encryption,
+                    options = listOf("none" to stringResource(R.string.none)),
+                    onSelect = { encryption = it }
                 )
             }
 
-            if (transport == "tcp") {
+            // Transport section (not for Naive)
+            if (!isNaive) {
+                SectionHeader(stringResource(R.string.transport))
                 DropdownField(
-                    label = stringResource(R.string.flow),
-                    selectedValue = flow,
+                    label = stringResource(R.string.transport),
+                    selectedValue = transport,
                     options = listOf(
-                        "" to stringResource(R.string.none),
-                        "xtls-rprx-vision" to "Vision",
-                        "xtls-rprx-vision-udp443" to "Vision with UDP 443"
+                        "tcp" to "TCP",
+                        "ws" to "WebSocket",
+                        "httpupgrade" to "HTTPUpgrade",
+                        "xhttp" to "XHTTP"
                     ),
-                    onSelect = { flow = it }
-                )
-                SwitchRow(
-                    label = "Mux",
-                    checked = muxEnabled,
-                    onCheckedChange = {
-                        muxEnabled = it
-                        if (!it) xudpEnabled = false
+                    onSelect = {
+                        transport = it
+                        if (flow.isNotEmpty() && it != "tcp") flow = ""
                     }
                 )
-                if (muxEnabled) {
-                    SwitchRow(
-                        label = "XUDP",
-                        checked = xudpEnabled,
-                        onCheckedChange = { xudpEnabled = it }
+
+                if (transport == "xhttp") {
+                    OutlinedTextField(
+                        value = xhttpHost,
+                        onValueChange = { xhttpHost = it },
+                        label = { Text(stringResource(R.string.host)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
                     )
+                    OutlinedTextField(
+                        value = xhttpPath,
+                        onValueChange = { xhttpPath = it },
+                        label = { Text(stringResource(R.string.path)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    DropdownField(
+                        label = stringResource(R.string.mode),
+                        selectedValue = xhttpMode,
+                        options = listOf(
+                            "auto" to stringResource(R.string.auto),
+                            "packet-up" to "Packet Up",
+                            "stream-one" to "Stream One"
+                        ),
+                        onSelect = { xhttpMode = it }
+                    )
+                }
+
+                if (!isShadowsocks && transport == "tcp") {
+                    DropdownField(
+                        label = stringResource(R.string.flow),
+                        selectedValue = flow,
+                        options = listOf(
+                            "" to stringResource(R.string.none),
+                            "xtls-rprx-vision" to "Vision",
+                            "xtls-rprx-vision-udp443" to "Vision with UDP 443"
+                        ),
+                        onSelect = { flow = it }
+                    )
+                    SwitchRow(
+                        label = "Mux",
+                        checked = muxEnabled,
+                        onCheckedChange = {
+                            muxEnabled = it
+                            if (!it) xudpEnabled = false
+                        }
+                    )
+                    if (muxEnabled) {
+                        SwitchRow(
+                            label = "XUDP",
+                            checked = xudpEnabled,
+                            onCheckedChange = { xudpEnabled = it }
+                        )
+                    }
                 }
             }
 
-            // TLS section
-            SectionHeader("TLS")
-            DropdownField(
-                label = stringResource(R.string.security),
-                selectedValue = security,
-                options = listOf(
-                    "none" to stringResource(R.string.none),
-                    "tls" to "TLS",
-                    "reality" to "Reality"
-                ),
-                onSelect = { security = it }
-            )
+            // TLS section (not for Naive)
+            if (!isNaive) {
+                SectionHeader("TLS")
+                DropdownField(
+                    label = stringResource(R.string.security),
+                    selectedValue = security,
+                    options = if (isShadowsocks) {
+                        listOf(
+                            "none" to stringResource(R.string.none),
+                            "tls" to "TLS"
+                        )
+                    } else {
+                        listOf(
+                            "none" to stringResource(R.string.none),
+                            "tls" to "TLS",
+                            "reality" to "Reality"
+                        )
+                    },
+                    onSelect = { security = it }
+                )
 
-            if (isTLS) {
-                OutlinedTextField(
-                    value = tlsSNI,
-                    onValueChange = { tlsSNI = it },
-                    label = { Text("SNI") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = tlsALPN,
-                    onValueChange = { tlsALPN = it },
-                    label = { Text("ALPN") },
-                    placeholder = { Text("h2,http/1.1") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                SwitchRow(
-                    label = stringResource(R.string.allow_insecure),
-                    checked = tlsAllowInsecure,
-                    onCheckedChange = { tlsAllowInsecure = it }
-                )
-                FingerprintDropdown(
-                    selected = fingerprint,
-                    onSelect = { fingerprint = it }
-                )
-            }
+                if (isTLS) {
+                    OutlinedTextField(
+                        value = tlsSNI,
+                        onValueChange = { tlsSNI = it },
+                        label = { Text("SNI") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = tlsALPN,
+                        onValueChange = { tlsALPN = it },
+                        label = { Text("ALPN") },
+                        placeholder = { Text("h2,http/1.1") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    SwitchRow(
+                        label = stringResource(R.string.allow_insecure),
+                        checked = tlsAllowInsecure,
+                        onCheckedChange = { tlsAllowInsecure = it }
+                    )
+                    FingerprintDropdown(
+                        selected = fingerprint,
+                        onSelect = { fingerprint = it }
+                    )
+                }
 
-            if (isReality) {
-                OutlinedTextField(
-                    value = sni,
-                    onValueChange = { sni = it },
-                    label = { Text("SNI") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = publicKey,
-                    onValueChange = { publicKey = it },
-                    label = { Text(stringResource(R.string.public_key)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = shortId,
-                    onValueChange = { shortId = it },
-                    label = { Text("Short ID") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                FingerprintDropdown(
-                    selected = fingerprint,
-                    onSelect = { fingerprint = it }
-                )
+                if (isReality) {
+                    OutlinedTextField(
+                        value = sni,
+                        onValueChange = { sni = it },
+                        label = { Text("SNI") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = publicKey,
+                        onValueChange = { publicKey = it },
+                        label = { Text(stringResource(R.string.public_key)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = shortId,
+                        onValueChange = { shortId = it },
+                        label = { Text("Short ID") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    FingerprintDropdown(
+                        selected = fingerprint,
+                        onSelect = { fingerprint = it }
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(32.dp))

@@ -30,6 +30,7 @@ private val iconResources = mapOf(
 )
 
 private val iconColors = mapOf(
+    "Direct" to Color(0xFF4CAF50),
     "Telegram" to Color(0xFF2AABEE),
     "Netflix" to Color(0xFFE50914),
     "YouTube" to Color(0xFFFF0000),
@@ -37,6 +38,8 @@ private val iconColors = mapOf(
     "TikTok" to Color(0xFF000000),
     "ChatGPT" to Color(0xFF10A37F),
     "Claude" to Color(0xFFD97706),
+    "Gemini" to Color(0xFF4285F4),
+    "ADBlock" to Color(0xFFF44336),
 )
 
 @Composable

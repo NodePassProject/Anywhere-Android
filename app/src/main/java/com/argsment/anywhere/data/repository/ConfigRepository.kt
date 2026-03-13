@@ -1,7 +1,7 @@
 package com.argsment.anywhere.data.repository
 
 import android.content.Context
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,23 +14,23 @@ class ConfigRepository(context: Context) {
     private val json = Json { prettyPrint = true; ignoreUnknownKeys = true }
     private val file = File(context.filesDir, "configurations.json")
 
-    private val _configurations = MutableStateFlow<List<VlessConfiguration>>(emptyList())
-    val configurations: StateFlow<List<VlessConfiguration>> = _configurations.asStateFlow()
+    private val _configurations = MutableStateFlow<List<ProxyConfiguration>>(emptyList())
+    val configurations: StateFlow<List<ProxyConfiguration>> = _configurations.asStateFlow()
 
     init {
         _configurations.value = loadFromDisk()
     }
 
-    fun getAll(): List<VlessConfiguration> = _configurations.value
+    fun getAll(): List<ProxyConfiguration> = _configurations.value
 
-    fun get(id: UUID): VlessConfiguration? = _configurations.value.find { it.id == id }
+    fun get(id: UUID): ProxyConfiguration? = _configurations.value.find { it.id == id }
 
-    fun add(config: VlessConfiguration) {
+    fun add(config: ProxyConfiguration) {
         _configurations.value = _configurations.value + config
         saveToDisk()
     }
 
-    fun update(config: VlessConfiguration) {
+    fun update(config: ProxyConfiguration) {
         _configurations.value = _configurations.value.map {
             if (it.id == config.id) config else it
         }
@@ -47,10 +47,10 @@ class ConfigRepository(context: Context) {
         saveToDisk()
     }
 
-    private fun loadFromDisk(): List<VlessConfiguration> {
+    private fun loadFromDisk(): List<ProxyConfiguration> {
         if (!file.exists()) return emptyList()
         return runCatching {
-            json.decodeFromString<List<VlessConfiguration>>(file.readText())
+            json.decodeFromString<List<ProxyConfiguration>>(file.readText())
         }.getOrElse {
             println("Failed to load configurations: $it")
             emptyList()

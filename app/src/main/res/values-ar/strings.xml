@@ -59,6 +59,7 @@
     <string name="test_all">اختبار الكل</string>
     <string name="test_latency">اختبار زمن الاستجابة</string>
     <string name="timeout">انتهت المهلة</string>
+    <string name="insecure">غير آمن</string>
     <string name="trademarks">العلامات التجارية</string>
     <string name="transport">النقل</string>
     <string name="unknown">غير معروف</string>
@@ -80,4 +81,68 @@
     <string name="subscription">اشتراك</string>
     <string name="open_source_libraries">مكتبات مفتوحة المصدر</string>
     <string name="supports_vless_link">يدعم رابط VLESS ورابط الاشتراك ورابط Clash</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">DNS مشفّر</string>
+    <string name="dns_protocol">البروتوكول</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">خادم DNS</string>
+    <string name="dns_server_footer">اتركه فارغًا لاكتشاف خوادم DNS المشفّرة والترقية إليها تلقائيًا.</string>
+    <string name="encrypted_dns_warning">سيؤدي تفعيل DNS المشفّر إلى زيادة وقت انتظار الاتصال ومنع قواعد التوجيه من العمل.</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">اتصالات IPv6</string>
+    <string name="ipv6_dns_lookup">بحث DNS عبر IPv6</string>
+    <string name="ipv6_connections_footer">توجيه اتصالات IPv6 عبر النفق.</string>
+    <string name="ipv6_dns_footer">الاستجابة لاستعلامات AAAA DNS بعناوين IPv6.</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">الشهادات الموثوقة</string>
+    <string name="no_trusted_certificates">لا توجد شهادات موثوقة</string>
+    <string name="add_certificate">إضافة شهادة</string>
+    <string name="sha256_fingerprint">بصمة SHA-256</string>
+    <string name="sha256_fingerprint_prompt">أدخل بصمة SHA-256 (64 حرف سداسي عشري) للشهادة المراد الوثوق بها.</string>
+    <string name="invalid_fingerprint">بصمة غير صالحة</string>
+    <string name="invalid_fingerprint_message">بصمة غير صالحة. يجب أن تكون سلسلة سداسية عشرية مكونة من 64 حرفًا، أو أنها موجودة بالفعل.</string>
+    <string name="copy">نسخ</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">سيؤدي هذا إلى تخطّي التحقق من شهادة TLS، مما يجعل اتصالاتك عرضة لهجمات MITM.</string>
+    <string name="allow_anyway">السماح على أي حال</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">البروتوكول</string>
+    <string name="password">كلمة المرور</string>
+    <string name="username">اسم المستخدم</string>
+    <string name="method">الطريقة</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">نسخ الرابط</string>
+    <string name="supports_proxy_link">يدعم روابط VLESS وShadowsocks وNaiveProxy والاشتراك وClash</string>
+
+    <!-- Phase 9: QR Code -->
+    <string name="qr_code_not_supported">رمز QR لا يحتوي على رابط بروكسي مدعوم</string>
+
+    <!-- Chains -->
+    <string name="chains">السلاسل</string>
+    <string name="no_chains">لا توجد سلاسل</string>
+    <string name="tap_to_add_chain">انقر + لإنشاء سلسلة بروكسي.</string>
+    <string name="new_chain">سلسلة جديدة</string>
+    <string name="edit_chain">تعديل السلسلة</string>
+    <string name="chain_name">اسم السلسلة</string>
+    <string name="add_proxy_to_chain">إضافة بروكسي</string>
+    <string name="proxies_in_chain">البروكسيات</string>
+    <string name="chain_min_proxies">أضف بروكسيين على الأقل لتشكيل سلسلة.</string>
+    <string name="not_enough_proxies">بروكسيات غير كافية</string>
+    <string name="not_enough_proxies_message">تحتاج سلسلة البروكسي إلى بروكسيين على الأقل.</string>
+    <string name="invalid_chain">سلسلة غير صالحة — بعض البروكسيات مفقودة</string>
+    <string name="select_proxy">اختر بروكسي</string>
+    <string name="no_proxies_available">لا توجد بروكسيات متاحة</string>
+    <string name="all_proxies_in_chain">جميع البروكسيات موجودة بالفعل في هذه السلسلة.</string>
+    <string name="entry">مدخل</string>
+    <string name="exit">مخرج</string>
+    <string name="route_preview">معاينة المسار</string>
+    <string name="n_proxies">%d بروكسي</string>
 </resources>

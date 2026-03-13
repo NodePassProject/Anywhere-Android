@@ -11,14 +11,18 @@ import android.os.IBinder
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.argsment.anywhere.data.model.ProxyChain
 import com.argsment.anywhere.data.model.Subscription
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.network.LatencyResult
 import com.argsment.anywhere.data.network.LatencyTester
 import com.argsment.anywhere.data.network.SubscriptionFetcher
+import com.argsment.anywhere.data.repository.CertificateRepository
+import com.argsment.anywhere.data.repository.ChainRepository
 import com.argsment.anywhere.data.repository.ConfigRepository
 import com.argsment.anywhere.data.repository.RuleSetRepository
 import com.argsment.anywhere.data.repository.SubscriptionRepository
+import com.argsment.anywhere.vpn.protocol.tls.TlsClient
 import com.argsment.anywhere.vpn.AnywhereVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,6 +48,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val configRepository = ConfigRepository(application)
     val subscriptionRepository = SubscriptionRepository(application)
     val ruleSetRepository = RuleSetRepository(application)
+    val certificateRepository = CertificateRepository(application)
+    val chainRepository = ChainRepository(application)
 
     private val prefs: SharedPreferences =
         application.getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
@@ -76,6 +82,14 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val _orphanedRuleSetNames = MutableStateFlow<List<String>>(emptyList())
     val orphanedRuleSetNames: StateFlow<List<String>> = _orphanedRuleSetNames.asStateFlow()
 
+    // Chain selection
+    private val _selectedChainId = MutableStateFlow<UUID?>(null)
+    val selectedChainId: StateFlow<UUID?> = _selectedChainId.asStateFlow()
+
+    // Chain latency results
+    private val _chainLatencyResults = MutableStateFlow<Map<UUID, LatencyResult>>(emptyMap())
+    val chainLatencyResults: StateFlow<Map<UUID, LatencyResult>> = _chainLatencyResults.asStateFlow()
+
     // VPN permission request callback
     var onRequestVpnPermission: ((Intent) -> Unit)? = null
 
@@ -106,24 +120,47 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     val isButtonDisabled: Boolean
-        get() = configRepository.getAll().isEmpty() ||
+        get() = (selectedConfiguration == null) ||
             (_vpnStatus.value != VpnStatus.CONNECTED && _vpnStatus.value != VpnStatus.DISCONNECTED)
 
     init {
-        // Load saved selected config
-        prefs.getString("selectedConfigurationId", null)?.let { id ->
-            _selectedConfigId.value = runCatching { UUID.fromString(id) }.getOrNull()
+        // Restore chain or config selection
+        val savedChainId = prefs.getString("selectedChainId", null)?.let {
+            runCatching { UUID.fromString(it) }.getOrNull()
+        }
+        if (savedChainId != null && chainRepository.get(savedChainId) != null) {
+            _selectedChainId.value = savedChainId
+        } else {
+            prefs.getString("selectedConfigurationId", null)?.let { id ->
+                _selectedConfigId.value = runCatching { UUID.fromString(id) }.getOrNull()
+            }
         }
         ensureValidSelection()
+
+        // Sync trusted certificate fingerprints to TlsClient
+        TlsClient.trustedFingerprints = certificateRepository.fingerprints.value
+        viewModelScope.launch {
+            certificateRepository.fingerprints.collect { fingerprints ->
+                TlsClient.trustedFingerprints = fingerprints
+            }
+        }
     }
 
-    val selectedConfiguration: VlessConfiguration?
+    val selectedConfiguration: ProxyConfiguration?
         get() {
+            // If a chain is selected, resolve it
+            val chainId = _selectedChainId.value
+            if (chainId != null) {
+                val chain = chainRepository.get(chainId) ?: return null
+                return resolveChain(chain)
+            }
             val id = _selectedConfigId.value ?: return null
             return configRepository.get(id)
         }
 
-    fun setSelectedConfiguration(config: VlessConfiguration) {
+    fun setSelectedConfiguration(config: ProxyConfiguration) {
+        _selectedChainId.value = null
+        prefs.edit().remove("selectedChainId").apply()
         _selectedConfigId.value = config.id
         prefs.edit().putString("selectedConfigurationId", config.id.toString()).apply()
 
@@ -175,7 +212,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _startError.value = "VPN permission denied"
     }
 
-    private fun startVpnService(config: VlessConfiguration) {
+    private fun startVpnService(config: ProxyConfiguration) {
         val context = getApplication<Application>()
         _vpnStatus.value = VpnStatus.CONNECTING
 
@@ -188,7 +225,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 resolveServerAddress(config)
             }
 
-            val configJson = json.encodeToString(VlessConfiguration.serializer(), resolvedConfig)
+            val configJson = json.encodeToString(ProxyConfiguration.serializer(), resolvedConfig)
             val intent = Intent(context, AnywhereVpnService::class.java).apply {
                 action = AnywhereVpnService.ACTION_START
                 putExtra(AnywhereVpnService.EXTRA_CONFIG, configJson)
@@ -227,13 +264,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _vpnStatus.value = VpnStatus.DISCONNECTED
     }
 
-    private fun switchConfig(config: VlessConfiguration) {
+    private fun switchConfig(config: ProxyConfiguration) {
         val context = getApplication<Application>()
         viewModelScope.launch {
             val resolvedConfig = withContext(Dispatchers.IO) {
                 resolveServerAddress(config)
             }
-            val configJson = json.encodeToString(VlessConfiguration.serializer(), resolvedConfig)
+            val configJson = json.encodeToString(ProxyConfiguration.serializer(), resolvedConfig)
             val intent = Intent(context, AnywhereVpnService::class.java).apply {
                 action = AnywhereVpnService.ACTION_SWITCH_CONFIG
                 putExtra(AnywhereVpnService.EXTRA_CONFIG, configJson)
@@ -305,7 +342,14 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
      * Resolves server address to IP before tunnel starts (avoids DNS-over-tunnel loop).
      * If already an IP, returns config as-is. If a domain, resolves via system DNS.
      */
-    private fun resolveServerAddress(config: VlessConfiguration): VlessConfiguration {
+    private fun resolveServerAddress(config: ProxyConfiguration): ProxyConfiguration {
+        val resolvedConfig = resolveAddress(config)
+        // Also resolve chain proxy addresses
+        val resolvedChain = config.chain?.map { resolveAddress(it) }
+        return if (resolvedChain != null) resolvedConfig.copy(chain = resolvedChain) else resolvedConfig
+    }
+
+    private fun resolveAddress(config: ProxyConfiguration): ProxyConfiguration {
         val address = config.serverAddress
         // Check if already an IP
         try {
@@ -314,7 +358,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         } catch (_: Exception) {}
 
         // Resolve domain to IP, preferring IPv4 for reliable connectivity.
-        // Many proxy servers have AAAA records but don't actually accept IPv6.
         return try {
             val all = InetAddress.getAllByName(address)
             val resolved = all.firstOrNull { it is Inet4Address } ?: all.firstOrNull()
@@ -346,28 +389,38 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // Configuration CRUD
     // =========================================================================
 
-    fun addConfiguration(config: VlessConfiguration) {
+    fun addConfiguration(config: ProxyConfiguration) {
         configRepository.add(config)
         if (_selectedConfigId.value == null) {
             setSelectedConfiguration(config)
         }
     }
 
-    fun updateConfiguration(config: VlessConfiguration) {
+    fun updateConfiguration(config: ProxyConfiguration) {
         configRepository.update(config)
     }
 
-    fun deleteConfiguration(config: VlessConfiguration) {
+    fun deleteConfiguration(config: ProxyConfiguration) {
         configRepository.delete(config.id)
         if (_selectedConfigId.value == config.id) {
             val remaining = configRepository.getAll()
             _selectedConfigId.value = remaining.firstOrNull()?.id
             prefs.edit().putString("selectedConfigurationId", _selectedConfigId.value?.toString()).apply()
         }
+        // If a chain is selected and now broken, fall back
+        val chainId = _selectedChainId.value
+        if (chainId != null) {
+            val chain = chainRepository.get(chainId)
+            if (chain == null || resolveChain(chain) == null) {
+                _selectedChainId.value = null
+                prefs.edit().remove("selectedChainId").apply()
+                ensureValidSelection()
+            }
+        }
         checkOrphanedRuleSets()
     }
 
-    fun configurations(forSubscription: Subscription): List<VlessConfiguration> {
+    fun configurations(forSubscription: Subscription): List<ProxyConfiguration> {
         return configRepository.getAll().filter { it.subscriptionId == forSubscription.id }
     }
 
@@ -375,7 +428,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // Subscription CRUD
     // =========================================================================
 
-    fun addSubscription(configurations: List<VlessConfiguration>, subscription: Subscription) {
+    fun addSubscription(configurations: List<ProxyConfiguration>, subscription: Subscription) {
         subscriptionRepository.add(subscription)
         configurations.forEach { config ->
             configRepository.add(config.copy(subscriptionId = subscription.id))
@@ -402,11 +455,23 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         )
         subscriptionRepository.update(updated)
 
-        // Remove old configs for this subscription and add new ones
-        configRepository.deleteBySubscription(subscription.id)
-        result.configurations.forEach { config ->
-            configRepository.add(config.copy(subscriptionId = subscription.id))
+        // Content-based matching: preserve IDs of unchanged configs (keeps routing rule assignments)
+        val oldConfigs = configRepository.getAll().filter { it.subscriptionId == subscription.id }
+        val usedOldIds = mutableSetOf<UUID>()
+        val newConfigs = result.configurations.map { newConfig ->
+            val match = oldConfigs.firstOrNull { old ->
+                !usedOldIds.contains(old.id) && old.contentEquals(newConfig)
+            }
+            if (match != null) {
+                usedOldIds.add(match.id)
+                newConfig.copy(id = match.id, subscriptionId = subscription.id)
+            } else {
+                newConfig.copy(subscriptionId = subscription.id)
+            }
         }
+
+        configRepository.deleteBySubscription(subscription.id)
+        newConfigs.forEach { configRepository.add(it) }
         ensureValidSelection()
     }
 
@@ -414,7 +479,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // Latency Testing
     // =========================================================================
 
-    fun testLatency(forConfig: VlessConfiguration) {
+    fun testLatency(forConfig: ProxyConfiguration) {
         _latencyResults.value = _latencyResults.value + (forConfig.id to LatencyResult.Testing)
         viewModelScope.launch {
             val result = LatencyTester.test(forConfig)
@@ -430,6 +495,94 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             LatencyTester.testAll(configs).collect { (id, result) ->
                 _latencyResults.value = _latencyResults.value + (id to result)
+            }
+        }
+    }
+
+    // =========================================================================
+    // Chain CRUD & Selection
+    // =========================================================================
+
+    fun addChain(chain: ProxyChain) {
+        chainRepository.add(chain)
+    }
+
+    fun updateChain(chain: ProxyChain) {
+        chainRepository.update(chain)
+        // Re-resolve if this is the active chain
+        if (_selectedChainId.value == chain.id) {
+            val resolved = resolveChain(chain)
+            if (resolved != null && _vpnStatus.value == VpnStatus.CONNECTED) {
+                switchConfig(resolved)
+            }
+        }
+    }
+
+    fun deleteChain(chain: ProxyChain) {
+        chainRepository.delete(chain.id)
+        if (_selectedChainId.value == chain.id) {
+            _selectedChainId.value = null
+            prefs.edit().remove("selectedChainId").apply()
+            ensureValidSelection()
+        }
+    }
+
+    fun selectChain(chain: ProxyChain) {
+        val resolved = resolveChain(chain) ?: return
+        _selectedChainId.value = chain.id
+        prefs.edit()
+            .putString("selectedChainId", chain.id.toString())
+            .remove("selectedConfigurationId")
+            .apply()
+        _selectedConfigId.value = null
+
+        if (_vpnStatus.value == VpnStatus.CONNECTED) {
+            switchConfig(resolved)
+        }
+    }
+
+    /**
+     * Resolves a chain into a composite ProxyConfiguration.
+     * The last proxy becomes the main config; preceding proxies fill the [chain] field.
+     */
+    fun resolveChain(chain: ProxyChain): ProxyConfiguration? {
+        val configs = chain.proxyIds.mapNotNull { id -> configRepository.get(id) }
+        if (configs.size != chain.proxyIds.size || configs.size < 2) return null
+        val exitProxy = configs.last()
+        val chainProxies = configs.dropLast(1)
+        return exitProxy.copy(
+            name = chain.name,
+            chain = chainProxies
+        )
+    }
+
+    // =========================================================================
+    // Chain Latency Testing
+    // =========================================================================
+
+    fun testChainLatency(chain: ProxyChain) {
+        val resolved = resolveChain(chain) ?: return
+        _chainLatencyResults.value = _chainLatencyResults.value + (chain.id to LatencyResult.Testing)
+        viewModelScope.launch {
+            val result = LatencyTester.test(resolved)
+            _chainLatencyResults.value = _chainLatencyResults.value + (chain.id to result)
+        }
+    }
+
+    fun testAllChainLatencies() {
+        val chains = chainRepository.getAll()
+        val resolvedChains = chains.mapNotNull { chain ->
+            resolveChain(chain)?.let { chain.id to it }
+        }
+        resolvedChains.forEach { (chainId, _) ->
+            _chainLatencyResults.value = _chainLatencyResults.value + (chainId to LatencyResult.Testing)
+        }
+        viewModelScope.launch {
+            val configs = resolvedChains.map { it.second }
+            val idMap = resolvedChains.associate { (chainId, config) -> config.id to chainId }
+            LatencyTester.testAll(configs).collect { (configId, result) ->
+                val chainId = idMap[configId] ?: return@collect
+                _chainLatencyResults.value = _chainLatencyResults.value + (chainId to result)
             }
         }
     }
@@ -453,14 +606,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // Settings
     // =========================================================================
 
-    var ipv6Enabled: Boolean
-        get() = prefs.getBoolean("ipv6Enabled", false)
-        set(value) = prefs.edit().putBoolean("ipv6Enabled", value).apply()
-
-    var dohEnabled: Boolean
-        get() = prefs.getBoolean("dohEnabled", false)
-        set(value) = prefs.edit().putBoolean("dohEnabled", value).apply()
-
     var alwaysOnEnabled: Boolean
         get() = prefs.getBoolean("alwaysOnEnabled", false)
         set(value) = prefs.edit().putBoolean("alwaysOnEnabled", value).apply()
@@ -468,6 +613,54 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     var bypassCountryCode: String
         get() = prefs.getString("bypassCountryCode", "") ?: ""
         set(value) = prefs.edit().putString("bypassCountryCode", value).apply()
+
+    var ipv6ConnectionsEnabled: Boolean
+        get() = prefs.getBoolean("ipv6ConnectionsEnabled", false)
+        set(value) = prefs.edit().putBoolean("ipv6ConnectionsEnabled", value).apply()
+
+    var ipv6DnsEnabled: Boolean
+        get() = prefs.getBoolean("ipv6DnsEnabled", false)
+        set(value) = prefs.edit().putBoolean("ipv6DnsEnabled", value).apply()
+
+    var encryptedDnsEnabled: Boolean
+        get() = prefs.getBoolean("encryptedDnsEnabled", false)
+        set(value) = prefs.edit().putBoolean("encryptedDnsEnabled", value).apply()
+
+    var encryptedDnsProtocol: String
+        get() = prefs.getString("encryptedDnsProtocol", "doh") ?: "doh"
+        set(value) = prefs.edit().putString("encryptedDnsProtocol", value).apply()
+
+    var encryptedDnsServer: String
+        get() = prefs.getString("encryptedDnsServer", "") ?: ""
+        set(value) = prefs.edit().putString("encryptedDnsServer", value).apply()
+
+    var allowInsecure: Boolean
+        get() = prefs.getBoolean("allowInsecure", false)
+        set(value) = prefs.edit().putBoolean("allowInsecure", value).apply()
+
+    val hasCompletedOnboarding: Boolean
+        get() = prefs.getBoolean("hasCompletedOnboarding", false)
+
+    fun completeOnboarding(bypassCountryCode: String, adBlockEnabled: Boolean) {
+        // Apply country bypass
+        if (bypassCountryCode.isNotEmpty()) {
+            this.bypassCountryCode = bypassCountryCode
+        }
+
+        // Apply ADBlock → REJECT
+        if (adBlockEnabled) {
+            val adBlock = ruleSetRepository.ruleSets.value.find { it.name == "ADBlock" }
+            if (adBlock != null) {
+                ruleSetRepository.updateAssignment(adBlock, "REJECT")
+            }
+        }
+
+        // Sync routing to service
+        syncRoutingConfigurationToNE()
+
+        // Mark onboarding completed
+        prefs.edit().putBoolean("hasCompletedOnboarding", true).apply()
+    }
 
     private fun ensureValidSelection() {
         val selectedId = _selectedConfigId.value

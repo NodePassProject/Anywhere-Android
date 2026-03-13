@@ -36,7 +36,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.Subscription
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.repository.RuleSetRepository
 import com.argsment.anywhere.ui.components.AppIconView
 import com.argsment.anywhere.viewmodel.VpnViewModel
@@ -99,8 +99,8 @@ fun RuleSetListScreen(
 @Composable
 private fun RuleSetRow(
     ruleSet: RuleSetRepository.RuleSet,
-    standaloneConfigs: List<VlessConfiguration>,
-    subscribedGroups: List<Pair<Subscription, List<VlessConfiguration>>>,
+    standaloneConfigs: List<ProxyConfiguration>,
+    subscribedGroups: List<Pair<Subscription, List<ProxyConfiguration>>>,
     onAssign: (String?) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -108,6 +108,7 @@ private fun RuleSetRow(
     val displayText = when (ruleSet.assignedConfigurationId) {
         null -> stringResource(R.string.default_value)
         "DIRECT" -> stringResource(R.string.direct)
+        "REJECT" -> stringResource(R.string.reject)
         else -> {
             val allConfigs = standaloneConfigs + subscribedGroups.flatMap { it.second }
             allConfigs.find { it.id.toString() == ruleSet.assignedConfigurationId }?.name
@@ -159,6 +160,13 @@ private fun RuleSetRow(
                         text = { Text(stringResource(R.string.direct)) },
                         onClick = {
                             onAssign("DIRECT")
+                            expanded = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.reject)) },
+                        onClick = {
+                            onAssign("REJECT")
                             expanded = false
                         }
                     )

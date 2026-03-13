@@ -2,8 +2,8 @@ package com.argsment.anywhere.vpn.protocol.tls
 
 import android.util.Log
 import com.argsment.anywhere.vpn.NativeBridge
+import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.vless.RealityError
-import com.argsment.anywhere.vpn.util.NioSocket
 import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -28,8 +28,8 @@ class TlsRecordConnection(
     private val serverKey: ByteArray,
     private val serverIV: ByteArray
 ) {
-    /** The underlying NIO socket. */
-    var connection: NioSocket? = null
+    /** The underlying transport (NioSocket or TunneledTransport). */
+    var connection: Transport? = null
 
     // Cached AES key specs
     private val clientKeySpec = SecretKeySpec(clientKey, "AES")

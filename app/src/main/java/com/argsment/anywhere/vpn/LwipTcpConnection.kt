@@ -1,7 +1,8 @@
 package com.argsment.anywhere.vpn
 
 import android.util.Log
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.direct.DirectTcpRelay
 import com.argsment.anywhere.vpn.protocol.vless.VlessClient
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
@@ -28,7 +29,7 @@ class LwipTcpConnection(
     val pcb: Long,
     val dstHost: String,
     val dstPort: Int,
-    val configuration: VlessConfiguration,
+    val configuration: ProxyConfiguration,
     forceBypass: Boolean,
     private val lwipExecutor: ScheduledExecutorService
 ) {
@@ -37,12 +38,17 @@ class LwipTcpConnection(
     private val scope = CoroutineScope(lwipExecutor.asCoroutineDispatcher() + scopeJob)
 
     // Connection paths (mutually exclusive)
-    private var vlessClient: VlessClient? = null
     private var vlessConnection: VlessConnection? = null
     private var directRelay: DirectTcpRelay? = null
 
     private var vlessConnecting = false
     private var directConnecting = false
+
+    // Upload coalescing: accumulates multiple TCP segments into a single batch
+    // before sending to the proxy protocol, reducing per-segment encryption overhead.
+    private var coalesceBuffer: ByteArrayOutputStream? = null
+    private var coalesceScheduled = false
+
     private val bypass: Boolean = forceBypass ||
         (LwipStack.instance?.shouldBypass(dstHost) == true)
     private var pendingData = ByteArrayOutputStream()
@@ -76,7 +82,7 @@ class LwipTcpConnection(
         if (bypass) {
             connectDirect()
         } else {
-            connectVless()
+            connectProxy()
         }
     }
 
@@ -110,24 +116,18 @@ class LwipTcpConnection(
                 }
             }
         } else if (vlessConnection != null) {
-            val connection = vlessConnection!!
-            val dataLen = data.size.coerceAtMost(65535)
-            scope.launch {
-                try {
-                    connection.send(data)
-                    lwipExecutor.execute {
-                        if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
-                    }
-                } catch (_: CancellationException) {
-                    // Scope cancelled during teardown — silently ignore
-                } catch (e: Exception) {
-                    if (!closed) Log.e(TAG, "[TCP] VLESS send error for $dstHost:$dstPort: ${e.message}")
-                    lwipExecutor.execute { abort() }
-                }
+            // Coalesce segments: accumulate data and schedule a batched send
+            // to reduce per-segment encryption overhead
+            if (coalesceBuffer == null) coalesceBuffer = ByteArrayOutputStream()
+            coalesceBuffer!!.write(data)
+
+            if (!coalesceScheduled) {
+                coalesceScheduled = true
+                lwipExecutor.execute { flushCoalesceBuffer() }
             }
         } else {
             pendingData.write(data)
-            if (bypass) connectDirect() else connectVless()
+            if (bypass) connectDirect() else connectProxy()
         }
     }
 
@@ -238,22 +238,32 @@ class LwipTcpConnection(
         }
     }
 
-    // -- VLESS Connection --
+    // -- Protocol Connection --
 
-    private fun connectVless() {
+    /**
+     * Connects to the proxy using the appropriate protocol (VLESS, Shadowsocks, NaiveProxy).
+     * Uses [ProxyClientFactory] for protocol selection.
+     */
+    private fun connectProxy() {
         if (vlessConnecting || vlessConnection != null || closed) return
         vlessConnecting = true
 
         val initialData = if (pendingData.size() > 0) pendingData.toByteArray() else null
         if (initialData != null) pendingData.reset()
 
-        val client = VlessClient(configuration)
-        vlessClient = client
+        // If config has a chain, build chained connections first
+        val chain = configuration.chain
+        if (!chain.isNullOrEmpty()) {
+            connectChain(chain, initialData)
+            return
+        }
 
         scope.launch {
-            val connection: VlessConnection
             try {
-                connection = client.connect(dstHost, dstPort, initialData)
+                val connection = ProxyClientFactory.connect(
+                    configuration, dstHost, dstPort, initialData
+                )
+                onProxyConnected(connection)
             } catch (_: CancellationException) {
                 return@launch
             } catch (e: Exception) {
@@ -264,43 +274,132 @@ class LwipTcpConnection(
                         abort()
                     }
                 }
-                return@launch
+            }
+        }
+    }
+
+    /**
+     * Handles post-connection setup common to all protocol paths.
+     * Sets up activity timer, flushes pending data, and starts the receive loop.
+     */
+    private fun onProxyConnected(connection: VlessConnection) {
+        lwipExecutor.execute {
+            vlessConnecting = false
+            if (closed) {
+                connection.cancel()
+                return@execute
             }
 
-            lwipExecutor.execute {
-                vlessConnecting = false
-                if (closed) {
-                    connection.cancel()
-                    return@execute
+            vlessConnection = connection
+            handshakeTimer?.cancel(false)
+            handshakeTimer = null
+            activityTimer = ActivityTimer(lwipExecutor, CONNECTION_IDLE_TIMEOUT_MS) {
+                if (!closed) close()
+            }
+
+            // Flush data that arrived during connect
+            if (pendingData.size() > 0) {
+                val dataToSend = pendingData.toByteArray()
+                val dataLen = dataToSend.size.coerceAtMost(65535)
+                pendingData.reset()
+                scope.launch {
+                    try {
+                        connection.send(dataToSend)
+                        lwipExecutor.execute {
+                            if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
+                        }
+                    } catch (_: CancellationException) {
+                    } catch (e: Exception) {
+                        if (!closed) Log.e(TAG, "[TCP] pending send error for $dstHost: ${e.message}")
+                        lwipExecutor.execute { abort() }
+                    }
+                }
+            }
+
+            requestNextReceive()
+        }
+    }
+
+    // -- Chain Connection --
+
+    /**
+     * Builds a chain of proxy connections: entry → intermediate → ... → exit → target.
+     *
+     * Each intermediate hop creates a VLESS tunnel to the next proxy's server.
+     * The final hop uses [ProxyClientFactory] for protocol selection, allowing
+     * the exit proxy to use any supported protocol (VLESS, Shadowsocks, NaiveProxy).
+     */
+    private fun connectChain(
+        chain: List<ProxyConfiguration>,
+        initialData: ByteArray?
+    ) {
+        scope.launch {
+            try {
+                var previousConnection: VlessConnection? = null
+
+                for (i in chain.indices) {
+                    val hopConfig = chain[i]
+                    val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
+                    val hopClient = VlessClient(hopConfig, tunnel = previousConnection)
+                    val conn = hopClient.connect(
+                        nextConfig.connectAddress,
+                        nextConfig.serverPort.toInt()
+                    )
+                    previousConnection = conn
                 }
 
-                vlessConnection = connection
-                handshakeTimer?.cancel(false)
-                handshakeTimer = null
-                activityTimer = ActivityTimer(lwipExecutor, CONNECTION_IDLE_TIMEOUT_MS) {
-                    if (!closed) close()
+                // Final hop: use factory for protocol selection, tunneled through the chain
+                val connection = ProxyClientFactory.connect(
+                    configuration, dstHost, dstPort, initialData, tunnel = previousConnection
+                )
+                onProxyConnected(connection)
+            } catch (_: CancellationException) {
+                return@launch
+            } catch (e: Exception) {
+                lwipExecutor.execute {
+                    vlessConnecting = false
+                    if (!closed) {
+                        Log.e(TAG, "[TCP] Chain connect failed: $dstHost:$dstPort: ${e.message}")
+                        abort()
+                    }
                 }
+            }
+        }
+    }
 
-                // Flush data that arrived during connect
-                if (pendingData.size() > 0) {
-                    val dataToSend = pendingData.toByteArray()
-                    val dataLen = dataToSend.size.coerceAtMost(65535)
-                    pendingData.reset()
-                    scope.launch {
-                        try {
-                            connection.send(dataToSend)
-                            lwipExecutor.execute {
-                                if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
-                            }
-                        } catch (_: CancellationException) {
-                        } catch (e: Exception) {
-                            if (!closed) Log.e(TAG, "[TCP] VLESS pending send error for $dstHost: ${e.message}")
-                            lwipExecutor.execute { abort() }
+    // -- Upload Coalescing --
+
+    /**
+     * Flushes the coalesce buffer, sending all accumulated segments as a single batch.
+     * Called on the lwIP executor thread after the current processing cycle completes.
+     */
+    private fun flushCoalesceBuffer() {
+        val connection = vlessConnection
+        val buf = coalesceBuffer
+        coalesceBuffer = null
+        coalesceScheduled = false
+
+        if (closed || connection == null || buf == null || buf.size() == 0) return
+
+        val dataToSend = buf.toByteArray()
+        scope.launch {
+            try {
+                connection.send(dataToSend)
+                lwipExecutor.execute {
+                    if (!closed) {
+                        // Acknowledge all coalesced bytes to advance the TCP receive window
+                        var remaining = dataToSend.size
+                        while (remaining > 0) {
+                            val ack = remaining.coerceAtMost(65535)
+                            NativeBridge.nativeTcpRecved(pcb, ack)
+                            remaining -= ack
                         }
                     }
                 }
-
-                requestNextReceive()
+            } catch (_: CancellationException) {
+            } catch (e: Exception) {
+                if (!closed) Log.e(TAG, "[TCP] send error for $dstHost:$dstPort: ${e.message}")
+                lwipExecutor.execute { abort() }
             }
         }
     }
@@ -499,18 +598,17 @@ class LwipTcpConnection(
         activityTimer = null
         val relay = directRelay
         val connection = vlessConnection
-        val client = vlessClient
         directRelay = null
         vlessConnection = null
-        vlessClient = null
         vlessConnecting = false
         directConnecting = false
         pendingData.reset()
         overflowBuffer.reset()
+        coalesceBuffer = null
+        coalesceScheduled = false
         receivePaused = false
         relay?.cancel()
         connection?.cancel()
-        client?.cancel()
     }
 
     companion object {

@@ -23,6 +23,8 @@ import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,12 +60,14 @@ import java.util.Locale
 fun SettingsScreen(viewModel: VpnViewModel) {
     var showRoutingRules by remember { mutableStateOf(false) }
     var showAcknowledgements by remember { mutableStateOf(false) }
-    var showDoHAlert by remember { mutableStateOf(false) }
+    var showIpv6Settings by remember { mutableStateOf(false) }
+    var showEncryptedDns by remember { mutableStateOf(false) }
+    var showTrustedCertificates by remember { mutableStateOf(false) }
+    var showInsecureAlert by remember { mutableStateOf(false) }
 
     var alwaysOn by remember { mutableStateOf(viewModel.alwaysOnEnabled) }
-    var ipv6Enabled by remember { mutableStateOf(viewModel.ipv6Enabled) }
-    var dohEnabled by remember { mutableStateOf(viewModel.dohEnabled) }
     var bypassCountryCode by remember { mutableStateOf(viewModel.bypassCountryCode) }
+    var allowInsecure by remember { mutableStateOf(viewModel.allowInsecure) }
 
     if (showRoutingRules) {
         RuleSetListScreen(
@@ -75,6 +79,30 @@ fun SettingsScreen(viewModel: VpnViewModel) {
 
     if (showAcknowledgements) {
         AcknowledgementsScreen(onBack = { showAcknowledgements = false })
+        return
+    }
+
+    if (showIpv6Settings) {
+        Ipv6SettingsScreen(
+            viewModel = viewModel,
+            onBack = { showIpv6Settings = false }
+        )
+        return
+    }
+
+    if (showEncryptedDns) {
+        EncryptedDnsSettingsScreen(
+            viewModel = viewModel,
+            onBack = { showEncryptedDns = false }
+        )
+        return
+    }
+
+    if (showTrustedCertificates) {
+        TrustedCertificatesScreen(
+            viewModel = viewModel,
+            onBack = { showTrustedCertificates = false }
+        )
         return
     }
 
@@ -108,49 +136,62 @@ fun SettingsScreen(viewModel: VpnViewModel) {
 
             // Network section
             SectionHeader(stringResource(R.string.network))
-            SettingsSwitch(
+            SettingsNavRow(
                 icon = Icons.Filled.Language,
-                iconTint = Color(0xFF009688),
-                label = "IPv6",
-                checked = ipv6Enabled,
-                onCheckedChange = {
-                    ipv6Enabled = it
-                    viewModel.ipv6Enabled = it
-                }
+                iconTint = Color(0xFF2196F3),
+                label = stringResource(R.string.ipv6),
+                onClick = { showIpv6Settings = true }
             )
-            SettingsSwitch(
+            SettingsNavRow(
                 icon = Icons.Filled.Shield,
-                iconTint = Color(0xFF4CAF50),
-                label = "DNS over HTTPS",
-                checked = dohEnabled,
-                onCheckedChange = { newValue ->
-                    if (newValue) {
-                        showDoHAlert = true
-                    } else {
-                        dohEnabled = false
-                        viewModel.dohEnabled = false
-                    }
-                }
+                iconTint = Color(0xFF009688),
+                label = stringResource(R.string.encrypted_dns),
+                onClick = { showEncryptedDns = true }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
             // Routing section
             SectionHeader(stringResource(R.string.routing))
-            SettingsNavRow(
-                icon = Icons.Filled.AltRoute,
-                iconTint = Color(0xFFFF9800),
-                label = stringResource(R.string.routing_rules),
-                onClick = { showRoutingRules = true }
-            )
             CountryBypassPicker(
                 icon = Icons.Filled.Public,
-                iconTint = Color(0xFF9C27B0),
+                iconTint = Color(0xFFFF9800),
                 selectedCode = bypassCountryCode,
                 onSelect = {
                     bypassCountryCode = it
                     viewModel.bypassCountryCode = it
                 }
+            )
+            SettingsNavRow(
+                icon = Icons.Filled.AltRoute,
+                iconTint = Color(0xFF9C27B0),
+                label = stringResource(R.string.routing_rules),
+                onClick = { showRoutingRules = true }
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Security section
+            SectionHeader(stringResource(R.string.security))
+            SettingsSwitch(
+                icon = Icons.Filled.Warning,
+                iconTint = Color(0xFFF44336),
+                label = stringResource(R.string.allow_insecure),
+                checked = allowInsecure,
+                onCheckedChange = { newValue ->
+                    if (newValue) {
+                        showInsecureAlert = true
+                    } else {
+                        allowInsecure = false
+                        viewModel.allowInsecure = false
+                    }
+                }
+            )
+            SettingsNavRow(
+                icon = Icons.Filled.VerifiedUser,
+                iconTint = Color(0xFF4CAF50),
+                label = stringResource(R.string.trusted_certificates),
+                onClick = { showTrustedCertificates = true }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -166,23 +207,23 @@ fun SettingsScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // DoH Warning Alert
-    if (showDoHAlert) {
+    // Allow Insecure Warning Alert
+    if (showInsecureAlert) {
         AlertDialog(
-            onDismissRequest = { showDoHAlert = false },
-            title = { Text("DNS over HTTPS") },
-            text = { Text(stringResource(R.string.doh_routing_warning)) },
+            onDismissRequest = { showInsecureAlert = false },
+            title = { Text(stringResource(R.string.allow_insecure)) },
+            text = { Text(stringResource(R.string.allow_insecure_warning)) },
             confirmButton = {
                 TextButton(onClick = {
-                    showDoHAlert = false
-                    dohEnabled = true
-                    viewModel.dohEnabled = true
+                    showInsecureAlert = false
+                    allowInsecure = true
+                    viewModel.allowInsecure = true
                 }) {
-                    Text(stringResource(R.string.enable_anyway))
+                    Text(stringResource(R.string.allow_anyway))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showDoHAlert = false }) {
+                TextButton(onClick = { showInsecureAlert = false }) {
                     Text(stringResource(R.string.cancel))
                 }
             }

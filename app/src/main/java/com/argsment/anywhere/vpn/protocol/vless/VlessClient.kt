@@ -4,11 +4,13 @@ import android.util.Log
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
-import com.argsment.anywhere.data.model.VlessConfiguration
-import com.argsment.anywhere.data.model.VlessError
+import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.data.model.WebSocketConfiguration
 import com.argsment.anywhere.data.model.XHttpConfiguration
 import com.argsment.anywhere.data.model.XHttpMode
+import com.argsment.anywhere.vpn.protocol.Transport
+import com.argsment.anywhere.vpn.protocol.TunneledTransport
 import com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection
 import com.argsment.anywhere.vpn.protocol.reality.RealityClient
 import com.argsment.anywhere.vpn.protocol.tls.TlsClient
@@ -30,9 +32,13 @@ private const val TAG = "VlessClient"
  *
  * Retry logic: 5 attempts with linear backoff 0/200/400/600/800ms (matching Xray-core).
  */
-class VlessClient(private val configuration: VlessConfiguration) {
+class VlessClient(
+    private val configuration: ProxyConfiguration,
+    private val tunnel: VlessConnection? = null
+) {
 
     private var connection: NioSocket? = null
+    private var tunnelTransport: TunneledTransport? = null
     private var realityClient: RealityClient? = null
     private var realityConnection: TlsRecordConnection? = null
     private var tlsClient: TlsClient? = null
@@ -130,6 +136,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
         webSocketConnection = null
         connection?.forceCancel()
         connection = null
+        tunnelTransport = null
         realityConnection?.cancel()
         realityConnection = null
         realityClient?.cancel()
@@ -178,14 +185,14 @@ class VlessClient(private val configuration: VlessConfiguration) {
     ): VlessConnection {
         // Vision silently drops UDP/443 (QUIC) unless the -udp443 flow variant is used
         if (command == VlessCommand.UDP && destinationPort == 443 && isVisionFlow && !allowUDP443) {
-            throw VlessError.Dropped()
+            throw ProxyError.Dropped()
         }
 
         return when (configuration.transport) {
             "ws" -> {
                 // Vision over WebSocket is not supported
                 if (isVisionFlow) {
-                    throw VlessError.ProtocolError("Vision flow is not supported over WebSocket transport")
+                    throw ProxyError.ProtocolError("Vision flow is not supported over WebSocket transport")
                 }
                 connectWithWebSocket(command, destinationHost, destinationPort, initialData)
             }
@@ -193,7 +200,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             "httpupgrade" -> {
                 // Vision over HTTP upgrade is not supported
                 if (isVisionFlow) {
-                    throw VlessError.ProtocolError("Vision flow is not supported over HTTP upgrade transport")
+                    throw ProxyError.ProtocolError("Vision flow is not supported over HTTP upgrade transport")
                 }
                 connectWithHttpUpgrade(command, destinationHost, destinationPort, initialData)
             }
@@ -201,7 +208,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             "xhttp" -> {
                 // Vision over XHTTP is not supported
                 if (isVisionFlow) {
-                    throw VlessError.ProtocolError("Vision flow is not supported over XHTTP transport")
+                    throw ProxyError.ProtocolError("Vision flow is not supported over XHTTP transport")
                 }
                 connectWithXHttp(command, destinationHost, destinationPort, initialData)
             }
@@ -238,7 +245,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
         initialData: ByteArray?
     ): VlessConnection {
         val wsConfig = configuration.websocket
-            ?: throw VlessError.ConnectionFailed("WebSocket transport specified but no WebSocket configuration")
+            ?: throw ProxyError.ConnectionFailed("WebSocket transport specified but no WebSocket configuration")
 
         return if (configuration.tls != null) {
             connectWssWithRetry(wsConfig, command, destinationHost, destinationPort, initialData)
@@ -284,7 +291,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // -- WSS (TCP -> TLS -> WebSocket -> VLESS) --
@@ -306,7 +313,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
 
             try {
                 val baseTlsConfig = configuration.tls
-                    ?: throw VlessError.ConnectionFailed("WSS requires TLS configuration")
+                    ?: throw ProxyError.ConnectionFailed("WSS requires TLS configuration")
 
                 // Force ALPN to http/1.1 for WebSocket -- matches Xray-core's
                 // tls.WithNextProto("http/1.1") in websocket/dialer.go.
@@ -337,7 +344,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // -- WebSocket VLESS Handshake --
@@ -388,7 +395,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
         initialData: ByteArray?
     ): VlessConnection {
         val huConfig = configuration.httpUpgrade
-            ?: throw VlessError.ConnectionFailed("HTTP upgrade transport specified but no configuration")
+            ?: throw ProxyError.ConnectionFailed("HTTP upgrade transport specified but no configuration")
 
         return if (configuration.tls != null) {
             connectHttpsUpgradeWithRetry(huConfig, command, destinationHost, destinationPort, initialData)
@@ -434,7 +441,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // -- HTTPS Upgrade (TCP -> TLS -> HTTP Upgrade -> raw TCP over TLS -> VLESS) --
@@ -456,7 +463,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
 
             try {
                 val baseTlsConfig = configuration.tls
-                    ?: throw VlessError.ConnectionFailed("HTTPS upgrade requires TLS configuration")
+                    ?: throw ProxyError.ConnectionFailed("HTTPS upgrade requires TLS configuration")
 
                 val tlsClient = TlsClient(baseTlsConfig)
                 val tlsConn = tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
@@ -477,7 +484,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // -- HTTP Upgrade VLESS Handshake --
@@ -535,7 +542,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
         initialData: ByteArray?
     ): VlessConnection {
         val xhttpConfig = configuration.xhttp
-            ?: throw VlessError.ConnectionFailed("XHTTP transport specified but no XHTTP configuration")
+            ?: throw ProxyError.ConnectionFailed("XHTTP transport specified but no XHTTP configuration")
 
         // Resolve mode: auto -> actual mode based on security
         val resolvedMode: XHttpMode = if (xhttpConfig.mode == XHttpMode.AUTO) {
@@ -629,7 +636,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // -- XHTTPS (TCP -> TLS -> XHTTP -> VLESS) --
@@ -653,7 +660,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
 
             try {
                 val baseTlsConfig = configuration.tls
-                    ?: throw VlessError.ConnectionFailed("XHTTPS requires TLS configuration")
+                    ?: throw ProxyError.ConnectionFailed("XHTTPS requires TLS configuration")
 
                 // Force ALPN to http/1.1 for XHTTP over TLS.
                 // Xray-core uses HTTP/2 when ALPN negotiates h2 (dialer.go:78-95),
@@ -710,7 +717,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // -- XHTTP Reality (TCP -> Reality TLS -> HTTP/2 -> XHTTP -> VLESS) --
@@ -762,7 +769,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // -- XHTTP VLESS Handshake --
@@ -813,6 +820,14 @@ class VlessClient(private val configuration: VlessConfiguration) {
         destinationPort: Int,
         initialData: ByteArray?
     ): VlessConnection {
+        // Tunneled: use existing tunnel connection (no NioSocket, no retries)
+        if (tunnel != null) {
+            tunnelTransport = TunneledTransport(tunnel)
+            return performHandshake(
+                command, destinationHost, destinationPort, initialData
+            )
+        }
+
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -836,7 +851,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // =========================================================================
@@ -880,7 +895,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // =========================================================================
@@ -899,6 +914,15 @@ class VlessClient(private val configuration: VlessConfiguration) {
         destinationPort: Int,
         initialData: ByteArray?
     ): VlessConnection {
+        // Tunneled: TLS handshake over existing tunnel connection (no retries)
+        if (tunnel != null) {
+            val tlsClient = TlsClient(tlsConfig)
+            val tlsConn = tlsClient.connect(TunneledTransport(tunnel))
+            this.tlsClient = tlsClient
+            this.tlsConnection = tlsConn
+            return performTlsHandshake(command, destinationHost, destinationPort, initialData)
+        }
+
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -924,7 +948,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
             }
         }
 
-        throw lastError ?: VlessError.ConnectionFailed("All retry attempts failed")
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
     // =========================================================================
@@ -958,7 +982,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
         }
 
         val tlsConn = tlsConnection
-            ?: throw VlessError.ConnectionFailed("Connection cancelled")
+            ?: throw ProxyError.ConnectionFailed("Connection cancelled")
         tlsConn.send(requestData)
 
         var vlessConnection: VlessConnection = if (command == VlessCommand.UDP) {
@@ -1014,14 +1038,14 @@ class VlessClient(private val configuration: VlessConfiguration) {
             requestData = requestData + initialData
         }
 
-        val conn = connection
-            ?: throw VlessError.ConnectionFailed("Connection cancelled")
-        conn.send(requestData)
+        val transport: Transport = tunnelTransport ?: connection
+            ?: throw ProxyError.ConnectionFailed("Connection cancelled")
+        transport.send(requestData)
 
         var vlessConnection: VlessConnection = if (command == VlessCommand.UDP) {
-            VlessDirectUdpConnection(conn)
+            VlessDirectUdpConnection(transport)
         } else {
-            VlessDirectConnection(conn)
+            VlessDirectConnection(transport)
         }
 
         if (isVision) {
@@ -1071,7 +1095,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
         }
 
         val realityConn = realityConnection
-            ?: throw VlessError.ConnectionFailed("Connection cancelled")
+            ?: throw ProxyError.ConnectionFailed("Connection cancelled")
         realityConn.send(requestData)
 
         var vlessConnection: VlessConnection = if (command == VlessCommand.UDP) {
@@ -1108,7 +1132,7 @@ class VlessClient(private val configuration: VlessConfiguration) {
     private fun validateOuterTlsForVision(connection: VlessConnection): Exception? {
         val version = connection.outerTlsVersion ?: return null  // No TLS (raw TCP) -- nothing to check
         if (version != TlsVersion.TLS13) {
-            return VlessError.ProtocolError("Vision requires outer TLS 1.3, found $version")
+            return ProxyError.ProtocolError("Vision requires outer TLS 1.3, found $version")
         }
         return null
     }

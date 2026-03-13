@@ -59,6 +59,7 @@
     <string name="test_all">Probar todo</string>
     <string name="test_latency">Probar latencia</string>
     <string name="timeout">tiempo agotado</string>
+    <string name="insecure">inseguro</string>
     <string name="trademarks">Marcas comerciales</string>
     <string name="transport">Transporte</string>
     <string name="unknown">Desconocido</string>
@@ -80,4 +81,68 @@
     <string name="subscription">Suscripción</string>
     <string name="open_source_libraries">Bibliotecas de código abierto</string>
     <string name="supports_vless_link">Admite enlace VLESS, enlace de suscripción y enlace Clash</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">DNS cifrado</string>
+    <string name="dns_protocol">Protocolo</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">Servidor DNS</string>
+    <string name="dns_server_footer">Déjalo vacío para descubrir y actualizar automáticamente a servidores DNS cifrados.</string>
+    <string name="encrypted_dns_warning">Activar DNS cifrado aumentará el tiempo de espera de conexión e impedirá que las reglas de enrutamiento funcionen.</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">Conexiones IPv6</string>
+    <string name="ipv6_dns_lookup">Búsqueda DNS IPv6</string>
+    <string name="ipv6_connections_footer">Enrutar conexiones IPv6 a través del túnel.</string>
+    <string name="ipv6_dns_footer">Responder a consultas DNS AAAA con direcciones IPv6.</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">Certificados de confianza</string>
+    <string name="no_trusted_certificates">Sin certificados de confianza</string>
+    <string name="add_certificate">Agregar certificado</string>
+    <string name="sha256_fingerprint">Huella digital SHA-256</string>
+    <string name="sha256_fingerprint_prompt">Ingresa la huella digital SHA-256 (64 caracteres hexadecimales) del certificado de confianza.</string>
+    <string name="invalid_fingerprint">Huella digital no válida</string>
+    <string name="invalid_fingerprint_message">Huella digital no válida. Debe ser una cadena hexadecimal de 64 caracteres, o ya existe.</string>
+    <string name="copy">Copiar</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">Esto omitirá la validación del certificado TLS, haciendo que tus conexiones sean vulnerables a ataques MITM.</string>
+    <string name="allow_anyway">Permitir de todos modos</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">Protocolo</string>
+    <string name="password">Contraseña</string>
+    <string name="username">Nombre de usuario</string>
+    <string name="method">Método</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">Copiar enlace</string>
+    <string name="supports_proxy_link">Admite enlaces VLESS, Shadowsocks, NaiveProxy, de suscripción y Clash</string>
+
+    <!-- Phase 9: QR Code -->
+    <string name="qr_code_not_supported">El código QR no contiene un enlace de proxy compatible</string>
+
+    <!-- Chains -->
+    <string name="chains">Cadenas</string>
+    <string name="no_chains">Sin cadenas</string>
+    <string name="tap_to_add_chain">Toca + para crear una cadena de proxy.</string>
+    <string name="new_chain">Nueva cadena</string>
+    <string name="edit_chain">Editar cadena</string>
+    <string name="chain_name">Nombre de cadena</string>
+    <string name="add_proxy_to_chain">Agregar proxy</string>
+    <string name="proxies_in_chain">Proxies</string>
+    <string name="chain_min_proxies">Agrega al menos 2 proxies para formar una cadena.</string>
+    <string name="not_enough_proxies">Proxies insuficientes</string>
+    <string name="not_enough_proxies_message">Una cadena de proxy necesita al menos 2 proxies.</string>
+    <string name="invalid_chain">Cadena no válida — faltan algunos proxies</string>
+    <string name="select_proxy">Seleccionar proxy</string>
+    <string name="no_proxies_available">No hay proxies disponibles</string>
+    <string name="all_proxies_in_chain">Todos los proxies ya están en esta cadena.</string>
+    <string name="entry">Entrada</string>
+    <string name="exit">Salida</string>
+    <string name="route_preview">Vista previa de ruta</string>
+    <string name="n_proxies">%d proxies</string>
 </resources>

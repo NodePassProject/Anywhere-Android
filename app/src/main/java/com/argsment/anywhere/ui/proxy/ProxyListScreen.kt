@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,10 +50,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.Subscription
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.ui.components.ProxyCardContent
 import com.argsment.anywhere.viewmodel.VpnViewModel
 import kotlinx.coroutines.launch
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -65,7 +69,7 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
 
     var showingAddSheet by remember { mutableStateOf(false) }
     var showingManualAddSheet by remember { mutableStateOf(false) }
-    var configurationToEdit by remember { mutableStateOf<VlessConfiguration?>(null) }
+    var configurationToEdit by remember { mutableStateOf<ProxyConfiguration?>(null) }
     var updatingSubscriptionId by remember { mutableStateOf<java.util.UUID?>(null) }
     var showSubscriptionError by remember { mutableStateOf(false) }
     var subscriptionErrorMessage by remember { mutableStateOf("") }
@@ -329,7 +333,7 @@ private fun SubscriptionHeader(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConfigurationRow(
-    configuration: VlessConfiguration,
+    configuration: ProxyConfiguration,
     isSelected: Boolean,
     latency: com.argsment.anywhere.data.network.LatencyResult?,
     onSelect: () -> Unit,
@@ -337,6 +341,7 @@ private fun ConfigurationRow(
     onDelete: () -> Unit,
     onTestLatency: () -> Unit
 ) {
+    val context = LocalContext.current
     var showMenu by remember { mutableStateOf(false) }
 
     Box {
@@ -365,6 +370,15 @@ private fun ConfigurationRow(
                 onClick = {
                     showMenu = false
                     onTestLatency()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.copy_link)) },
+                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                onClick = {
+                    showMenu = false
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("proxy_url", configuration.toUrl()))
                 }
             )
             DropdownMenuItem(

@@ -59,6 +59,7 @@
     <string name="test_all">အားလုံးစမ်းသပ်</string>
     <string name="test_latency">Latency စမ်းသပ်</string>
     <string name="timeout">အချိန်ကုန်</string>
+    <string name="insecure">မလုံခြုံ</string>
     <string name="trademarks">ကုန်အမှတ်တံဆိပ်များ</string>
     <string name="transport">အပို့အဆောင်</string>
     <string name="unknown">မသိ</string>
@@ -80,4 +81,68 @@
     <string name="subscription">စာရင်းသွင်းမှု</string>
     <string name="open_source_libraries">အွပ်ပင်းဆို့စ် စာကြည့်တိုက်များ</string>
     <string name="supports_vless_link">VLESS လင့်ခ်၊ စာရင်းသွင်းမှုလင့်ခ်နှင့် Clash လင့်ခ်ကို ပံ့ပိုးပါသည်</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">ကုဒ်ဝှက် DNS</string>
+    <string name="dns_protocol">ပရိုတိုကော</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">DNS ဆာဗာ</string>
+    <string name="dns_server_footer">ကုဒ်ဝှက် DNS ဆာဗာများကို အလိုအလျောက်ရှာဖွေပြီး အဆင့်မြှင့်ရန် ဗလာထားပါ။</string>
+    <string name="encrypted_dns_warning">ကုဒ်ဝှက် DNS ကိုဖွင့်ခြင်းသည် ချိတ်ဆက်မှုစောင့်ဆိုင်းချိန်ကို တိုးစေပြီး လမ်းကြောင်းသတ်မှတ်ချက်များ အလုပ်မလုပ်စေပါ။</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">IPv6 ချိတ်ဆက်မှုများ</string>
+    <string name="ipv6_dns_lookup">IPv6 DNS ရှာဖွေမှု</string>
+    <string name="ipv6_connections_footer">IPv6 ချိတ်ဆက်မှုများကို ဥမင်လိုဏ်မှတစ်ဆင့် လမ်းကြောင်းသတ်မှတ်ပါ။</string>
+    <string name="ipv6_dns_footer">AAAA DNS မေးခွန်းများကို IPv6 လိပ်စာများဖြင့် တုံ့ပြန်ပါ။</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">ယုံကြည်ရသော လက်မှတ်များ</string>
+    <string name="no_trusted_certificates">ယုံကြည်ရသော လက်မှတ်များ မရှိပါ</string>
+    <string name="add_certificate">လက်မှတ်ထည့်ရန်</string>
+    <string name="sha256_fingerprint">SHA-256 လက်ဗွေ</string>
+    <string name="sha256_fingerprint_prompt">ယုံကြည်ရမည့် လက်မှတ်၏ SHA-256 လက်ဗွေ (hex စာလုံး ၆၄ လုံး) ကို ထည့်ပါ။</string>
+    <string name="invalid_fingerprint">လက်ဗွေ မမှန်ကန်ပါ</string>
+    <string name="invalid_fingerprint_message">လက်ဗွေ မမှန်ကန်ပါ။ hex စာလုံး ၆၄ လုံးပါ စာတန်းဖြစ်ရမည်၊ သို့မဟုတ် ၎င်းသည် ရှိပြီးသားဖြစ်သည်။</string>
+    <string name="copy">ကူးယူ</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">၎င်းသည် TLS လက်မှတ်အတည်ပြုခြင်းကို ကျော်လွှားမည်ဖြစ်ပြီး သင့်ချိတ်ဆက်မှုများကို MITM တိုက်ခိုက်မှုများအတွက် ထိခိုက်လွယ်စေသည်။</string>
+    <string name="allow_anyway">ဘယ်လိုပဲဖြစ်ဖြစ် ခွင့်ပြုရန်</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">ပရိုတိုကော</string>
+    <string name="password">စကားဝှက်</string>
+    <string name="username">အသုံးပြုသူအမည်</string>
+    <string name="method">နည်းလမ်း</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">လင့်ခ်ကူးယူ</string>
+    <string name="supports_proxy_link">VLESS၊ Shadowsocks၊ NaiveProxy၊ စာရင်းသွင်းမှုနှင့် Clash လင့်ခ်များကို ပံ့ပိုးပါသည်</string>
+
+    <!-- Phase 9: QR Code -->
+    <string name="qr_code_not_supported">QR ကုဒ်တွင် ပံ့ပိုးထားသော ပရောက်စီလင့်ခ် မပါဝင်ပါ</string>
+
+    <!-- Chains -->
+    <string name="chains">ချိန်းများ</string>
+    <string name="no_chains">ချိန်းမရှိပါ</string>
+    <string name="tap_to_add_chain">ပရောက်စီချိန်းဖန်တီးရန် + ကိုနှိပ်ပါ။</string>
+    <string name="new_chain">ချိန်းအသစ်</string>
+    <string name="edit_chain">ချိန်းတည်းဖြတ်</string>
+    <string name="chain_name">ချိန်းအမည်</string>
+    <string name="add_proxy_to_chain">ပရောက်စီထည့်ရန်</string>
+    <string name="proxies_in_chain">ပရောက်စီများ</string>
+    <string name="chain_min_proxies">ချိန်းဖန်တီးရန် ပရောက်စီ အနည်းဆုံး ၂ ခု ထည့်ပါ။</string>
+    <string name="not_enough_proxies">ပရောက်စီ မလုံလောက်ပါ</string>
+    <string name="not_enough_proxies_message">ပရောက်စီချိန်းတစ်ခုအတွက် ပရောက်စီ အနည်းဆုံး ၂ ခု လိုအပ်ပါသည်။</string>
+    <string name="invalid_chain">ချိန်းမမှန်ကန်ပါ — ပရောက်စီအချို့ ပျောက်ဆုံးနေသည်</string>
+    <string name="select_proxy">ပရောက်စီရွေးချယ်ရန်</string>
+    <string name="no_proxies_available">ပရောက်စီ မရနိုင်ပါ</string>
+    <string name="all_proxies_in_chain">ပရောက်စီအားလုံး ဤချိန်းတွင် ပါဝင်ပြီးသားဖြစ်သည်။</string>
+    <string name="entry">ဝင်ပေါက်</string>
+    <string name="exit">ထွက်ပေါက်</string>
+    <string name="route_preview">လမ်းကြောင်း အကြိုကြည့်ရှုမှု</string>
+    <string name="n_proxies">ပရောက်စီ %d ခု</string>
 </resources>

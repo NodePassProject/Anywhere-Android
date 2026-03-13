@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.vless
 
-import com.argsment.anywhere.data.model.VlessError
+import com.argsment.anywhere.data.model.ProxyError
 import java.security.SecureRandom
 import kotlin.math.max
 import kotlin.math.min
@@ -509,8 +509,25 @@ class VlessVisionConnection(
         if (isDirectCopy) {
             return innerConnection.receiveDirectRaw()
         } else {
-            val data = innerConnection.receive() ?: return null
-            if (data.isEmpty()) return null
+            val data: ByteArray?
+            try {
+                data = innerConnection.receive()
+            } catch (e: RealityError.DecryptionFailed) {
+                // Reality decryption failed — the server has transitioned to direct copy mode
+                // (sending raw inner TLS data without Reality encryption).
+                // Switch reader to direct copy and return the raw data.
+                synchronized(lock) {
+                    trafficState.readerDirectCopy = true
+                    trafficState.readerWithinPaddingBuffers = false
+                }
+                val rawData = e.rawData
+                if (rawData != null && rawData.isNotEmpty()) {
+                    return rawData
+                }
+                return innerConnection.receiveDirectRaw()
+            }
+
+            if (data == null || data.isEmpty()) return null
 
             val processedData: ByteArray
             synchronized(lock) {

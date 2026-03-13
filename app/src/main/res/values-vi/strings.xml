@@ -59,6 +59,7 @@
     <string name="test_all">Kiểm tra tất cả</string>
     <string name="test_latency">Kiểm tra độ trễ</string>
     <string name="timeout">hết thời gian</string>
+    <string name="insecure">không an toàn</string>
     <string name="trademarks">Nhãn hiệu</string>
     <string name="transport">Truyền tải</string>
     <string name="unknown">Không xác định</string>
@@ -80,4 +81,68 @@
     <string name="subscription">Đăng ký</string>
     <string name="open_source_libraries">Thư viện mã nguồn mở</string>
     <string name="supports_vless_link">Hỗ trợ liên kết VLESS, liên kết đăng ký và liên kết Clash</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">DNS mã hóa</string>
+    <string name="dns_protocol">Giao thức</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">Máy chủ DNS</string>
+    <string name="dns_server_footer">Để trống để tự động phát hiện và nâng cấp lên máy chủ DNS mã hóa.</string>
+    <string name="encrypted_dns_warning">Bật DNS mã hóa sẽ tăng thời gian chờ kết nối và ngăn quy tắc định tuyến hoạt động.</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">Kết nối IPv6</string>
+    <string name="ipv6_dns_lookup">Tra cứu DNS IPv6</string>
+    <string name="ipv6_connections_footer">Định tuyến kết nối IPv6 qua đường hầm.</string>
+    <string name="ipv6_dns_footer">Phản hồi truy vấn DNS AAAA bằng địa chỉ IPv6.</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">Chứng chỉ tin cậy</string>
+    <string name="no_trusted_certificates">Không có chứng chỉ tin cậy</string>
+    <string name="add_certificate">Thêm chứng chỉ</string>
+    <string name="sha256_fingerprint">Vân tay SHA-256</string>
+    <string name="sha256_fingerprint_prompt">Nhập vân tay SHA-256 (64 ký tự hex) của chứng chỉ cần tin cậy.</string>
+    <string name="invalid_fingerprint">Vân tay không hợp lệ</string>
+    <string name="invalid_fingerprint_message">Vân tay không hợp lệ. Phải là chuỗi hex 64 ký tự, hoặc nó đã tồn tại.</string>
+    <string name="copy">Sao chép</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">Thao tác này sẽ bỏ qua xác thực chứng chỉ TLS, khiến kết nối của bạn dễ bị tấn công MITM.</string>
+    <string name="allow_anyway">Vẫn cho phép</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">Giao thức</string>
+    <string name="password">Mật khẩu</string>
+    <string name="username">Tên người dùng</string>
+    <string name="method">Phương thức</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">Sao chép liên kết</string>
+    <string name="supports_proxy_link">Hỗ trợ liên kết VLESS, Shadowsocks, NaiveProxy, đăng ký và Clash</string>
+
+    <!-- Phase 9: QR Code -->
+    <string name="qr_code_not_supported">Mã QR không chứa liên kết proxy được hỗ trợ</string>
+
+    <!-- Chains -->
+    <string name="chains">Chuỗi</string>
+    <string name="no_chains">Không có chuỗi</string>
+    <string name="tap_to_add_chain">Nhấn + để tạo chuỗi proxy.</string>
+    <string name="new_chain">Chuỗi mới</string>
+    <string name="edit_chain">Sửa chuỗi</string>
+    <string name="chain_name">Tên chuỗi</string>
+    <string name="add_proxy_to_chain">Thêm proxy</string>
+    <string name="proxies_in_chain">Proxy</string>
+    <string name="chain_min_proxies">Thêm ít nhất 2 proxy để tạo chuỗi.</string>
+    <string name="not_enough_proxies">Không đủ proxy</string>
+    <string name="not_enough_proxies_message">Chuỗi proxy cần ít nhất 2 proxy.</string>
+    <string name="invalid_chain">Chuỗi không hợp lệ — một số proxy bị thiếu</string>
+    <string name="select_proxy">Chọn proxy</string>
+    <string name="no_proxies_available">Không có proxy khả dụng</string>
+    <string name="all_proxies_in_chain">Tất cả proxy đã có trong chuỗi này.</string>
+    <string name="entry">Đầu vào</string>
+    <string name="exit">Đầu ra</string>
+    <string name="route_preview">Xem trước tuyến đường</string>
+    <string name="n_proxies">%d proxy</string>
 </resources>

@@ -59,6 +59,7 @@
     <string name="test_all">Hemmesini barla</string>
     <string name="test_latency">Gijikdirmäni barla</string>
     <string name="timeout">wagt gutardy</string>
+    <string name="insecure">howpsuz däl</string>
     <string name="trademarks">Haryt nyşanlary</string>
     <string name="transport">Transport</string>
     <string name="unknown">Näbelli</string>
@@ -80,4 +81,68 @@
     <string name="subscription">Abuna</string>
     <string name="open_source_libraries">Açyk çeşme kitaphanalary</string>
     <string name="supports_vless_link">VLESS baglanyşygyny, abuna baglanyşygyny we Clash baglanyşygyny goldaýar</string>
+
+    <!-- Phase 9: Encrypted DNS -->
+    <string name="encrypted_dns">Şifrlenen DNS</string>
+    <string name="dns_protocol">Protokol</string>
+    <string name="dns_over_https">DNS over HTTPS</string>
+    <string name="dns_over_tls">DNS over TLS</string>
+    <string name="dns_server">DNS serweri</string>
+    <string name="dns_server_footer">Şifrlenen DNS serwerleri awtomatik tapmak we täzelemek üçin boş goýuň.</string>
+    <string name="encrypted_dns_warning">Şifrlenen DNS-i açmak birikdirme garaşma wagtyny artdyrar we ugratma düzgünleriniň işlemeginiň öňüni alar.</string>
+
+    <!-- Phase 9: IPv6 -->
+    <string name="ipv6">IPv6</string>
+    <string name="ipv6_connections">IPv6 birikmeleri</string>
+    <string name="ipv6_dns_lookup">IPv6 DNS gözlegi</string>
+    <string name="ipv6_connections_footer">IPv6 birikleri tunel arkaly ugrat.</string>
+    <string name="ipv6_dns_footer">AAAA DNS soraglaryna IPv6 salgylary bilen jogap ber.</string>
+
+    <!-- Phase 9: Trusted Certificates -->
+    <string name="trusted_certificates">Ynanylýan şahadatnamalar</string>
+    <string name="no_trusted_certificates">Ynanylýan şahadatnama ýok</string>
+    <string name="add_certificate">Şahadatnama goş</string>
+    <string name="sha256_fingerprint">SHA-256 barmak yzy</string>
+    <string name="sha256_fingerprint_prompt">Ynanylmaly şahadatnamanyň SHA-256 barmak yzyny (64 on alty sanly belgiler) giriziň.</string>
+    <string name="invalid_fingerprint">Nädogry barmak yzy</string>
+    <string name="invalid_fingerprint_message">Nädogry barmak yzy. 64 belgili on alty sanly setir bolmaly ýa-da eýýäm bar.</string>
+    <string name="copy">Göçür</string>
+
+    <!-- Phase 9: Security -->
+    <string name="allow_insecure_warning">Bu TLS şahadatnama barlagyny geçer, birikmeleriňizi MITM hüjümlerine garşy ejiz eder.</string>
+    <string name="allow_anyway">Şonda-da rugsat ber</string>
+
+    <!-- Phase 9: Proxy Editor -->
+    <string name="protocol_label">Protokol</string>
+    <string name="password">Parol</string>
+    <string name="username">Ulanyjy ady</string>
+    <string name="method">Usul</string>
+
+    <!-- Phase 9: Proxy List -->
+    <string name="copy_link">Baglanyşygy göçür</string>
+    <string name="supports_proxy_link">VLESS, Shadowsocks, NaiveProxy, abuna we Clash baglanyşyklaryny goldaýar</string>
+
+    <!-- Phase 9: QR Code -->
+    <string name="qr_code_not_supported">QR kodda goldanylýan proksi baglanyşygy ýok</string>
+
+    <!-- Chains -->
+    <string name="chains">Zynjyrlar</string>
+    <string name="no_chains">Zynjyr ýok</string>
+    <string name="tap_to_add_chain">Proksi zynjyr döretmek üçin + basyň.</string>
+    <string name="new_chain">Täze zynjyr</string>
+    <string name="edit_chain">Zynjyry üýtget</string>
+    <string name="chain_name">Zynjyr ady</string>
+    <string name="add_proxy_to_chain">Proksi goş</string>
+    <string name="proxies_in_chain">Proksiler</string>
+    <string name="chain_min_proxies">Zynjyr döretmek üçin azyndan 2 proksi goşuň.</string>
+    <string name="not_enough_proxies">Ýeterlik proksi ýok</string>
+    <string name="not_enough_proxies_message">Proksi zynjyry üçin azyndan 2 proksi gerek.</string>
+    <string name="invalid_chain">Nädogry zynjyr — käbir proksiler ýok</string>
+    <string name="select_proxy">Proksi saýla</string>
+    <string name="no_proxies_available">Elýeterli proksi ýok</string>
+    <string name="all_proxies_in_chain">Ähli proksiler eýýäm bu zynjyrda.</string>
+    <string name="entry">Giriş</string>
+    <string name="exit">Çykyş</string>
+    <string name="route_preview">Ugur öňünden görmek</string>
+    <string name="n_proxies">%d proksi</string>
 </resources>

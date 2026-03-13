@@ -17,12 +17,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
-import com.argsment.anywhere.data.model.VlessConfiguration
+import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.network.LatencyResult
 
 @Composable
 fun ProxyCardContent(
-    configuration: VlessConfiguration,
+    configuration: ProxyConfiguration,
     isSelected: Boolean,
     latency: LatencyResult?,
     modifier: Modifier = Modifier
@@ -53,27 +53,28 @@ fun ProxyCardContent(
                 maxLines = 1
             )
             Row {
+                val badgeColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                val badgeStyle = MaterialTheme.typography.labelSmall
+                val dot = " \u00B7 "
+                Text(
+                    text = configuration.outboundProtocol.displayName,
+                    style = badgeStyle,
+                    color = badgeColor
+                )
+                Text(text = dot, style = badgeStyle, color = badgeColor)
                 Text(
                     text = configuration.transport.uppercase(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    style = badgeStyle,
+                    color = badgeColor
                 )
-                Text(
-                    text = " \u00B7 ",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
-                Text(
-                    text = configuration.security.uppercase(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
-                if (configuration.flow?.contains("vision") == true) {
-                    Text(
-                        text = " \u00B7 Vision",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
+                val security = configuration.security.uppercase()
+                if (security != "NONE") {
+                    Text(text = dot, style = badgeStyle, color = badgeColor)
+                    Text(text = security, style = badgeStyle, color = badgeColor)
+                }
+                if (configuration.flow?.contains("vision", ignoreCase = true) == true) {
+                    Text(text = dot, style = badgeStyle, color = badgeColor)
+                    Text(text = "Vision", style = badgeStyle, color = badgeColor)
                 }
             }
         }
@@ -102,6 +103,14 @@ fun LatencyBadge(latency: LatencyResult?, modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = color,
+                modifier = modifier
+            )
+        }
+        is LatencyResult.Insecure -> {
+            Text(
+                text = stringResource(R.string.insecure),
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFF44336), // red
                 modifier = modifier
             )
         }
