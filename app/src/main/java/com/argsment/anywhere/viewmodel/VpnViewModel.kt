@@ -109,6 +109,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             if (localBinder.service.isRunning) {
                 _vpnStatus.value = VpnStatus.CONNECTED
                 startStatsPolling()
+                syncProxyServerAddresses()
             }
         }
 
@@ -600,6 +601,23 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         if (_vpnStatus.value == VpnStatus.CONNECTED) {
             prefs.edit().putLong("routingChanged", System.currentTimeMillis()).apply()
         }
+    }
+
+    // =========================================================================
+    // Proxy Server Address Bypass
+    // =========================================================================
+
+    /** Collects all proxy server addresses (domains + resolved IPs) from all
+     *  configurations and sends them to the VPN service. This prevents routing
+     *  loops when proxy server domains match routing rules. */
+    private fun syncProxyServerAddresses() {
+        val service = vpnService ?: return
+        val addresses = mutableListOf<String>()
+        for (config in configRepository.getAll()) {
+            addresses.add(config.serverAddress)
+            config.resolvedIP?.let { addresses.add(it) }
+        }
+        service.updateProxyServerAddresses(addresses)
     }
 
     // =========================================================================

@@ -23,8 +23,8 @@ android {
         applicationId = "com.argsment.anywhere"
         minSdk = 36
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.3"
+        versionCode = 4
+        versionName = "1.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

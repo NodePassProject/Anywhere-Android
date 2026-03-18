@@ -114,6 +114,10 @@ class AnywhereVpnService : VpnService() {
                 "(connect: ${config.connectAddress}), security: ${config.security}, transport: ${config.transport}")
 
         currentConfig = config
+        getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("lastConfigurationData", json.encodeToString(ProxyConfiguration.serializer(), config))
+            .apply()
 
         // Create foreground notification
         startForeground(NOTIFICATION_ID, buildNotification(config.name),
@@ -129,7 +133,8 @@ class AnywhereVpnService : VpnService() {
 
         // Start lwIP stack
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-        val ipv6Enabled = prefs.getBoolean("ipv6Enabled", false)
+        val ipv6Connections = prefs.getBoolean("ipv6ConnectionsEnabled", false)
+        val ipv6Dns = prefs.getBoolean("ipv6DnsEnabled", false)
 
         // Register socket protector so protocol code can protect outbound sockets
         SocketProtector.setProtector(
@@ -145,7 +150,7 @@ class AnywhereVpnService : VpnService() {
             reapplyTunnelSettings(config)
         }
 
-        stack.start(fd, config, ipv6Enabled)
+        stack.start(fd, config, ipv6Connections, ipv6Dns)
     }
 
     private fun stopVpn() {
@@ -165,8 +170,18 @@ class AnywhereVpnService : VpnService() {
 
     /** Handles system auto-start when Always On VPN is enabled. */
     private fun handleAlwaysOnStart() {
-        // Load last used config from SharedPreferences
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
+        val lastConfig = prefs.getString("lastConfigurationData", null)?.let { saved ->
+            runCatching {
+                json.decodeFromString(ProxyConfiguration.serializer(), saved)
+            }.getOrNull()
+        }
+        if (lastConfig != null) {
+            startVpn(lastConfig)
+            return
+        }
+
+        // Fallback for older installs that do not yet have a saved last configuration.
         val configId = prefs.getString("selectedConfigurationId", null)
         if (configId == null) {
             Log.w(TAG, "[VPN] Always On: no saved configuration")
@@ -206,7 +221,7 @@ class AnywhereVpnService : VpnService() {
 
     private fun buildTunInterface(config: ProxyConfiguration): ParcelFileDescriptor? {
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-        val ipv6Enabled = prefs.getBoolean("ipv6Enabled", false)
+        val ipv6Enabled = prefs.getBoolean("ipv6ConnectionsEnabled", false)
         val remoteAddress = config.connectAddress
 
         val builder = Builder()
@@ -359,6 +374,11 @@ class AnywhereVpnService : VpnService() {
     fun getStats(): Pair<Long, Long> {
         val stack = lwipStack ?: return 0L to 0L
         return stack.totalBytesIn.get() to stack.totalBytesOut.get()
+    }
+
+    /** Updates proxy server addresses to prevent routing loops. */
+    fun updateProxyServerAddresses(addresses: List<String>) {
+        lwipStack?.updateProxyServerAddresses(addresses)
     }
 
     /** Returns whether the VPN is currently running. */

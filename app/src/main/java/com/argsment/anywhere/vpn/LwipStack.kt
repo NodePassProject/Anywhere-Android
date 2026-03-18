@@ -54,9 +54,15 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         private set
 
     // Settings (read from SharedPreferences)
-    var ipv6Enabled: Boolean = false
+    var ipv6ConnectionsEnabled: Boolean = false
         private set
-    var dohEnabled: Boolean = false
+    var ipv6DNSEnabled: Boolean = false
+        private set
+    var encryptedDnsEnabled: Boolean = false
+        private set
+    var encryptedDnsProtocol: String = "doh"
+        private set
+    var encryptedDnsServer: String = ""
         private set
     private var running = false
     @Volatile
@@ -76,6 +82,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     /** Global traffic counters. */
     val totalBytesIn = AtomicLong(0)
     val totalBytesOut = AtomicLong(0)
+
+    /** All proxy server addresses (domains and resolved IPs) from all configurations.
+     *  Prevents routing loops when proxy server domains match routing rules. */
+    private var proxyServerAddresses: Set<String> = emptySet()
 
     /** Mux manager for multiplexing UDP flows (created when Vision+Mux is active). */
     var muxManager: MuxManager? = null
@@ -101,20 +111,79 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     /** Callback to request VPN tunnel settings reapply (e.g. for IPv6 toggle). */
     var onTunnelSettingsNeedReapply: (() -> Unit)? = null
 
+    private sealed class FakeIpResolution {
+        data object Passthrough : FakeIpResolution()
+        data class Resolved(
+            val domain: String,
+            val configurationOverride: ProxyConfiguration?,
+            val forceBypass: Boolean
+        ) : FakeIpResolution()
+        data object Drop : FakeIpResolution()
+        data object Unreachable : FakeIpResolution()
+    }
+
     // -- Settings observation --
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when (key) {
-            "ipv6Enabled", "bypassCountryCode", "dohEnabled" -> handleSettingsChanged()
+            "ipv6ConnectionsEnabled",
+            "ipv6DnsEnabled",
+            "bypassCountryCode",
+            "encryptedDnsEnabled",
+            "encryptedDnsProtocol",
+            "encryptedDnsServer" -> handleSettingsChanged()
             "routingChanged" -> handleRoutingChanged()
         }
     }
 
     // -- GeoIP Bypass --
 
-    /** Returns true if traffic to the given host should bypass the tunnel. */
+    /** Returns true if traffic to the given host should bypass the tunnel.
+     *  Checks proxy server addresses first (prevents routing loops after config switch),
+     *  then falls back to GeoIP country-based bypass. */
     fun shouldBypass(host: String): Boolean {
+        if (isProxyServerAddress(host)) return true
         if (bypassCountry == 0) return false
         return geoIpDatabase?.lookup(host) == bypassCountry
+    }
+
+    /** Returns true if the given host matches any proxy server address across all
+     *  configurations. Prevents routing loops and ensures latency tests bypass the tunnel. */
+    private fun isProxyServerAddress(host: String): Boolean {
+        // Fast path: direct set lookup (covers domains and resolved IPs)
+        if (proxyServerAddresses.contains(host)) return true
+        // Fallback: check active config in case proxyServerAddresses hasn't been populated yet
+        val config = configuration ?: return false
+        if (host == config.serverAddress || host == config.resolvedIP) return true
+        val chain = config.chain
+        if (chain != null) {
+            for (proxy in chain) {
+                if (host == proxy.serverAddress || host == proxy.resolvedIP) return true
+            }
+        }
+        return false
+    }
+
+    /** Updates the set of proxy server addresses from the app.
+     *  Immediately stores domains, then resolves them to IPs in the background. */
+    fun updateProxyServerAddresses(addresses: List<String>) {
+        lwipExecutor.execute {
+            proxyServerAddresses = addresses.toHashSet()
+            // Resolve domains to IPs in background
+            Thread({
+                val resolvedIPs = mutableSetOf<String>()
+                for (address in addresses) {
+                    try {
+                        val inetAddresses = InetAddress.getAllByName(address)
+                        for (addr in inetAddresses) {
+                            resolvedIPs.add(addr.hostAddress ?: continue)
+                        }
+                    } catch (_: Exception) {}
+                }
+                lwipExecutor.execute {
+                    proxyServerAddresses = proxyServerAddresses + resolvedIPs
+                }
+            }, "proxy-resolver").apply { isDaemon = true }.start()
+        }
     }
 
     private fun loadBypassCountry() {
@@ -125,8 +194,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
     }
 
-    private fun loadDoHSetting() {
-        dohEnabled = prefs.getBoolean("dohEnabled", false)
+    private fun loadEncryptedDnsSettings() {
+        encryptedDnsEnabled = prefs.getBoolean("encryptedDnsEnabled", false)
+        encryptedDnsProtocol = prefs.getString("encryptedDnsProtocol", "doh") ?: "doh"
+        encryptedDnsServer = prefs.getString("encryptedDnsServer", "") ?: ""
     }
 
     // -- Lifecycle --
@@ -138,14 +209,15 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
      * @param config      The VLESS proxy configuration
      * @param ipv6        Whether IPv6 is enabled
      */
-    fun start(fd: ParcelFileDescriptor, config: ProxyConfiguration, ipv6: Boolean = false) {
-        Log.i(TAG, "[LwipStack] Starting, ipv6Enabled=$ipv6")
+    fun start(fd: ParcelFileDescriptor, config: ProxyConfiguration, ipv6Connections: Boolean = false, ipv6Dns: Boolean = false) {
+        Log.i(TAG, "[LwipStack] Starting, ipv6Connections=$ipv6Connections, ipv6Dns=$ipv6Dns")
         instance = this
         this.tunFd = fd
         this.tunInput = FileInputStream(fd.fileDescriptor)
         this.tunOutput = FileOutputStream(fd.fileDescriptor)
         this.configuration = config
-        this.ipv6Enabled = ipv6
+        this.ipv6ConnectionsEnabled = ipv6Connections
+        this.ipv6DNSEnabled = ipv6Dns
 
         // Register as lwIP callback handler
         NativeBridge.callback = this
@@ -160,7 +232,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
                 geoIpDatabase = GeoIpDatabase.load(context)
             }
             loadBypassCountry()
-            loadDoHSetting()
+            loadEncryptedDnsSettings()
 
             // Create MuxManager when Vision+Mux is active
             if (config.muxEnabled && (config.flow == "xtls-rprx-vision" || config.flow == "xtls-rprx-vision-udp443")) {
@@ -173,7 +245,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             startTimeoutTimer()
             startUdpCleanupTimer()
             startReadingPackets()
-            Log.i(TAG, "[LwipStack] Started, mux=${muxManager != null}, bypass=${bypassCountry != 0}, doh=$dohEnabled")
+            Log.i(TAG, "[LwipStack] Started, mux=${muxManager != null}, bypass=${bypassCountry != 0}, encryptedDns=$encryptedDnsEnabled, ipv6conn=$ipv6ConnectionsEnabled, ipv6dns=$ipv6DNSEnabled")
         }
 
         startObservingSettings()
@@ -208,10 +280,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     }
 
     /** Switches to a new configuration, tearing down all active connections. */
-    fun switchConfiguration(newConfig: ProxyConfiguration, ipv6: Boolean? = null) {
+    fun switchConfiguration(newConfig: ProxyConfiguration) {
         Log.i(TAG, "[LwipStack] Switching configuration")
         lwipExecutor.execute {
-            restartStack(newConfig, ipv6 ?: ipv6Enabled)
+            restartStack(newConfig, ipv6ConnectionsEnabled, ipv6DNSEnabled)
         }
     }
 
@@ -264,13 +336,14 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     }
 
     /** Tears down and restarts the lwIP stack. Must be called on lwipExecutor. */
-    private fun restartStack(config: ProxyConfiguration, ipv6: Boolean) {
+    private fun restartStack(config: ProxyConfiguration, ipv6Connections: Boolean, ipv6Dns: Boolean) {
         shutdownInternal()
 
         this.configuration = config
-        this.ipv6Enabled = ipv6
+        this.ipv6ConnectionsEnabled = ipv6Connections
+        this.ipv6DNSEnabled = ipv6Dns
         loadBypassCountry()
-        loadDoHSetting()
+        loadEncryptedDnsSettings()
 
         if (config.muxEnabled && (config.flow == "xtls-rprx-vision" || config.flow == "xtls-rprx-vision-udp443")) {
             muxManager = MuxManager(config, lwipExecutor.asCoroutineDispatcher())
@@ -278,7 +351,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
         domainRouter.loadRoutingConfiguration()
         domainRouter.loadBypassCountryRules()
-        fakeIpPool.rebuild(domainRouter)
         NativeBridge.nativeInit()
         startTimeoutTimer()
         startUdpCleanupTimer()
@@ -288,7 +360,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             tunFdSwapped = false
             startReadingPackets()
         }
-        Log.i(TAG, "[LwipStack] Restarted, mux=${muxManager != null}, bypass=${bypassCountry != 0}, doh=$dohEnabled, ipv6=$ipv6Enabled")
+        Log.i(TAG, "[LwipStack] Restarted, mux=${muxManager != null}, bypass=${bypassCountry != 0}, encryptedDns=$encryptedDnsEnabled, ipv6conn=$ipv6ConnectionsEnabled, ipv6dns=$ipv6DNSEnabled")
     }
 
     // -- Settings Observation --
@@ -306,23 +378,39 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             if (!running) return@execute
             val config = configuration ?: return@execute
 
-            val newIpv6 = prefs.getBoolean("ipv6Enabled", false)
+            val newIpv6Connections = prefs.getBoolean("ipv6ConnectionsEnabled", false)
+            val newIpv6Dns = prefs.getBoolean("ipv6DnsEnabled", false)
             val newBypassCode = prefs.getString("bypassCountryCode", "") ?: ""
             val newBypass = if (newBypassCode.isEmpty()) 0 else GeoIpDatabase.packCountryCode(newBypassCode)
-            val newDoH = prefs.getBoolean("dohEnabled", false)
+            val newEncryptedDnsEnabled = prefs.getBoolean("encryptedDnsEnabled", false)
+            val newEncryptedDnsProtocol = prefs.getString("encryptedDnsProtocol", "doh") ?: "doh"
+            val newEncryptedDnsServer = prefs.getString("encryptedDnsServer", "") ?: ""
 
-            val ipv6Changed = newIpv6 != ipv6Enabled
+            val ipv6ConnectionsChanged = newIpv6Connections != ipv6ConnectionsEnabled
+            val ipv6DnsChanged = newIpv6Dns != ipv6DNSEnabled
             val bypassChanged = newBypass != bypassCountry
-            val dohChanged = newDoH != dohEnabled
+            val encryptedDnsEnabledChanged = newEncryptedDnsEnabled != encryptedDnsEnabled
+            val encryptedDnsProtocolChanged = newEncryptedDnsProtocol != encryptedDnsProtocol
+            val encryptedDnsServerChanged = newEncryptedDnsServer != encryptedDnsServer
 
-            if (!ipv6Changed && !bypassChanged && !dohChanged) return@execute
+            if (!ipv6ConnectionsChanged &&
+                !ipv6DnsChanged &&
+                !bypassChanged &&
+                !encryptedDnsEnabledChanged &&
+                !encryptedDnsProtocolChanged &&
+                !encryptedDnsServerChanged
+            ) return@execute
 
-            if (ipv6Changed) {
+            if (ipv6ConnectionsChanged ||
+                encryptedDnsEnabledChanged ||
+                encryptedDnsProtocolChanged ||
+                encryptedDnsServerChanged
+            ) {
                 onTunnelSettingsNeedReapply?.invoke()
             }
 
-            Log.i(TAG, "[LwipStack] Settings changed, restarting (bypass=${newBypass != 0}, ipv6=$newIpv6, doh=$newDoH)")
-            restartStack(config, newIpv6)
+            Log.i(TAG, "[LwipStack] Settings changed, restarting (bypass=${newBypass != 0}, ipv6conn=$newIpv6Connections, ipv6dns=$newIpv6Dns, encryptedDns=$newEncryptedDnsEnabled)")
+            restartStack(config, newIpv6Connections, newIpv6Dns)
         }
     }
 
@@ -331,7 +419,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             if (!running) return@execute
             val config = configuration ?: return@execute
             Log.i(TAG, "[LwipStack] Routing rules changed, restarting")
-            restartStack(config, ipv6Enabled)
+            restartStack(config, ipv6ConnectionsEnabled, ipv6DNSEnabled)
         }
     }
 
@@ -357,7 +445,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             return 0L
         }
 
-        if (isIpv6 && !ipv6Enabled) {
+        if (isIpv6 && !ipv6ConnectionsEnabled) {
             return 0L
         }
 
@@ -366,20 +454,31 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         var connectionConfig = defaultConfig
         var forceBypass = false
 
-        if (FakeIpPool.isFakeIp(dstIpString)) {
-            val entry = fakeIpPool.lookup(dstIpString)
-            if (entry != null) {
-                if (entry.isReject) {
-                    Log.d(TAG, "[FakeIP] TCP to ${entry.domain}:$dstPort — REJECT")
-                    return 0L
+        when (val resolution = resolveFakeIp(dstIpString, dstPort, "TCP")) {
+            FakeIpResolution.Passthrough -> {
+                domainRouter.matchIP(dstIpString)?.let { action ->
+                    when (action) {
+                        RouteAction.Direct -> forceBypass = true
+                        RouteAction.Reject -> return 0L
+                        is RouteAction.Proxy -> {
+                            val resolved = domainRouter.resolveConfiguration(action)
+                            if (resolved != null) {
+                                connectionConfig = inheritChain(defaultConfig, resolved)
+                            } else {
+                                Log.w(TAG, "[LwipStack] TCP proxy config ${action.configId} not found for IP $dstIpString")
+                            }
+                        }
+                    }
                 }
-                dstHost = entry.domain
-                forceBypass = entry.isDirect
-                connectionConfig = entry.configuration ?: defaultConfig
-            } else {
-                Log.d(TAG, "[FakeIP] TCP to $dstIpString:$dstPort — stale DNS cache (no pool entry)")
-                return 0L
             }
+            is FakeIpResolution.Resolved -> {
+                dstHost = resolution.domain
+                forceBypass = resolution.forceBypass
+                connectionConfig = resolution.configurationOverride?.let {
+                    inheritChain(defaultConfig, it)
+                } ?: defaultConfig
+            }
+            FakeIpResolution.Drop, FakeIpResolution.Unreachable -> return 0L
         }
 
         val connId = nextConnId.getAndIncrement()
@@ -426,7 +525,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         dstIp: ByteArray, dstPort: Int,
         isIpv6: Boolean, data: ByteArray
     ) {
-        if (isIpv6 && !ipv6Enabled) {
+        if (isIpv6 && !ipv6ConnectionsEnabled) {
             return
         }
 
@@ -447,18 +546,40 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         var flowConfig = defaultConfig
         var forceBypass = false
 
-        if (FakeIpPool.isFakeIp(dstIpString)) {
-            val entry = fakeIpPool.lookup(dstIpString)
-            if (entry != null) {
-                if (entry.isReject) {
-                    Log.d(TAG, "[FakeIP] UDP to ${entry.domain}:$dstPort — REJECT")
-                    return
+        when (val resolution = resolveFakeIp(dstIpString, dstPort, "UDP")) {
+            FakeIpResolution.Passthrough -> {
+                domainRouter.matchIP(dstIpString)?.let { action ->
+                    when (action) {
+                        RouteAction.Direct -> forceBypass = true
+                        RouteAction.Reject -> {
+                            sendIcmpPortUnreachable(srcIp, srcPort, dstIp, dstPort, isIpv6, data.size)
+                            return
+                        }
+                        is RouteAction.Proxy -> {
+                            val resolved = domainRouter.resolveConfiguration(action)
+                            if (resolved != null) {
+                                flowConfig = inheritChain(defaultConfig, resolved)
+                            } else {
+                                Log.w(TAG, "[LwipStack] UDP proxy config ${action.configId} not found for IP $dstIpString")
+                            }
+                        }
+                    }
                 }
-                dstHost = entry.domain
-                forceBypass = entry.isDirect
-                flowConfig = entry.configuration ?: defaultConfig
-            } else {
+            }
+            is FakeIpResolution.Resolved -> {
+                dstHost = resolution.domain
+                forceBypass = resolution.forceBypass
+                flowConfig = resolution.configurationOverride?.let {
+                    inheritChain(defaultConfig, it)
+                } ?: defaultConfig
+            }
+            FakeIpResolution.Drop -> {
+                sendIcmpPortUnreachable(srcIp, srcPort, dstIp, dstPort, isIpv6, data.size)
+                return
+            }
+            FakeIpResolution.Unreachable -> {
                 Log.d(TAG, "[FakeIP] UDP to $dstIpString:$dstPort — stale DNS cache (no pool entry)")
+                sendIcmpPortUnreachable(srcIp, srcPort, dstIp, dstPort, isIpv6, data.size)
                 return
             }
         }
@@ -512,6 +633,47 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         flow.handleReceivedData(data, data.size)
     }
 
+    private fun resolveFakeIp(ip: String, dstPort: Int, proto: String): FakeIpResolution {
+        if (!FakeIpPool.isFakeIp(ip)) return FakeIpResolution.Passthrough
+
+        val entry = fakeIpPool.lookup(ip) ?: return FakeIpResolution.Unreachable
+        val match = domainRouter.matchDomain(entry.domain)
+
+        return when (val action = match.userAction) {
+            RouteAction.Direct -> FakeIpResolution.Resolved(entry.domain, null, true)
+            RouteAction.Reject -> {
+                Log.d(TAG, "[FakeIP] $proto to ${entry.domain}:$dstPort — REJECT")
+                FakeIpResolution.Drop
+            }
+            is RouteAction.Proxy -> {
+                val resolved = domainRouter.resolveConfiguration(action)
+                if (resolved == null) {
+                    Log.w(TAG, "[FakeIP] $proto proxy config ${action.configId} not found for ${entry.domain}")
+                }
+                FakeIpResolution.Resolved(entry.domain, resolved, false)
+            }
+            null -> {
+                if (bypassCountry != 0 && match.isBypass) {
+                    FakeIpResolution.Resolved(entry.domain, null, true)
+                } else {
+                    FakeIpResolution.Resolved(entry.domain, null, false)
+                }
+            }
+        }
+    }
+
+    private fun inheritChain(
+        defaultConfig: ProxyConfiguration,
+        overrideConfig: ProxyConfiguration
+    ): ProxyConfiguration {
+        val chain = defaultConfig.chain
+        return if (!chain.isNullOrEmpty() && overrideConfig.chain == null) {
+            overrideConfig.withChain(chain)
+        } else {
+            overrideConfig
+        }
+    }
+
     // -- DNS Interception (Fake-IP) --
 
     /**
@@ -529,8 +691,20 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         val domain = (result[0] as? String)?.lowercase() ?: return false
         val qtype = (result[1] as? Int) ?: return false
 
-        // Block DDR when DoH is disabled
-        if (!dohEnabled && domain == "_dns.resolver.arpa") {
+        // Block DDR when encrypted DNS is disabled
+        if (!encryptedDnsEnabled && domain == "_dns.resolver.arpa") {
+            return sendNodata(payload, srcIp, srcPort, dstIp, dstPort, isIpv6, qtype)
+        }
+
+        // Block SVCB/HTTPS (qtype=65, RFC 9460) queries with NODATA.
+        // When proxied to real DNS, these queries follow CNAME chains
+        // (e.g. example.com → example.com.cdn.net), causing the browser to
+        // connect using the CNAME target domain instead of the original.
+        // Since routing/bypass rules match on the original domain, the CNAME
+        // target may not match, sending traffic through the wrong proxy path.
+        // Returning NODATA forces the browser to fall back to A/AAAA records,
+        // which are intercepted by our fake-IP system with correct routing.
+        if (qtype == 65) {
             return sendNodata(payload, srcIp, srcPort, dstIp, dstPort, isIpv6, qtype)
         }
 
@@ -575,13 +749,15 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         val (offset, _) = fakeIpPool.allocate(domain, routeConfig, isDirect, isReject)
 
         // Build fake IP bytes for the response.
-        // Only return fake IPv4 for A queries. AAAA queries always get NODATA
-        // so apps fall back to IPv4 fake IPs. Omitting fc00::/7 from VPN routes
-        // causes fake IPv6 packets to fall through to the physical network and
-        // time out slowly. Returning NODATA for AAAA avoids this entirely.
+        // A queries always get fake IPv4. AAAA queries get fake IPv6 only when
+        // ipv6DNSEnabled is true; otherwise NODATA so apps fall back to IPv4
+        // fake IPs. Omitting fc00::/7 from VPN routes causes fake IPv6 packets
+        // to fall through to the physical network and time out slowly.
+        // Returning NODATA for AAAA avoids this entirely.
         val fakeIpBytes: ByteArray? = when (qtype) {
             1 -> FakeIpPool.ipv4Bytes(offset)
-            else -> null  // AAAA → always NODATA for routed domains
+            28 -> if (ipv6DNSEnabled) FakeIpPool.ipv6Bytes(offset) else null
+            else -> null
         }
 
         // Generate DNS response via JNI
@@ -615,6 +791,178 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         )
         Log.i(TAG, "[FakeIP] Blocked DDR query (qtype=$qtype)")
         return true
+    }
+
+    // -- ICMP Port Unreachable --
+    //
+    // Sent when UDP arrives at a stale fake IP no longer in the pool (e.g. from a
+    // previous VPN session) or at a rejected domain. The ICMP response causes
+    // QUIC/UDP clients to abandon the stale connection and re-resolve DNS,
+    // instead of retrying indefinitely.
+
+    /**
+     * Crafts and writes an ICMP Destination Unreachable (Port Unreachable) response.
+     * Must be called on lwipExecutor.
+     */
+    private fun sendIcmpPortUnreachable(
+        srcIp: ByteArray, srcPort: Int,
+        dstIp: ByteArray, dstPort: Int,
+        isIpv6: Boolean,
+        udpPayloadLength: Int
+    ) {
+        val packet = if (isIpv6) {
+            buildIcmpv6PortUnreachable(srcIp, srcPort, dstIp, dstPort, udpPayloadLength)
+        } else {
+            buildIcmpv4PortUnreachable(srcIp, srcPort, dstIp, dstPort, udpPayloadLength)
+        }
+        try {
+            tunOutput?.write(packet)
+        } catch (e: Exception) {
+            Log.e(TAG, "[LwipStack] ICMP write error: $e")
+        }
+    }
+
+    /**
+     * Builds an IPv4 ICMP Destination Unreachable (Type 3, Code 3) packet.
+     * Contains a reconstructed original IPv4+UDP header per RFC 792.
+     */
+    private fun buildIcmpv4PortUnreachable(
+        srcIp: ByteArray, srcPort: Int,
+        dstIp: ByteArray, dstPort: Int,
+        udpPayloadLength: Int
+    ): ByteArray {
+        // Outer IPv4 (20) + ICMP header (8) + inner IPv4 (20) + UDP header (8) = 56
+        val packetLen = 56
+        val p = ByteArray(packetLen)
+
+        // --- Outer IPv4 header (src=fake IP, dst=sender) ---
+        p[0] = 0x45.toByte()                                   // Version 4, IHL 5
+        p[1] = 0x00                                             // TOS
+        p[2] = (packetLen shr 8).toByte()                       // Total length
+        p[3] = (packetLen and 0xFF).toByte()
+        // p[4..5] = 0 (Identification)
+        // p[6..7] = 0 (Flags + Fragment offset)
+        p[8] = 64                                               // TTL
+        p[9] = 1                                                // Protocol: ICMP
+        // p[10..11] = 0 (Checksum, computed below)
+        System.arraycopy(dstIp, 0, p, 12, 4)                   // Src = fake IP
+        System.arraycopy(srcIp, 0, p, 16, 4)                   // Dst = sender
+
+        // IPv4 header checksum
+        var sum = 0L
+        for (i in 0 until 20 step 2) {
+            sum += ((p[i].toInt() and 0xFF) shl 8) or (p[i + 1].toInt() and 0xFF)
+        }
+        while (sum > 0xFFFF) sum = (sum and 0xFFFF) + (sum shr 16)
+        val ipCksum = sum.toInt().inv() and 0xFFFF
+        p[10] = (ipCksum shr 8).toByte()
+        p[11] = (ipCksum and 0xFF).toByte()
+
+        // --- ICMP header (Type 3 = Dest Unreachable, Code 3 = Port Unreachable) ---
+        p[20] = 3; p[21] = 3                                   // Type, Code
+        // p[22..23] = 0 (Checksum, computed below)
+        // p[24..27] = 0 (Unused)
+
+        // --- Reconstructed original IPv4 header ---
+        val udpTotalLen = 8 + udpPayloadLength
+        val innerTotalLen = 20 + udpTotalLen
+        p[28] = 0x45.toByte(); p[29] = 0x00                    // Version 4, IHL 5, TOS
+        p[30] = ((innerTotalLen shr 8) and 0xFF).toByte()       // Total length
+        p[31] = (innerTotalLen and 0xFF).toByte()
+        // p[32..33] = 0 (Identification)
+        // p[34..35] = 0 (Flags + Fragment offset)
+        p[36] = 64; p[37] = 17                                 // TTL, Protocol: UDP
+        // p[38..39] = 0 (Checksum, 0 OK in ICMP payload)
+        System.arraycopy(srcIp, 0, p, 40, 4)                   // Src = original sender
+        System.arraycopy(dstIp, 0, p, 44, 4)                   // Dst = fake IP
+
+        // --- First 8 bytes of original UDP ---
+        p[48] = (srcPort shr 8).toByte(); p[49] = (srcPort and 0xFF).toByte()
+        p[50] = (dstPort shr 8).toByte(); p[51] = (dstPort and 0xFF).toByte()
+        p[52] = ((udpTotalLen shr 8) and 0xFF).toByte()
+        p[53] = (udpTotalLen and 0xFF).toByte()
+        // p[54..55] = 0 (UDP checksum)
+
+        // ICMP checksum (over ICMP header + data, offset 20..55)
+        sum = 0L
+        for (i in 20 until packetLen step 2) {
+            sum += ((p[i].toInt() and 0xFF) shl 8) or (p[i + 1].toInt() and 0xFF)
+        }
+        while (sum > 0xFFFF) sum = (sum and 0xFFFF) + (sum shr 16)
+        val icmpCksum = sum.toInt().inv() and 0xFFFF
+        p[22] = (icmpCksum shr 8).toByte()
+        p[23] = (icmpCksum and 0xFF).toByte()
+
+        return p
+    }
+
+    /**
+     * Builds an IPv6 ICMPv6 Destination Unreachable (Type 1, Code 4) packet.
+     * Contains a reconstructed original IPv6+UDP header per RFC 4443.
+     */
+    private fun buildIcmpv6PortUnreachable(
+        srcIp: ByteArray, srcPort: Int,
+        dstIp: ByteArray, dstPort: Int,
+        udpPayloadLength: Int
+    ): ByteArray {
+        // Outer IPv6 (40) + ICMPv6 header (8) + inner IPv6 (40) + UDP header (8) = 96
+        val icmpLen = 56  // 8 + 40 + 8
+        val packetLen = 40 + icmpLen
+        val p = ByteArray(packetLen)
+
+        // --- Outer IPv6 header (src=fake IP, dst=sender) ---
+        p[0] = 0x60; p[1] = 0; p[2] = 0; p[3] = 0            // Version 6, TC, Flow Label
+        p[4] = (icmpLen shr 8).toByte()                         // Payload length
+        p[5] = (icmpLen and 0xFF).toByte()
+        p[6] = 58                                               // Next Header: ICMPv6
+        p[7] = 64                                               // Hop Limit
+        System.arraycopy(dstIp, 0, p, 8, 16)                   // Src = fake IP
+        System.arraycopy(srcIp, 0, p, 24, 16)                  // Dst = sender
+
+        // --- ICMPv6 header (Type 1 = Dest Unreachable, Code 4 = Port Unreachable) ---
+        p[40] = 1; p[41] = 4                                   // Type, Code
+        // p[42..43] = 0 (Checksum, computed below)
+        // p[44..47] = 0 (Unused)
+
+        // --- Reconstructed original IPv6 header ---
+        val udpTotalLen = 8 + udpPayloadLength
+        p[48] = 0x60; p[49] = 0; p[50] = 0; p[51] = 0         // Version 6
+        p[52] = (udpTotalLen shr 8).toByte()                    // Payload length
+        p[53] = (udpTotalLen and 0xFF).toByte()
+        p[54] = 17; p[55] = 64                                 // Next Header: UDP, Hop Limit
+        System.arraycopy(srcIp, 0, p, 56, 16)                  // Src = original sender
+        System.arraycopy(dstIp, 0, p, 72, 16)                  // Dst = fake IP
+
+        // --- First 8 bytes of original UDP ---
+        p[88] = (srcPort shr 8).toByte(); p[89] = (srcPort and 0xFF).toByte()
+        p[90] = (dstPort shr 8).toByte(); p[91] = (dstPort and 0xFF).toByte()
+        p[92] = ((udpTotalLen shr 8) and 0xFF).toByte()
+        p[93] = (udpTotalLen and 0xFF).toByte()
+        // p[94..95] = 0 (UDP checksum)
+
+        // ICMPv6 checksum (includes pseudo-header per RFC 4443 §2.3)
+        var sum = 0L
+        // Pseudo-header: source address (outer src = dstIp)
+        for (i in 8 until 24 step 2) {
+            sum += ((p[i].toInt() and 0xFF) shl 8) or (p[i + 1].toInt() and 0xFF)
+        }
+        // Pseudo-header: destination address (outer dst = srcIp)
+        for (i in 24 until 40 step 2) {
+            sum += ((p[i].toInt() and 0xFF) shl 8) or (p[i + 1].toInt() and 0xFF)
+        }
+        // Pseudo-header: upper-layer packet length + next header (58)
+        sum += icmpLen.toLong()
+        sum += 58
+        // ICMPv6 header + data
+        for (i in 40 until packetLen step 2) {
+            sum += ((p[i].toInt() and 0xFF) shl 8) or (p[i + 1].toInt() and 0xFF)
+        }
+        while (sum > 0xFFFF) sum = (sum and 0xFFFF) + (sum shr 16)
+        val cksum = sum.toInt().inv() and 0xFFFF
+        p[42] = (cksum shr 8).toByte()
+        p[43] = (cksum and 0xFF).toByte()
+
+        return p
     }
 
     // -- Packet Reading --

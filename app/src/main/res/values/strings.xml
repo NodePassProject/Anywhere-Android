@@ -34,6 +34,7 @@
     <string name="host">Host</string>
     <string name="import_failed">Import Failed</string>
     <string name="link">Link</string>
+    <string name="join_telegram_group">Join Telegram Group</string>
     <string name="manual">Manual</string>
     <string name="mode">Mode</string>
     <string name="name">Name</string>
@@ -50,6 +51,7 @@
     <string name="public_key">Public Key</string>
     <string name="qr_code">QR Code</string>
     <string name="reconnecting">Reconnecting…</string>
+    <string name="select_configuration">Proxies</string>
     <string name="routing">Routing</string>
     <string name="routing_rules">Routing Rules</string>
     <string name="routing_rules_updated">Routing Rules Updated</string>

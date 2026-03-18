@@ -76,7 +76,9 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
     val bytesIn by viewModel.bytesIn.collectAsState()
     val bytesOut by viewModel.bytesOut.collectAsState()
     val selectedConfigId by viewModel.selectedConfigId.collectAsState()
+    val selectedChainId by viewModel.selectedChainId.collectAsState()
     val configurations by viewModel.configRepository.configurations.collectAsState()
+    val chains by viewModel.chainRepository.chains.collectAsState()
     val startError by viewModel.startError.collectAsState()
 
     val isConnected = vpnStatus == VpnStatus.CONNECTED
@@ -84,8 +86,12 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
             vpnStatus == VpnStatus.DISCONNECTING ||
             vpnStatus == VpnStatus.REASSERTING
 
-    val selectedConfig = remember(selectedConfigId, configurations) {
-        selectedConfigId?.let { id -> configurations.find { it.id == id } }
+    val selectedItemName = remember(selectedConfigId, selectedChainId, configurations, chains) {
+        when {
+            selectedChainId != null -> chains.find { it.id == selectedChainId }?.name
+            selectedConfigId != null -> configurations.find { it.id == selectedConfigId }?.name
+            else -> null
+        }
     }
 
     var showingAddSheet by remember { mutableStateOf(false) }
@@ -186,7 +192,7 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
             }
 
             // Configuration card
-            if (selectedConfig != null) {
+            if (selectedItemName != null) {
                 Card(
                     onClick = { showingConfigPicker = true },
                     shape = RoundedCornerShape(16.dp),
@@ -209,7 +215,7 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(
-                            text = selectedConfig.name,
+                            text = selectedItemName,
                             style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
                             color = if (isConnected) Color.White else MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.weight(1f),
@@ -266,12 +272,12 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
         ) {
             Column(modifier = Modifier.padding(bottom = 24.dp)) {
                 Text(
-                    text = stringResource(R.string.proxies),
+                    text = stringResource(R.string.select_configuration),
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
                 )
                 configurations.forEach { config ->
-                    val isSelected = config.id == selectedConfigId
+                    val isSelected = config.id == selectedConfigId && selectedChainId == null
                     Surface(
                         onClick = {
                             viewModel.setSelectedConfiguration(config)
@@ -288,6 +294,44 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
                         ) {
                             Text(
                                 text = config.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (isSelected) {
+                                Text(
+                                    text = "\u2713",
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                }
+                if (chains.isNotEmpty()) {
+                    Text(
+                        text = stringResource(R.string.chains),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
+                    )
+                }
+                chains.forEach { chain ->
+                    val isSelected = chain.id == selectedChainId
+                    Surface(
+                        onClick = {
+                            viewModel.selectChain(chain)
+                            showingConfigPicker = false
+                        },
+                        color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = chain.name,
                                 style = MaterialTheme.typography.bodyLarge,
                                 modifier = Modifier.weight(1f)
                             )

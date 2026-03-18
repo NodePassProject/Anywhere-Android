@@ -1,5 +1,7 @@
 package com.argsment.anywhere.ui.settings
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -48,7 +50,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
@@ -58,6 +63,7 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: VpnViewModel) {
+    val context = LocalContext.current
     var showRoutingRules by remember { mutableStateOf(false) }
     var showAcknowledgements by remember { mutableStateOf(false) }
     var showIpv6Settings by remember { mutableStateOf(false) }
@@ -68,6 +74,12 @@ fun SettingsScreen(viewModel: VpnViewModel) {
     var alwaysOn by remember { mutableStateOf(viewModel.alwaysOnEnabled) }
     var bypassCountryCode by remember { mutableStateOf(viewModel.bypassCountryCode) }
     var allowInsecure by remember { mutableStateOf(viewModel.allowInsecure) }
+
+    // AD Blocking: check if the ADBlock rule set exists and its current assignment
+    val adBlockRuleSet = remember { viewModel.ruleSetRepository.ruleSets.value.find { it.name == "ADBlock" } }
+    var adBlockEnabled by remember {
+        mutableStateOf(adBlockRuleSet?.assignedConfigurationId == "REJECT")
+    }
 
     if (showRoutingRules) {
         RuleSetListScreen(
@@ -162,6 +174,22 @@ fun SettingsScreen(viewModel: VpnViewModel) {
                     viewModel.bypassCountryCode = it
                 }
             )
+            if (adBlockRuleSet != null) {
+                SettingsSwitch(
+                    icon = Icons.Filled.Shield,
+                    iconTint = Color(0xFFE91E63),
+                    label = stringResource(R.string.ad_blocking_title),
+                    checked = adBlockEnabled,
+                    onCheckedChange = { enabled ->
+                        adBlockEnabled = enabled
+                        viewModel.ruleSetRepository.updateAssignment(
+                            adBlockRuleSet,
+                            if (enabled) "REJECT" else null
+                        )
+                        viewModel.syncRoutingConfigurationToNE()
+                    }
+                )
+            }
             SettingsNavRow(
                 icon = Icons.Filled.AltRoute,
                 iconTint = Color(0xFF9C27B0),
@@ -198,6 +226,16 @@ fun SettingsScreen(viewModel: VpnViewModel) {
 
             // About section
             SectionHeader(stringResource(R.string.about))
+            SettingsNavRow(
+                painter = painterResource(R.drawable.ic_brand_telegram),
+                iconTint = Color(0xFF039BE5),
+                label = stringResource(R.string.join_telegram_group),
+                onClick = {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/anywhere_official_group"))
+                    )
+                }
+            )
             SettingsNavRow(
                 icon = Icons.Filled.Info,
                 iconTint = Color(0xFF9E9E9E),
@@ -247,6 +285,38 @@ private fun SettingsIcon(
     tint: Color,
     modifier: Modifier = Modifier
 ) {
+    SettingsIconContainer(tint = tint, modifier = modifier) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+@Composable
+private fun SettingsIcon(
+    painter: Painter,
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    SettingsIconContainer(tint = tint, modifier = modifier) {
+        Icon(
+            painter = painter,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+@Composable
+private fun SettingsIconContainer(
+    tint: Color,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
     Box(
         modifier = modifier
             .size(40.dp)
@@ -254,12 +324,7 @@ private fun SettingsIcon(
             .background(tint.copy(alpha = 0.15f)),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(24.dp)
-        )
+        content()
     }
 }
 
@@ -304,6 +369,35 @@ private fun SettingsNavRow(
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         SettingsIcon(icon = icon, tint = iconTint)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f)
+        )
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun SettingsNavRow(
+    painter: Painter,
+    iconTint: Color,
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        SettingsIcon(painter = painter, tint = iconTint)
         Text(
             text = label,
             style = MaterialTheme.typography.bodyLarge,

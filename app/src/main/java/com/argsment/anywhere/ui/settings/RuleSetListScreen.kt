@@ -50,6 +50,9 @@ fun RuleSetListScreen(
     val ruleSets by viewModel.ruleSetRepository.ruleSets.collectAsState()
     val configurations by viewModel.configRepository.configurations.collectAsState()
     val subscriptions by viewModel.subscriptionRepository.subscriptions.collectAsState()
+    val routingRuleSets = remember(ruleSets) {
+        ruleSets.filter { it.name != "ADBlock" && it.id != "Direct" }
+    }
 
     val standaloneConfigs = remember(configurations) {
         configurations.filter { it.subscriptionId == null }
@@ -80,7 +83,7 @@ fun RuleSetListScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
-            items(ruleSets, key = { it.id }) { ruleSet ->
+            items(routingRuleSets, key = { it.id }) { ruleSet ->
                 RuleSetRow(
                     ruleSet = ruleSet,
                     standaloneConfigs = standaloneConfigs,

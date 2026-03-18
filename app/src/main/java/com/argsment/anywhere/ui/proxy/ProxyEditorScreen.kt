@@ -72,6 +72,14 @@ fun ProxyEditorScreen(
     var flow by remember { mutableStateOf("") }
     var security by remember { mutableStateOf("none") }
 
+    // WebSocket fields
+    var wsHost by remember { mutableStateOf("") }
+    var wsPath by remember { mutableStateOf("/") }
+
+    // HTTPUpgrade fields
+    var httpUpgradeHost by remember { mutableStateOf("") }
+    var httpUpgradePath by remember { mutableStateOf("/") }
+
     // XHTTP fields
     var xhttpHost by remember { mutableStateOf("") }
     var xhttpPath by remember { mutableStateOf("/") }
@@ -126,6 +134,14 @@ fun ProxyEditorScreen(
             transport = config.transport
             flow = config.flow ?: ""
             security = config.security
+            config.websocket?.let {
+                wsHost = it.host
+                wsPath = it.path
+            }
+            config.httpUpgrade?.let {
+                httpUpgradeHost = it.host
+                httpUpgradePath = it.path
+            }
             config.xhttp?.let {
                 xhttpHost = it.host
                 xhttpPath = it.path
@@ -199,6 +215,18 @@ fun ProxyEditorScreen(
                             )
                         }
 
+                        var wsConfiguration: WebSocketConfiguration? = null
+                        if (transport == "ws" && !isNaive) {
+                            val host = wsHost.ifEmpty { serverAddress }
+                            wsConfiguration = WebSocketConfiguration(host = host, path = wsPath)
+                        }
+
+                        var httpUpgradeConfiguration: HttpUpgradeConfiguration? = null
+                        if (transport == "httpupgrade" && !isNaive) {
+                            val host = httpUpgradeHost.ifEmpty { serverAddress }
+                            httpUpgradeConfiguration = HttpUpgradeConfiguration(host = host, path = httpUpgradePath)
+                        }
+
                         var xhttpConfiguration: XHttpConfiguration? = null
                         if (transport == "xhttp" && !isNaive) {
                             val host = xhttpHost.ifEmpty { serverAddress }
@@ -228,6 +256,8 @@ fun ProxyEditorScreen(
                             security = if (isNaive) "none" else security,
                             tls = tlsConfiguration,
                             reality = realityConfiguration,
+                            websocket = wsConfiguration,
+                            httpUpgrade = httpUpgradeConfiguration,
                             xhttp = xhttpConfiguration,
                             muxEnabled = if (isShadowsocks || isNaive) false else muxEnabled,
                             xudpEnabled = if (isShadowsocks || isNaive) false else xudpEnabled,
@@ -378,6 +408,40 @@ fun ProxyEditorScreen(
                         if (flow.isNotEmpty() && it != "tcp") flow = ""
                     }
                 )
+
+                if (transport == "ws") {
+                    OutlinedTextField(
+                        value = wsHost,
+                        onValueChange = { wsHost = it },
+                        label = { Text(stringResource(R.string.host)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = wsPath,
+                        onValueChange = { wsPath = it },
+                        label = { Text(stringResource(R.string.path)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+
+                if (transport == "httpupgrade") {
+                    OutlinedTextField(
+                        value = httpUpgradeHost,
+                        onValueChange = { httpUpgradeHost = it },
+                        label = { Text(stringResource(R.string.host)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = httpUpgradePath,
+                        onValueChange = { httpUpgradePath = it },
+                        label = { Text(stringResource(R.string.path)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
 
                 if (transport == "xhttp") {
                     OutlinedTextField(
