@@ -9,6 +9,7 @@ import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.data.model.WebSocketConfiguration
 import com.argsment.anywhere.data.model.XHttpConfiguration
 import com.argsment.anywhere.data.model.XHttpMode
+import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.TunneledTransport
 import com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection
@@ -169,6 +170,34 @@ class VlessClient(
         tlsClient = null
     }
 
+    private fun requireTunnelTransport(): TunneledTransport {
+        val activeTunnel = tunnel
+            ?: throw ProxyError.ConnectionFailed("Missing tunnel transport")
+        return tunnelTransport ?: TunneledTransport(activeTunnel).also { tunnelTransport = it }
+    }
+
+    private suspend fun buildUploadTunnel(): VlessConnection {
+        val chain = configuration.chain
+        if (chain.isNullOrEmpty()) {
+            return tunnel ?: throw ProxyError.ConnectionFailed("Missing upload tunnel")
+        }
+
+        var previousConnection: VlessConnection? = null
+        for (i in chain.indices) {
+            val hopConfig = chain[i]
+            val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
+            previousConnection = ProxyClientFactory.connect(
+                hopConfig,
+                nextConfig.connectAddress,
+                nextConfig.serverPort.toInt(),
+                tunnel = previousConnection
+            )
+        }
+
+        return previousConnection
+            ?: throw ProxyError.ConnectionFailed("Failed to build upload tunnel")
+    }
+
     // =========================================================================
     // Connection Routing
     // =========================================================================
@@ -266,18 +295,21 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
             }
 
             try {
-                val socket = NioSocket()
-                this.connection = socket
-
-                socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
-
-                val wsConnection = WebSocketConnection(socket = socket, configuration = wsConfig)
+                val wsConnection = if (tunnel != null) {
+                    WebSocketConnection(transport = requireTunnelTransport(), configuration = wsConfig)
+                } else {
+                    val socket = NioSocket()
+                    this.connection = socket
+                    socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                    WebSocketConnection(socket = socket, configuration = wsConfig)
+                }
                 this.webSocketConnection = wsConnection
 
                 wsConnection.performUpgrade()
@@ -306,6 +338,7 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
@@ -326,7 +359,11 @@ class VlessClient(
                 )
 
                 val tlsClient = TlsClient(wsTlsConfig)
-                val tlsConn = tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                val tlsConn = if (tunnel != null) {
+                    tlsClient.connect(requireTunnelTransport())
+                } else {
+                    tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                }
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
 
@@ -416,18 +453,21 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
             }
 
             try {
-                val socket = NioSocket()
-                this.connection = socket
-
-                socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
-
-                val huConnection = HttpUpgradeConnection(socket = socket, configuration = huConfig)
+                val huConnection = if (tunnel != null) {
+                    HttpUpgradeConnection(transport = requireTunnelTransport(), configuration = huConfig)
+                } else {
+                    val socket = NioSocket()
+                    this.connection = socket
+                    socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                    HttpUpgradeConnection(socket = socket, configuration = huConfig)
+                }
                 this.httpUpgradeConnection = huConnection
 
                 huConnection.performUpgrade()
@@ -456,6 +496,7 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
@@ -466,7 +507,11 @@ class VlessClient(
                     ?: throw ProxyError.ConnectionFailed("HTTPS upgrade requires TLS configuration")
 
                 val tlsClient = TlsClient(baseTlsConfig)
-                val tlsConn = tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                val tlsConn = if (tunnel != null) {
+                    tlsClient.connect(requireTunnelTransport())
+                } else {
+                    tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                }
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
 
@@ -544,6 +589,11 @@ class VlessClient(
         val xhttpConfig = configuration.xhttp
             ?: throw ProxyError.ConnectionFailed("XHTTP transport specified but no XHTTP configuration")
 
+        val useHTTP2ForTls = configuration.tls?.let { tlsConfig ->
+            val alpn = tlsConfig.alpn ?: emptyList()
+            !(alpn.size == 1 && alpn[0] == "http/1.1")
+        } ?: false
+
         // Resolve mode: auto -> actual mode based on security
         val resolvedMode: XHttpMode = if (xhttpConfig.mode == XHttpMode.AUTO) {
             // Reality -> stream-one (direct connection, HTTP/2)
@@ -563,7 +613,7 @@ class VlessClient(
             )
 
             configuration.tls != null -> connectXHttpsWithRetry(
-                xhttpConfig, resolvedMode, sessionId,
+                xhttpConfig, resolvedMode, sessionId, useHTTP2ForTls,
                 command, destinationHost, destinationPort, initialData
             )
 
@@ -588,36 +638,48 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
             }
 
             try {
-                val socket = NioSocket()
-                this.connection = socket
-
-                socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
-
                 // Upload connection factory for packet-up mode
                 val uploadFactory: (suspend () -> TransportClosures)? =
                     if (mode == XHttpMode.PACKET_UP) {
                         {
-                            val uploadSocket = NioSocket()
-                            uploadSocket.connect(configuration.connectAddress, configuration.serverPort.toInt())
-                            TransportClosures(
-                                send = { data -> uploadSocket.send(data) },
-                                sendAsync = { data -> uploadSocket.sendAsync(data) },
-                                receive = { uploadSocket.receive() },
-                                cancel = { uploadSocket.forceCancel() }
-                            )
+                            if (tunnel != null) {
+                                val uploadTunnel = buildUploadTunnel()
+                                val uploadTransport = TunneledTransport(uploadTunnel)
+                                TransportClosures(
+                                    send = { data -> uploadTransport.send(data) },
+                                    sendAsync = { data -> uploadTransport.sendAsync(data) },
+                                    receive = { uploadTransport.receive() },
+                                    cancel = { uploadTransport.forceCancel() }
+                                )
+                            } else {
+                                val uploadSocket = NioSocket()
+                                uploadSocket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                                TransportClosures(
+                                    send = { data -> uploadSocket.send(data) },
+                                    sendAsync = { data -> uploadSocket.sendAsync(data) },
+                                    receive = { uploadSocket.receive() },
+                                    cancel = { uploadSocket.forceCancel() }
+                                )
+                            }
                         }
                     } else {
                         null
                     }
 
                 val xhttpConn = XHttpConnection(
-                    socket = socket,
+                    transport = if (tunnel != null) requireTunnelTransport() else run {
+                        val socket = NioSocket()
+                        this.connection = socket
+                        socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                        socket
+                    },
                     configuration = xhttpConfig,
                     mode = mode,
                     sessionId = sessionId,
@@ -645,6 +707,7 @@ class VlessClient(
         xhttpConfig: XHttpConfiguration,
         mode: XHttpMode,
         sessionId: String,
+        useHTTP2: Boolean,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
@@ -653,6 +716,7 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
@@ -662,30 +726,27 @@ class VlessClient(
                 val baseTlsConfig = configuration.tls
                     ?: throw ProxyError.ConnectionFailed("XHTTPS requires TLS configuration")
 
-                // Force ALPN to http/1.1 for XHTTP over TLS.
-                // Xray-core uses HTTP/2 when ALPN negotiates h2 (dialer.go:78-95),
-                // but we only support HTTP/1.1. CDNs and direct servers both accept http/1.1.
-                val tlsConfig = TlsConfiguration(
-                    serverName = baseTlsConfig.serverName,
-                    alpn = listOf("http/1.1"),
-                    allowInsecure = baseTlsConfig.allowInsecure,
-                    fingerprint = baseTlsConfig.fingerprint
-                )
-
-                val tlsClient = TlsClient(tlsConfig)
-                val tlsConn = tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                val tlsClient = TlsClient(baseTlsConfig)
+                val tlsConn = if (tunnel != null) {
+                    tlsClient.connect(requireTunnelTransport())
+                } else {
+                    tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                }
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
 
                 // Upload connection factory for packet-up mode
                 val uploadFactory: (suspend () -> TransportClosures)? =
-                    if (mode == XHttpMode.PACKET_UP) {
+                    if (!useHTTP2 && mode == XHttpMode.PACKET_UP) {
                         {
-                            // Use same http/1.1-forced TLS configuration for upload connection
-                            val uploadTlsClient = TlsClient(tlsConfig)
-                            val uploadTlsConn = uploadTlsClient.connect(
-                                configuration.connectAddress, configuration.serverPort.toInt()
-                            )
+                            val uploadTlsClient = TlsClient(baseTlsConfig)
+                            val uploadTlsConn = if (tunnel != null) {
+                                uploadTlsClient.connect(TunneledTransport(buildUploadTunnel()))
+                            } else {
+                                uploadTlsClient.connect(
+                                    configuration.connectAddress, configuration.serverPort.toInt()
+                                )
+                            }
                             TransportClosures(
                                 send = { data -> uploadTlsConn.send(data) },
                                 sendAsync = { data -> uploadTlsConn.sendAsync(data) },
@@ -702,6 +763,7 @@ class VlessClient(
                     configuration = xhttpConfig,
                     mode = mode,
                     sessionId = sessionId,
+                    useHTTP2 = useHTTP2,
                     uploadConnectionFactory = uploadFactory
                 )
                 this.xhttpConnection = xhttpConn
@@ -735,6 +797,7 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
@@ -742,9 +805,13 @@ class VlessClient(
 
             try {
                 val realityClient = RealityClient(realityConfig)
-                val realityConn = realityClient.connect(
-                    configuration.connectAddress, configuration.serverPort.toInt()
-                )
+                val realityConn = if (tunnel != null) {
+                    realityClient.connect(requireTunnelTransport())
+                } else {
+                    realityClient.connect(
+                        configuration.connectAddress, configuration.serverPort.toInt()
+                    )
+                }
                 this.realityClient = realityClient
                 this.realityConnection = realityConn
 
@@ -873,6 +940,7 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
@@ -880,9 +948,13 @@ class VlessClient(
 
             try {
                 val realityClient = RealityClient(realityConfig)
-                val realityConn = realityClient.connect(
-                    configuration.connectAddress, configuration.serverPort.toInt()
-                )
+                val realityConn = if (tunnel != null) {
+                    realityClient.connect(requireTunnelTransport())
+                } else {
+                    realityClient.connect(
+                        configuration.connectAddress, configuration.serverPort.toInt()
+                    )
+                }
                 this.realityClient = realityClient
                 this.realityConnection = realityConn
 
@@ -926,6 +998,7 @@ class VlessClient(
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
             if (attempt > 0) {
                 cleanupRetryResources()
                 delay(RETRY_BASE_DELAY_MS * attempt)
@@ -1130,7 +1203,8 @@ class VlessClient(
      * Returns an error if the check fails, null if OK or not applicable.
      */
     private fun validateOuterTlsForVision(connection: VlessConnection): Exception? {
-        val version = connection.outerTlsVersion ?: return null  // No TLS (raw TCP) -- nothing to check
+        val version = connection.outerTlsVersion
+            ?: return ProxyError.ProtocolError("Vision requires outer TLS or REALITY transport")  // Reject raw TCP (matching iOS)
         if (version != TlsVersion.TLS13) {
             return ProxyError.ProtocolError("Vision requires outer TLS 1.3, found $version")
         }

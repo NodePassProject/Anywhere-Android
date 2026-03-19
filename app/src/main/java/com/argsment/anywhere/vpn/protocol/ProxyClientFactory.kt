@@ -52,11 +52,12 @@ object ProxyClientFactory {
     suspend fun connectUDP(
         config: ProxyConfiguration,
         host: String,
-        port: Int
+        port: Int,
+        tunnel: VlessConnection? = null
     ): VlessConnection {
         return when (config.outboundProtocol) {
-            OutboundProtocol.VLESS -> VlessClient(config).connectUDP(host, port)
-            OutboundProtocol.SHADOWSOCKS -> ShadowsocksClient(config).connectUDP(host, port)
+            OutboundProtocol.VLESS -> VlessClient(config, tunnel).connectUDP(host, port)
+            OutboundProtocol.SHADOWSOCKS -> ShadowsocksClient(config, tunnel).connectUDP(host, port)
             else -> throw IllegalArgumentException("UDP not supported for ${config.outboundProtocol.displayName}")
         }
     }

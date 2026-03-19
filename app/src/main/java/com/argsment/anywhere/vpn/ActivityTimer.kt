@@ -48,7 +48,8 @@ class ActivityTimer(
             onTimeout()
             return
         }
-        hasActivity = true
+        // Do NOT reset hasActivity here (matching iOS). The next timer tick
+        // will check for actual activity since the timeout was changed.
         startTimer(timeoutMs)
     }
 

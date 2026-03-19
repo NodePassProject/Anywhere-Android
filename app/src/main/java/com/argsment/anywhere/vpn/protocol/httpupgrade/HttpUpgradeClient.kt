@@ -2,6 +2,7 @@ package com.argsment.anywhere.vpn.protocol.httpupgrade
 
 import android.util.Log
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
+import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
 import com.argsment.anywhere.vpn.protocol.websocket.WebSocketConnection
 import com.argsment.anywhere.vpn.util.NioSocket
@@ -68,6 +69,20 @@ class HttpUpgradeConnection private constructor(
         transportSendAsync = { data -> tlsConnection.sendAsync(data) },
         transportReceive = { tlsConnection.receive() },
         transportCancel = { tlsConnection.cancel() }
+    )
+
+    /**
+     * Creates an HTTP upgrade connection over a generic transport, including tunneled chaining.
+     */
+    constructor(
+        transport: Transport,
+        configuration: HttpUpgradeConfiguration
+    ) : this(
+        configuration = configuration,
+        transportSend = { data -> transport.send(data) },
+        transportSendAsync = { data -> transport.sendAsync(data) },
+        transportReceive = { transport.receive() },
+        transportCancel = { transport.forceCancel() }
     )
 
     // =========================================================================

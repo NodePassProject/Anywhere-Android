@@ -2,6 +2,7 @@ package com.argsment.anywhere.vpn.protocol.direct
 
 import android.util.Log
 import com.argsment.anywhere.vpn.SocketProtector
+import com.argsment.anywhere.vpn.util.DnsCache
 import com.argsment.anywhere.vpn.util.NioSocketError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -86,9 +87,10 @@ class DirectUdpRelay {
      */
     suspend fun connect(dstHost: String, dstPort: Int) {
         withContext(Dispatchers.IO) {
-            // DNS resolution
-            val addresses: Array<InetAddress> = try {
-                InetAddress.getAllByName(dstHost)
+            val addresses = try {
+                DnsCache.resolveAll(dstHost).mapNotNull { ip ->
+                    try { InetAddress.getByName(ip) } catch (_: Exception) { null }
+                }
             } catch (e: Exception) {
                 throw NioSocketError.ResolutionFailed(e.message ?: "Unknown error")
             }

@@ -48,6 +48,7 @@ class LwipTcpConnection(
     // before sending to the proxy protocol, reducing per-segment encryption overhead.
     private var coalesceBuffer: ByteArrayOutputStream? = null
     private var coalesceScheduled = false
+    private var coalesceFlushInFlight = false
 
     private val bypass: Boolean = forceBypass ||
         (LwipStack.instance?.shouldBypass(dstHost) == true)
@@ -99,31 +100,21 @@ class LwipTcpConnection(
             return
         }
 
-        if (directRelay != null) {
-            val relay = directRelay!!
-            val dataLen = data.size.coerceAtMost(65535)
-            scope.launch {
-                try {
-                    relay.send(data)
-                    lwipExecutor.execute {
-                        if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
-                    }
-                } catch (_: CancellationException) {
-                    // Scope cancelled during teardown — silently ignore
-                } catch (e: Exception) {
-                    if (!closed) Log.e(TAG, "[TCP] Direct send error for $dstHost:$dstPort: ${e.message}")
-                    lwipExecutor.execute { abort() }
-                }
-            }
-        } else if (vlessConnection != null) {
+        if (directRelay != null || vlessConnection != null) {
             // Coalesce segments: accumulate data and schedule a batched send
-            // to reduce per-segment encryption overhead
-            if (coalesceBuffer == null) coalesceBuffer = ByteArrayOutputStream()
-            coalesceBuffer!!.write(data)
+            // to reduce per-segment encryption overhead.
+            // When flush is in-flight or buffer would exceed max, send directly per-segment.
+            if (coalesceFlushInFlight ||
+                (coalesceBuffer != null && coalesceBuffer!!.size() + data.size > MAX_COALESCE_SIZE)) {
+                sendSegmentDirect(data)
+            } else {
+                if (coalesceBuffer == null) coalesceBuffer = ByteArrayOutputStream()
+                coalesceBuffer!!.write(data)
 
-            if (!coalesceScheduled) {
-                coalesceScheduled = true
-                lwipExecutor.execute { flushCoalesceBuffer() }
+                if (!coalesceScheduled) {
+                    coalesceScheduled = true
+                    lwipExecutor.execute { flushCoalesceBuffer() }
+                }
             }
         } else {
             pendingData.write(data)
@@ -340,10 +331,11 @@ class LwipTcpConnection(
                 for (i in chain.indices) {
                     val hopConfig = chain[i]
                     val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
-                    val hopClient = VlessClient(hopConfig, tunnel = previousConnection)
-                    val conn = hopClient.connect(
+                    val conn = ProxyClientFactory.connect(
+                        hopConfig,
                         nextConfig.connectAddress,
-                        nextConfig.serverPort.toInt()
+                        nextConfig.serverPort.toInt(),
+                        tunnel = previousConnection
                     )
                     previousConnection = conn
                 }
@@ -370,22 +362,58 @@ class LwipTcpConnection(
     // -- Upload Coalescing --
 
     /**
+     * Sends a single segment directly (bypassing coalesce buffer).
+     * Used when the coalesce buffer flush is in-flight or would exceed the size cap.
+     */
+    private fun sendSegmentDirect(data: ByteArray) {
+        val dataLen = data.size.coerceAtMost(65535)
+        val relay = directRelay
+        val connection = vlessConnection
+
+        scope.launch {
+            try {
+                if (relay != null) {
+                    relay.send(data)
+                } else {
+                    connection?.send(data) ?: return@launch
+                }
+                lwipExecutor.execute {
+                    if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
+                }
+            } catch (_: CancellationException) {
+            } catch (e: Exception) {
+                if (!closed) Log.e(TAG, "[TCP] segment send error for $dstHost:$dstPort: ${e.message}")
+                lwipExecutor.execute { abort() }
+            }
+        }
+    }
+
+    /**
      * Flushes the coalesce buffer, sending all accumulated segments as a single batch.
      * Called on the lwIP executor thread after the current processing cycle completes.
      */
     private fun flushCoalesceBuffer() {
-        val connection = vlessConnection
         val buf = coalesceBuffer
         coalesceBuffer = null
         coalesceScheduled = false
 
-        if (closed || connection == null || buf == null || buf.size() == 0) return
+        if (closed || buf == null || buf.size() == 0) return
+
+        val relay = directRelay
+        val connection = vlessConnection
+        if (relay == null && connection == null) return
 
         val dataToSend = buf.toByteArray()
+        coalesceFlushInFlight = true
         scope.launch {
             try {
-                connection.send(dataToSend)
+                if (relay != null) {
+                    relay.send(dataToSend)
+                } else {
+                    connection!!.send(dataToSend)
+                }
                 lwipExecutor.execute {
+                    coalesceFlushInFlight = false
                     if (!closed) {
                         // Acknowledge all coalesced bytes to advance the TCP receive window
                         var remaining = dataToSend.size
@@ -397,9 +425,13 @@ class LwipTcpConnection(
                     }
                 }
             } catch (_: CancellationException) {
+                lwipExecutor.execute { coalesceFlushInFlight = false }
             } catch (e: Exception) {
                 if (!closed) Log.e(TAG, "[TCP] send error for $dstHost:$dstPort: ${e.message}")
-                lwipExecutor.execute { abort() }
+                lwipExecutor.execute {
+                    coalesceFlushInFlight = false
+                    abort()
+                }
             }
         }
     }
@@ -421,17 +453,18 @@ class LwipTcpConnection(
                 sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
                 if (sndbuf <= 0) {
                     val remaining = data.size - offset
+                    // Soft limit: pause receive instead of aborting (matching iOS).
+                    // Never abort on overflow — the connection can recover once the app reads.
                     if (overflowBuffer.size() + remaining > MAX_OVERFLOW_BUFFER_SIZE) {
-                        Log.e(TAG, "[TCP] Overflow buffer limit exceeded for $dstHost:$dstPort")
-                        abort()
-                        return
+                        Log.w(TAG, "[TCP] Overflow buffer soft limit reached for $dstHost:$dstPort, pausing receive")
                     }
                     overflowBuffer.write(data, offset, remaining)
                     offset = data.size
                     break
                 }
             }
-            val chunkSize = minOf(sndbuf, data.size - offset, 65535)
+            // Cap write size at 16KB to limit pbuf/segment allocation pressure (matching iOS)
+            val chunkSize = minOf(sndbuf, data.size - offset, MAX_LWIP_WRITE_SIZE)
             val err = NativeBridge.nativeTcpWrite(pcb, data, offset, chunkSize)
             if (err != 0) {
                 Log.e(TAG, "[TCP] tcp_write error: $err for $dstHost:$dstPort")
@@ -444,7 +477,7 @@ class LwipTcpConnection(
         if (closed) return
         NativeBridge.nativeTcpOutput(pcb)
 
-        if (overflowBuffer.size() == 0) {
+        if (overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE) {
             requestNextReceive()
         } else {
             receivePaused = true
@@ -461,7 +494,7 @@ class LwipTcpConnection(
         while (offset < dataSize) {
             val sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
             if (sndbuf <= 0) break
-            val chunkSize = minOf(sndbuf, dataSize - offset, 65535)
+            val chunkSize = minOf(sndbuf, dataSize - offset, MAX_LWIP_WRITE_SIZE)
             val err = NativeBridge.nativeTcpWrite(pcb, data, offset, chunkSize)
             if (err != 0) {
                 Log.e(TAG, "[TCP] tcp_write error: $err for $dstHost:$dstPort")
@@ -482,7 +515,15 @@ class LwipTcpConnection(
             NativeBridge.nativeTcpOutput(pcb)
         }
 
-        if (overflowBuffer.size() == 0 && receivePaused) {
+        // If drain wrote zero bytes but overflow is non-empty, schedule a delayed retry.
+        // This handles the edge case where ERR_MEM occurs with an empty send buffer
+        // and no handleSent callback will fire (matching iOS 100ms retry).
+        if (offset == 0 && overflowBuffer.size() > 0) {
+            lwipExecutor.schedule({ drainOverflowBuffer() }, DRAIN_RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
+            return
+        }
+
+        if (overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE && receivePaused) {
             receivePaused = false
             requestNextReceive()
         }
@@ -561,7 +602,7 @@ class LwipTcpConnection(
         while (offset < dataSize) {
             val sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
             if (sndbuf <= 0) break
-            val chunkSize = minOf(sndbuf, dataSize - offset, 65535)
+            val chunkSize = minOf(sndbuf, dataSize - offset, MAX_LWIP_WRITE_SIZE)
             val err = NativeBridge.nativeTcpWrite(pcb, data, offset, chunkSize)
             if (err != 0) break
             offset += chunkSize
@@ -617,7 +658,10 @@ class LwipTcpConnection(
         private const val DOWNLINK_ONLY_TIMEOUT_MS = 1_000L      // 1s (Xray-core downlinkOnly)
         private const val UPLINK_ONLY_TIMEOUT_MS = 1_000L        // 1s (Xray-core uplinkOnly)
         private const val HANDSHAKE_TIMEOUT_MS = 60_000L         // 60s (Xray-core Timeout.Handshake)
-        private const val MAX_OVERFLOW_BUFFER_SIZE = 512 * 1024  // 512 KB
+        private const val MAX_OVERFLOW_BUFFER_SIZE = 512 * 1024  // 512 KB (soft limit, matching iOS)
+        private const val MAX_LWIP_WRITE_SIZE = 16 * 1024        // 16 KB per tcp_write (matching iOS, limits pbuf/segment pressure)
+        private const val MAX_COALESCE_SIZE = 65535              // UInt16 max (matching iOS, protocol framing limit)
+        private const val DRAIN_RETRY_DELAY_MS = 100L            // 100ms drain retry (matching iOS)
     }
 }
 

@@ -3,8 +3,10 @@ package com.argsment.anywhere.vpn.protocol.xhttp
 import android.util.Log
 import com.argsment.anywhere.data.model.XHttpConfiguration
 import com.argsment.anywhere.data.model.XHttpMode
+import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
 import com.argsment.anywhere.vpn.util.NioSocket
+import java.io.IOException
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -75,8 +77,10 @@ class XHttpConnection private constructor(
     private var h2DataBuffer = ByteArray(0)
     private var h2DataBufferLen = 0
     private var h2PeerWindowSize: Int = 65535
+    private var h2PeerInitialWindowSize: Int = 65535  // Track for delta calculation (matching iOS)
     private var h2LocalWindowSize: Int = 65535
     private var h2MaxFrameSize: Int = 16384
+    private var h2MaxReadBufferSize: Int = 2_097_152  // 2MB buffer limit (matching iOS)
     private var h2ResponseReceived = false
     private var h2StreamClosed = false
 
@@ -131,6 +135,28 @@ class XHttpConnection private constructor(
         uploadConnectionFactory = uploadConnectionFactory
     )
 
+    /**
+     * Creates an XHTTP connection over a generic transport, including tunneled chaining.
+     */
+    constructor(
+        transport: Transport,
+        configuration: XHttpConfiguration,
+        mode: XHttpMode,
+        sessionId: String,
+        useHTTP2: Boolean = false,
+        uploadConnectionFactory: (suspend () -> TransportClosures)? = null
+    ) : this(
+        configuration = configuration,
+        mode = mode,
+        sessionId = sessionId,
+        useHTTP2 = useHTTP2,
+        downloadSend = { data -> transport.send(data) },
+        downloadSendAsync = { data -> transport.sendAsync(data) },
+        downloadReceive = { transport.receive() },
+        downloadCancel = { transport.forceCancel() },
+        uploadConnectionFactory = uploadConnectionFactory
+    )
+
     // =========================================================================
     // X-Padding (matching Xray-core xpadding.go)
     // =========================================================================
@@ -164,6 +190,8 @@ class XHttpConnection private constructor(
             performH2Setup()
         } else if (mode == XHttpMode.STREAM_ONE) {
             performStreamOneSetup()
+        } else if (mode == XHttpMode.STREAM_UP) {
+            performStreamUpSetup()
         } else {
             performPacketUpSetup()
         }
@@ -192,6 +220,77 @@ class XHttpConnection private constructor(
         downloadSend(requestData)
 
         receiveResponseHeaders()
+    }
+
+    // -- stream-up Setup --
+
+    /**
+     * Sets up stream-up mode:
+     * 1. Sends a GET request on the download connection and reads response headers.
+     * 2. Establishes the upload connection and sends a streaming POST with chunked encoding.
+     */
+    private suspend fun performStreamUpSetup() {
+        // Send GET request on the download connection
+        val getPath = "${configuration.normalizedPath}${sessionId}/"
+        val sb = StringBuilder()
+        sb.append("GET $getPath HTTP/1.1\r\n")
+        sb.append("Host: ${configuration.host}\r\n")
+        sb.append("User-Agent: ${configuration.headers["User-Agent"] ?: DEFAULT_USER_AGENT}\r\n")
+        sb.append("Referer: ${generatePaddingReferer(getPath)}\r\n")
+        for ((key, value) in configuration.headers) {
+            if (key != "User-Agent") {
+                sb.append("$key: $value\r\n")
+            }
+        }
+        sb.append("\r\n")
+
+        val requestData = sb.toString().toByteArray(Charsets.UTF_8)
+        downloadSend(requestData)
+
+        // Read GET response headers
+        receiveResponseHeaders()
+
+        // Establish the upload connection
+        val factory = uploadConnectionFactory
+            ?: throw XHttpError.SetupFailed("No upload connection factory for stream-up")
+
+        val closures = factory()
+        lock.withLock {
+            uploadSend = closures.send
+            uploadSendAsync = closures.sendAsync
+            uploadReceive = closures.receive
+            uploadCancel = closures.cancel
+        }
+
+        // Send streaming POST request with Transfer-Encoding: chunked
+        val postRequest = buildStreamUpPOSTRequest()
+        val upSend = lock.withLock { uploadSend }
+            ?: throw XHttpError.SetupFailed("Upload connection not established")
+        upSend(postRequest)
+    }
+
+    /**
+     * Builds the HTTP/1.1 POST request headers for stream-up mode.
+     */
+    private fun buildStreamUpPOSTRequest(): ByteArray {
+        val postPath = "${configuration.normalizedPath}${sessionId}/"
+        val sb = StringBuilder()
+        sb.append("POST $postPath HTTP/1.1\r\n")
+        sb.append("Host: ${configuration.host}\r\n")
+        sb.append("User-Agent: ${configuration.headers["User-Agent"] ?: DEFAULT_USER_AGENT}\r\n")
+        sb.append("Referer: ${generatePaddingReferer(postPath)}\r\n")
+        sb.append("Transfer-Encoding: chunked\r\n")
+        if (!configuration.noGrpcHeader) {
+            sb.append("Content-Type: application/grpc\r\n")
+        }
+        sb.append("Connection: keep-alive\r\n")
+        for ((key, value) in configuration.headers) {
+            if (key != "User-Agent") {
+                sb.append("$key: $value\r\n")
+            }
+        }
+        sb.append("\r\n")
+        return sb.toString().toByteArray(Charsets.UTF_8)
     }
 
     // -- packet-up Setup --
@@ -295,6 +394,8 @@ class XHttpConnection private constructor(
             sendH2Data(data)
         } else if (mode == XHttpMode.STREAM_ONE) {
             sendStreamOne(data)
+        } else if (mode == XHttpMode.STREAM_UP) {
+            sendStreamUp(data)
         } else {
             sendPacketUp(data)
         }
@@ -328,6 +429,13 @@ class XHttpConnection private constructor(
         } else if (mode == XHttpMode.STREAM_ONE) {
             val chunk = ChunkedTransferEncoder.encode(data)
             downloadSendAsync(chunk)
+        } else if (mode == XHttpMode.STREAM_UP) {
+            // stream-up: chunked-encode and send on the upload connection
+            lock.withLock {
+                val upSendAsync = uploadSendAsync ?: return
+                val chunk = ChunkedTransferEncoder.encode(data)
+                upSendAsync(chunk)
+            }
         } else {
             // packet-up mode: must use suspending send, best-effort async via fire-and-forget
             lock.withLock {
@@ -367,6 +475,19 @@ class XHttpConnection private constructor(
     private suspend fun sendStreamOne(data: ByteArray) {
         val chunk = ChunkedTransferEncoder.encode(data)
         downloadSend(chunk)
+    }
+
+    // -- stream-up Send --
+
+    /**
+     * Sends data as a chunked-encoded chunk on the stream-up upload POST.
+     */
+    private suspend fun sendStreamUp(data: ByteArray) {
+        val upSend = lock.withLock {
+            uploadSend ?: throw XHttpError.SetupFailed("Upload connection not established")
+        }
+        val chunk = ChunkedTransferEncoder.encode(data)
+        upSend(chunk)
     }
 
     // -- packet-up Send --
@@ -709,10 +830,17 @@ class XHttpConnection private constructor(
     private fun encodeH2RequestHeaders(): ByteArray {
         val block = mutableListOf<Byte>()
 
+        // Pseudo-header order matches Go's http2.Transport (h2_bundle.go writeHeaders):
+        // :authority, :method, :path, :scheme  (matching iOS)
+
+        // :authority -- literal without indexing, name index 1
+        val authBytes = hpackEncodeInteger(1, 4)
+        authBytes[0] = (authBytes[0].toInt() and 0x0F).toByte()
+        block.addAll(authBytes.toList())
+        block.addAll(hpackEncodeString(configuration.host).toList())
+
         // :method POST -- static table index 3 (exact match)
         block.add(0x83.toByte())
-        // :scheme https -- static table index 7 (exact match)
-        block.add(0x87.toByte())
 
         // :path -- literal without indexing, name index 4
         val path = configuration.normalizedPath
@@ -725,11 +853,8 @@ class XHttpConnection private constructor(
             block.addAll(hpackEncodeString(path).toList())
         }
 
-        // :authority -- literal without indexing, name index 1
-        val authBytes = hpackEncodeInteger(1, 4)
-        authBytes[0] = (authBytes[0].toInt() and 0x0F).toByte()
-        block.addAll(authBytes.toList())
-        block.addAll(hpackEncodeString(configuration.host).toList())
+        // :scheme https -- static table index 7 (exact match)
+        block.add(0x87.toByte())
 
         // content-type: application/grpc (if enabled)
         if (!configuration.noGrpcHeader) {
@@ -767,22 +892,60 @@ class XHttpConnection private constructor(
     }
 
     /**
-     * Checks if the HEADERS response block starts with :status 200.
+     * Checks if the HEADERS response block contains :status 200.
+     * Handles indexed representation, literal with/without indexing,
+     * HPACK dynamic table size updates, and Huffman-encoded values (matching iOS).
      */
     private fun checkH2ResponseStatus(headerBlock: ByteArray): Boolean {
         if (headerBlock.isEmpty()) return false
-        // 0x88 = indexed representation of :status 200 (static table index 8)
-        if ((headerBlock[0].toInt() and 0xFF) == 0x88) return true
-        // Also accept literal with name index 8, value "200"
-        // 0x48 = literal with incremental indexing, name index 8
-        if (headerBlock.size >= 5 && (headerBlock[0].toInt() and 0xFF) == 0x48) {
-            val valueStart = 2 // skip 0x48 and length byte
-            if ((headerBlock[1].toInt() and 0xFF) == 0x03 && headerBlock.size >= valueStart + 3) {
-                val value = String(headerBlock, valueStart, 3, Charsets.US_ASCII)
-                return value == "200"
+
+        // Skip HPACK dynamic table size updates (prefix 001xxxxx, RFC 7541 §6.3)
+        var offset = 0
+        while (offset < headerBlock.size && (headerBlock[offset].toInt() and 0xE0) == 0x20) {
+            val initial = headerBlock[offset].toInt() and 0x1F
+            offset++
+            if (initial == 0x1F) {
+                while (offset < headerBlock.size && (headerBlock[offset].toInt() and 0x80) != 0) offset++
+                offset++
             }
         }
-        return false
+        if (offset >= headerBlock.size) return false
+
+        val first = headerBlock[offset].toInt() and 0xFF
+
+        // 1. Indexed representation (top bit set)
+        // 0x88=200, 0x89=204, 0x8a=206, 0x8b=304, 0x8c=400, 0x8d=404, 0x8e=500
+        if (first and 0x80 != 0) {
+            return first == 0x88  // :status 200
+        }
+
+        // 2. Literal representations with :status name index
+        val nameIndex: Int = when {
+            first and 0xF0 == 0x00 -> first and 0x0F   // without indexing
+            first and 0xF0 == 0x10 -> first and 0x0F   // never indexed
+            first and 0xC0 == 0x40 -> first and 0x3F   // incremental indexing
+            else -> return false
+        }
+
+        // :status is at HPACK static table indices 8-14
+        if (nameIndex !in 8..14 || offset + 1 >= headerBlock.size) return false
+
+        val valueMeta = headerBlock[offset + 1].toInt() and 0xFF
+        val isHuffman = (valueMeta and 0x80) != 0
+        val valueLen = valueMeta and 0x7F
+        if (offset + 2 + valueLen > headerBlock.size) return false
+
+        return if (isHuffman) {
+            // Huffman-encoded "200": 0x30 0x39 (5-bit codes for '2','0','0' + EOS padding)
+            valueLen == 2 && (headerBlock[offset + 2].toInt() and 0xFF) == 0x30 &&
+                (headerBlock[offset + 3].toInt() and 0xFF) == 0x39
+        } else {
+            // Plain ASCII "200"
+            valueLen == 3 &&
+                headerBlock[offset + 2].toInt().toChar() == '2' &&
+                headerBlock[offset + 3].toInt().toChar() == '0' &&
+                headerBlock[offset + 4].toInt().toChar() == '0'
+        }
     }
 
     // -- HTTP/2 Setup --
@@ -797,7 +960,7 @@ class XHttpConnection private constructor(
         // 1. Connection preface
         initData += H2_PREFACE
 
-        // 2. Client SETTINGS frame
+        // 2. Client SETTINGS frame (matching Go http2.Transport: 3 settings)
         val settingsPayload = byteArrayOf(
             // ENABLE_PUSH = 0
             0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
@@ -806,12 +969,15 @@ class XHttpConnection private constructor(
             ((H2_STREAM_WINDOW_SIZE shr 24) and 0xFF).toByte(),
             ((H2_STREAM_WINDOW_SIZE shr 16) and 0xFF).toByte(),
             ((H2_STREAM_WINDOW_SIZE shr 8) and 0xFF).toByte(),
-            (H2_STREAM_WINDOW_SIZE and 0xFF).toByte()
+            (H2_STREAM_WINDOW_SIZE and 0xFF).toByte(),
+            // MAX_HEADER_LIST_SIZE = 10MB (Go default, matching iOS)
+            0x00, 0x06, 0x00.toByte(), 0xA0.toByte(), 0x00, 0x00
         )
         initData += buildH2Frame(H2_FRAME_SETTINGS, 0, 0u, settingsPayload)
 
-        // 3. Connection-level WINDOW_UPDATE (increase from default 65535 to 1GB)
-        val windowIncrement = H2_CONN_WINDOW_SIZE - 65535
+        // 3. Connection-level WINDOW_UPDATE matching Go's http2.Transport exactly:
+        //    Go sends transportDefaultConnFlow (1<<30) as the raw increment (matching iOS)
+        val windowIncrement = H2_CONN_WINDOW_SIZE
         val wuPayload = byteArrayOf(
             ((windowIncrement shr 24) and 0xFF).toByte(),
             ((windowIncrement shr 16) and 0xFF).toByte(),
@@ -914,7 +1080,12 @@ class XHttpConnection private constructor(
 
             when (id) {
                 0x04 -> { // INITIAL_WINDOW_SIZE
-                    lock.withLock { h2PeerWindowSize = value }
+                    lock.withLock {
+                        // Adjust by delta from previous initial window size (RFC 7540 §6.9.2, matching iOS)
+                        val delta = value - h2PeerInitialWindowSize
+                        h2PeerInitialWindowSize = value
+                        h2PeerWindowSize += delta
+                    }
                 }
                 0x05 -> { // MAX_FRAME_SIZE
                     lock.withLock { h2MaxFrameSize = value }
@@ -1050,8 +1221,13 @@ class XHttpConnection private constructor(
                     return null
                 }
                 H2_FRAME_RST_STREAM -> {
-                    lock.withLock { h2StreamClosed = true }
-                    return null
+                    // Only close on download stream RST_STREAM (stream 1).
+                    // Upload stream RST_STREAMs can be ignored (matching iOS).
+                    if (frame.streamId == 1u) {
+                        lock.withLock { h2StreamClosed = true }
+                        return null
+                    }
+                    continue
                 }
                 else -> {
                     continue
@@ -1076,6 +1252,11 @@ class XHttpConnection private constructor(
     }
 
     private fun appendToH2ReadBuffer(data: ByteArray) {
+        // Buffer overflow protection (matching iOS maxH2ReadBufferSize = 2MB)
+        if (h2ReadBufferLen + data.size > h2MaxReadBufferSize) {
+            h2ReadBufferLen = 0
+            throw IOException("H2 read buffer overflow (>${h2MaxReadBufferSize} bytes)")
+        }
         if (h2ReadBufferLen + data.size > h2ReadBuffer.size) {
             val newSize = maxOf(h2ReadBuffer.size * 2, h2ReadBufferLen + data.size)
             val newBuf = ByteArray(newSize)

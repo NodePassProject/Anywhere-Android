@@ -46,8 +46,11 @@ private val TLS13_CIPHER_SUITES = setOf<Int>(
  */
 class VisionTrafficState(
     val userUUID: ByteArray,
-    val testseed: IntArray = intArrayOf(900, 500, 900, 256)
+    testseed: IntArray = intArrayOf(900, 500, 900, 256)
 ) {
+    // Gracefully handle invalid testseed by falling back to defaults (matching iOS)
+    val testseed: IntArray = if (testseed.size >= 4) testseed else intArrayOf(900, 500, 900, 256)
+
     // TLS detection state
     var numberOfPacketsToFilter: Int = 8
     var enableXtls: Boolean = false
@@ -70,10 +73,6 @@ class VisionTrafficState(
 
     // First packet flag for UUID
     var writeOnceUserUUID: ByteArray? = userUUID.copyOf()
-
-    init {
-        require(testseed.size >= 4) { "testseed must have at least 4 elements" }
-    }
 }
 
 // =============================================================================
@@ -87,9 +86,12 @@ private const val VISION_BUF_SIZE = 8192
 private const val RESHAPE_THRESHOLD = 8192 - 21  // 8171
 
 /**
- * Split data that is too large for a single Vision-padded frame.
+ * Recursively split data that is too large for a single Vision-padded frame.
  * Tries to split at the last TLS application data boundary; falls back to midpoint.
  * Matches Xray-core's ReshapeMultiBuffer.
+ *
+ * Unlike the Xray-core reference which does a single split, we recurse to guarantee
+ * every returned chunk fits within RESHAPE_THRESHOLD (matching iOS implementation).
  */
 private fun reshapeData(data: ByteArray): List<ByteArray> {
     if (data.size < RESHAPE_THRESHOLD) return listOf(data)
@@ -105,10 +107,9 @@ private fun reshapeData(data: ByteArray): List<ByteArray> {
         }
     }
 
-    return listOf(
-        data.copyOfRange(0, splitIndex),
-        data.copyOfRange(splitIndex, data.size)
-    )
+    val first = data.copyOfRange(0, splitIndex)
+    val second = data.copyOfRange(splitIndex, data.size)
+    return reshapeData(first) + reshapeData(second)
 }
 
 // =============================================================================

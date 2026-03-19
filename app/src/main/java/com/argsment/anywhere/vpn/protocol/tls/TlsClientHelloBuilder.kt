@@ -261,7 +261,8 @@ object TlsClientHelloBuilder {
         val unpaddedLen = clientHelloLen
         if (unpaddedLen <= 0xFF || unpaddedLen >= 0x200) return null
         val needed = 0x200 - unpaddedLen
-        return if (needed >= 5) (needed - 4) else 1
+        // Matching iOS: return null if can't fit extension header (4 bytes)
+        return if (needed >= 4) (needed - 4) else null
     }
 
     // -- Chrome Extension Shuffling --
@@ -473,7 +474,9 @@ object TlsClientHelloBuilder {
         val gExt1    = grease(random[25])
         val gGroup   = grease(random[26])
         val gVersion = grease(random[28])
-        val gExt2    = grease(random[29])
+        var gExt2    = grease(random[29])
+        // Ensure gExt2 != gExt1 to avoid duplicate extension types (matching iOS)
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
 
         val suites = cipherSuitesData(intArrayOf(
             gCipher,
@@ -594,7 +597,8 @@ object TlsClientHelloBuilder {
         val gExt1    = grease(random[25])
         val gGroup   = grease(random[26])
         val gVersion = grease(random[28])
-        val gExt2    = grease(random[29])
+        var gExt2    = grease(random[29])
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
 
         val suites = cipherSuitesData(intArrayOf(
             gCipher,
@@ -651,7 +655,8 @@ object TlsClientHelloBuilder {
         val gExt1    = grease(random[25])
         val gGroup   = grease(random[26])
         val gVersion = grease(random[28])
-        val gExt2    = grease(random[29])
+        var gExt2    = grease(random[29])
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
 
         val suites = cipherSuitesData(intArrayOf(
             gCipher,
@@ -708,7 +713,8 @@ object TlsClientHelloBuilder {
         val gExt1    = grease(random[25])
         val gGroup   = grease(random[26])
         val gVersion = grease(random[28])
-        val gExt2    = grease(random[29])
+        var gExt2    = grease(random[29])
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
 
         val suites = cipherSuitesData(intArrayOf(
             gCipher,

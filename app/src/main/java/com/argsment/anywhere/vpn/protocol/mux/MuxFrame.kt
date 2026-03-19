@@ -223,13 +223,20 @@ data class MuxFrameMetadata(
 
                 MuxAddressType.IPV6 -> {
                     if (data.size < offset + pos + 16) return null
-                    val parts = mutableListOf<String>()
-                    for (i in 0 until 16 step 2) {
-                        val value = ((data[offset + pos + i].toInt() and 0xFF) shl 8) or
-                                (data[offset + pos + i + 1].toInt() and 0xFF)
-                        parts.add(value.toString(16))
+                    // Use InetAddress for proper IPv6 formatting with zero-compression (matching iOS inet_ntop)
+                    val ipBytes = data.copyOfRange(offset + pos, offset + pos + 16)
+                    val addr = try {
+                        java.net.InetAddress.getByAddress(ipBytes).hostAddress ?: "::1"
+                    } catch (_: Exception) {
+                        val parts = mutableListOf<String>()
+                        for (i in 0 until 16 step 2) {
+                            val value = ((data[offset + pos + i].toInt() and 0xFF) shl 8) or
+                                    (data[offset + pos + i + 1].toInt() and 0xFF)
+                            parts.add(value.toString(16))
+                        }
+                        parts.joinToString(":")
                     }
-                    Pair(parts.joinToString(":"), pos + 16)
+                    Pair(addr, pos + 16)
                 }
             }
         }
@@ -283,27 +290,15 @@ private fun parseIPv6(address: String): ByteArray? {
     if (addr.startsWith("[") && addr.endsWith("]")) {
         addr = addr.substring(1, addr.length - 1)
     }
+    if (!addr.contains(':')) return null
 
-    var parts = addr.split(":").toMutableList()
-
-    val emptyIndex = parts.indexOf("")
-    if (emptyIndex >= 0) {
-        val before = parts.subList(0, emptyIndex)
-        val after = parts.subList(emptyIndex + 1, parts.size).filter { it.isNotEmpty() }
-        val missing = 8 - before.size - after.size
-        if (missing < 0) return null
-        parts = (before + List(missing) { "0" } + after).toMutableList()
+    // Use InetAddress for robust IPv6 parsing (matching iOS inet_pton)
+    return try {
+        val inetAddr = java.net.InetAddress.getByName(addr)
+        if (inetAddr is java.net.Inet6Address) inetAddr.address else null
+    } catch (_: Exception) {
+        null
     }
-
-    if (parts.size != 8) return null
-
-    val bytes = ByteArray(16)
-    for (i in parts.indices) {
-        val value = parts[i].toIntOrNull(16) ?: return null
-        bytes[i * 2] = (value shr 8).toByte()
-        bytes[i * 2 + 1] = (value and 0xFF).toByte()
-    }
-    return bytes
 }
 
 // =============================================================================

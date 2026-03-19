@@ -7,9 +7,9 @@ import android.util.Log
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.InetAddress
 import com.argsment.anywhere.vpn.protocol.mux.MuxManager
 import kotlinx.coroutines.asCoroutineDispatcher
+import org.json.JSONArray
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ScheduledExecutorService
@@ -164,26 +164,77 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     }
 
     /** Updates the set of proxy server addresses from the app.
-     *  Immediately stores domains, then resolves them to IPs in the background. */
+     *  The app persists domains plus any already-resolved IPs, so the VPN process
+     *  can restore them without triggering fresh DNS lookups inside the tunnel. */
     fun updateProxyServerAddresses(addresses: List<String>) {
         lwipExecutor.execute {
-            proxyServerAddresses = addresses.toHashSet()
-            // Resolve domains to IPs in background
-            Thread({
-                val resolvedIPs = mutableSetOf<String>()
-                for (address in addresses) {
-                    try {
-                        val inetAddresses = InetAddress.getAllByName(address)
-                        for (addr in inetAddresses) {
-                            resolvedIPs.add(addr.hostAddress ?: continue)
-                        }
-                    } catch (_: Exception) {}
-                }
-                lwipExecutor.execute {
-                    proxyServerAddresses = proxyServerAddresses + resolvedIPs
-                }
-            }, "proxy-resolver").apply { isDaemon = true }.start()
+            proxyServerAddresses = normalizeProxyServerAddresses(addresses)
         }
+    }
+
+    private fun loadProxyServerAddresses() {
+        val stored = prefs.getString("proxyServerAddresses", null) ?: return
+        val parsed = runCatching {
+            val array = JSONArray(stored)
+            buildList(array.length()) {
+                for (index in 0 until array.length()) {
+                    val value = array.optString(index, "")
+                    if (value.isNotBlank()) add(value)
+                }
+            }
+        }.getOrElse {
+            Log.w(TAG, "[LwipStack] Failed to parse proxyServerAddresses: $it")
+            emptyList()
+        }
+        proxyServerAddresses = normalizeProxyServerAddresses(parsed)
+    }
+
+    private fun seedProxyServerAddresses(config: ProxyConfiguration) {
+        val addresses = collectProxyServerAddresses(config)
+        proxyServerAddresses = proxyServerAddresses + addresses
+        // Resolve domain names in background to catch DNS-resolved IPs (matching iOS)
+        resolveProxyDomains(addresses)
+    }
+
+    /**
+     * Resolves proxy server domain names in background and adds resolved IPs.
+     * Matching iOS resolveProxyDomains() behavior.
+     */
+    private fun resolveProxyDomains(addresses: Set<String>) {
+        Thread {
+            for (address in addresses) {
+                // Skip if already an IP address
+                if (address.contains(':') || address.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"""))) continue
+                try {
+                    val resolved = java.net.InetAddress.getAllByName(address)
+                    val ips = resolved.mapNotNull { it.hostAddress }.toSet()
+                    if (ips.isNotEmpty()) {
+                        lwipExecutor.execute {
+                            proxyServerAddresses = proxyServerAddresses + ips
+                        }
+                    }
+                } catch (_: Exception) {
+                    // DNS resolution failure is not fatal
+                }
+            }
+        }.start()
+    }
+
+    private fun collectProxyServerAddresses(config: ProxyConfiguration): Set<String> {
+        val addresses = linkedSetOf<String>()
+        addresses.add(config.serverAddress)
+        config.resolvedIP?.let(addresses::add)
+        config.chain?.forEach { hop ->
+            addresses.addAll(collectProxyServerAddresses(hop))
+        }
+        return addresses
+    }
+
+    private fun normalizeProxyServerAddresses(addresses: Collection<String>): Set<String> {
+        return addresses.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toCollection(linkedSetOf())
     }
 
     private fun loadBypassCountry() {
@@ -234,11 +285,13 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             loadBypassCountry()
             loadEncryptedDnsSettings()
 
-            // Create MuxManager when Vision+Mux is active
-            if (config.muxEnabled && (config.flow == "xtls-rprx-vision" || config.flow == "xtls-rprx-vision-udp443")) {
+            // Create MuxManager when Vision+Mux is active (VLESS only, matching iOS)
+            if (config.outboundProtocol == com.argsment.anywhere.data.model.OutboundProtocol.VLESS && config.muxEnabled && (config.flow == "xtls-rprx-vision" || config.flow == "xtls-rprx-vision-udp443")) {
                 muxManager = MuxManager(config, lwipExecutor.asCoroutineDispatcher())
             }
 
+            loadProxyServerAddresses()
+            seedProxyServerAddresses(config)
             domainRouter.loadRoutingConfiguration()
             domainRouter.loadBypassCountryRules()
             NativeBridge.nativeInit()
@@ -349,6 +402,8 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             muxManager = MuxManager(config, lwipExecutor.asCoroutineDispatcher())
         }
 
+        loadProxyServerAddresses()
+        seedProxyServerAddresses(config)
         domainRouter.loadRoutingConfiguration()
         domainRouter.loadBypassCountryRules()
         NativeBridge.nativeInit()

@@ -175,13 +175,15 @@ data class HttpUpgradeConfiguration(
 enum class XHttpMode(val raw: String) {
     @SerialName("auto") AUTO("auto"),
     @SerialName("stream-one") STREAM_ONE("stream-one"),
-    @SerialName("packet-up") PACKET_UP("packet-up");
+    @SerialName("packet-up") PACKET_UP("packet-up"),
+    @SerialName("stream-up") STREAM_UP("stream-up");
 
     val displayName: String
         get() = when (this) {
             AUTO -> "Auto"
             STREAM_ONE -> "Stream One"
             PACKET_UP -> "Packet Up"
+            STREAM_UP -> "Stream Up"
         }
 
     companion object {
@@ -336,7 +338,8 @@ data class ProxyConfiguration(
                 ssMethod == other.ssMethod &&
                 naiveUsername == other.naiveUsername &&
                 naivePassword == other.naivePassword &&
-                naiveProtocol == other.naiveProtocol
+                naiveProtocol == other.naiveProtocol &&
+                chain?.size == other.chain?.size  // Compare chain presence/length (matching iOS)
 
     fun withChain(chain: List<ProxyConfiguration>?): ProxyConfiguration = copy(chain = chain)
 

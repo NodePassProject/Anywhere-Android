@@ -92,7 +92,8 @@ class MuxClient(
             network = network,
             targetHost = host,
             targetPort = port,
-            client = this
+            client = this,
+            globalID = globalID
         )
         sessions[sessionID] = session
 
@@ -105,19 +106,24 @@ class MuxClient(
                 connectMux()
             }
 
-            // Send New frame with target address
-            val metadata = MuxFrameMetadata(
-                sessionID = sessionID,
-                status = MuxSessionStatus.NEW,
-                option = 0,
-                network = network,
-                targetHost = host,
-                targetPort = port,
-                globalID = globalID
-            )
+            // For XUDP (globalID != null), defer the New frame until first data
+            // so the first UDP payload is embedded in the New frame.
+            // This matches iOS behavior and is needed for server-side GlobalID parsing.
+            if (globalID == null) {
+                // Send New frame with target address
+                val metadata = MuxFrameMetadata(
+                    sessionID = sessionID,
+                    status = MuxSessionStatus.NEW,
+                    option = 0,
+                    network = network,
+                    targetHost = host,
+                    targetPort = port,
+                    globalID = null
+                )
 
-            val frame = encodeMuxFrame(metadata = metadata, payload = null)
-            writeFrame(frame)
+                val frame = encodeMuxFrame(metadata = metadata, payload = null)
+                writeFrame(frame)
+            }
 
             return session
         } catch (e: Exception) {

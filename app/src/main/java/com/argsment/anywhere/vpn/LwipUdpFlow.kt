@@ -136,9 +136,17 @@ class LwipUdpFlow(
             return
         }
 
-        // Route Shadowsocks to its own UDP relay
+        // Route Shadowsocks to its own UDP relay, even with a chain (matching iOS).
+        // SS per-packet AEAD is designed for UDP datagrams, not TCP streams,
+        // and the SS protocol has no UDP command byte for TCP tunneling.
         if (configuration.outboundProtocol == OutboundProtocol.SHADOWSOCKS) {
             connectShadowsocksUdp()
+            return
+        }
+
+        val chain = configuration.chain
+        if (!chain.isNullOrEmpty()) {
+            connectUdpChain(chain)
             return
         }
 
@@ -181,6 +189,14 @@ class LwipUdpFlow(
                             return@execute
                         }
 
+                        // Guard against session being closed by closeAll() during dispatch
+                        // (matching iOS post-dispatch session.closed check)
+                        if (session.closed) {
+                            releaseProtocol()
+                            LwipStack.instance?.udpFlows?.remove(flowKey)
+                            return@execute
+                        }
+
                         muxSession = session
 
                         // Set up receive handler
@@ -220,6 +236,81 @@ class LwipUdpFlow(
         }
     }
 
+    private fun connectUdpChain(chain: List<ProxyConfiguration>) {
+        if (closed) return
+        vlessConnecting = true
+
+        scope.launch {
+            try {
+                var previousConnection: VlessConnection? = null
+
+                for (i in chain.indices) {
+                    val hopConfig = chain[i]
+                    val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
+                    previousConnection = ProxyClientFactory.connect(
+                        hopConfig,
+                        nextConfig.connectAddress,
+                        nextConfig.serverPort.toInt(),
+                        tunnel = previousConnection
+                    )
+                }
+
+                val connection = ProxyClientFactory.connectUDP(
+                    configuration,
+                    dstHost,
+                    dstPort,
+                    tunnel = previousConnection
+                )
+
+                lwipExecutor.execute {
+                    vlessConnecting = false
+                    if (closed) {
+                        connection.cancel()
+                        return@execute
+                    }
+
+                    vlessConnection = connection
+
+                    if (pendingData.isNotEmpty()) {
+                        // Batch all pending payloads into a single sendRaw call (matching iOS)
+                        var totalSize = 0
+                        for (payload in pendingData) totalSize += 2 + payload.size
+                        val batched = ByteArray(totalSize)
+                        var offset = 0
+                        for (payload in pendingData) {
+                            batched[offset++] = (payload.size shr 8).toByte()
+                            batched[offset++] = (payload.size and 0xFF).toByte()
+                            System.arraycopy(payload, 0, batched, offset, payload.size)
+                            offset += payload.size
+                        }
+                        pendingData.clear()
+                        pendingBufferSize = 0
+
+                        scope.launch {
+                            try {
+                                connection.sendRaw(batched)
+                            } catch (_: CancellationException) {
+                            } catch (e: Exception) {
+                                if (!closed) Log.e(TAG, "[UDP] Chained initial send error for $flowKey: ${e.message}")
+                            }
+                        }
+                    }
+
+                    startVlessReceiving(connection)
+                }
+            } catch (_: CancellationException) {
+            } catch (e: Exception) {
+                lwipExecutor.execute {
+                    vlessConnecting = false
+                    if (closed) return@execute
+                    Log.e(TAG, "[UDP] Chain connect failed: $flowKey: ${e.message}")
+                    releaseProtocol()
+                    LwipStack.instance?.udpFlows?.remove(flowKey)
+                }
+            }
+        }
+    }
+
     private fun connectVlessNonMux() {
         if (closed) return
         vlessConnecting = true
@@ -237,20 +328,24 @@ class LwipUdpFlow(
 
                     vlessConnection = connection
 
-                    // Send buffered raw payloads (frame each for VLESS non-mux)
+                    // Send buffered raw payloads batched into a single sendRaw (matching iOS)
                     if (pendingData.isNotEmpty()) {
-                        val framedChunks = mutableListOf<ByteArray>()
+                        var totalSize = 0
+                        for (payload in pendingData) totalSize += 2 + payload.size
+                        val batched = ByteArray(totalSize)
+                        var offset = 0
                         for (payload in pendingData) {
-                            framedChunks.add(NativeBridge.nativeFrameUdpPayload(payload))
+                            batched[offset++] = (payload.size shr 8).toByte()
+                            batched[offset++] = (payload.size and 0xFF).toByte()
+                            System.arraycopy(payload, 0, batched, offset, payload.size)
+                            offset += payload.size
                         }
                         pendingData.clear()
                         pendingBufferSize = 0
 
                         scope.launch {
                             try {
-                                for (framed in framedChunks) {
-                                    connection.sendRaw(framed)
-                                }
+                                connection.sendRaw(batched)
                             } catch (_: CancellationException) {
                             } catch (e: Exception) {
                                 if (!closed) Log.e(TAG, "[UDP] VLESS initial send error for $flowKey: ${e.message}")

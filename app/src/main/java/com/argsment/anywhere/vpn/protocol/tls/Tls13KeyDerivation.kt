@@ -85,7 +85,11 @@ class Tls13KeyDerivation(
 
     /** Encryption key length based on cipher suite. */
     val keyLength: Int
-        get() = if (cipherSuite == TlsCipherSuite.TLS_AES_256_GCM_SHA384) 32 else 16
+        get() = when (cipherSuite) {
+            TlsCipherSuite.TLS_AES_256_GCM_SHA384,
+            TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256 -> 32
+            else -> 16
+        }
 
     /**
      * Derive TLS 1.3 handshake keys from shared secret and transcript.

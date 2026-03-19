@@ -7,6 +7,7 @@ import com.argsment.anywhere.vpn.protocol.vless.RealityError
 import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.withLock
 
@@ -26,14 +27,18 @@ class TlsRecordConnection(
     private val clientKey: ByteArray,
     private val clientIV: ByteArray,
     private val serverKey: ByteArray,
-    private val serverIV: ByteArray
+    private val serverIV: ByteArray,
+    private val cipherSuite: Int = TlsCipherSuite.TLS_AES_128_GCM_SHA256
 ) {
     /** The underlying transport (NioSocket or TunneledTransport). */
     var connection: Transport? = null
 
-    // Cached AES key specs
-    private val clientKeySpec = SecretKeySpec(clientKey, "AES")
-    private val serverKeySpec = SecretKeySpec(serverKey, "AES")
+    // Cipher dispatch helpers
+    private val isChaCha = cipherSuite == TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256
+    private val cipherAlgo = if (isChaCha) "ChaCha20" else "AES"
+    private val cipherTransform = if (isChaCha) "ChaCha20-Poly1305" else "AES/GCM/NoPadding"
+    private val clientKeySpec = SecretKeySpec(clientKey, cipherAlgo)
+    private val serverKeySpec = SecretKeySpec(serverKey, cipherAlgo)
 
     // Sequence numbers
     private var clientSeqNum: Long = 0
@@ -179,8 +184,9 @@ class TlsRecordConnection(
         )
 
         try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, GCMParameterSpec(128, nonce))
+            val cipher = Cipher.getInstance(cipherTransform)
+            val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
+            cipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, paramSpec)
             cipher.updateAAD(aad)
             val encrypted = cipher.doFinal(alertPlaintext)
 
@@ -242,6 +248,26 @@ class TlsRecordConnection(
                 return handleBufferResult(result)
             }
             // No complete record yet, fetch more
+        }
+    }
+
+    /**
+     * Prepends data to the receive buffer (e.g., leftover post-handshake data).
+     * Matching iOS prependToReceiveBuffer() for NewSessionTicket data.
+     */
+    fun prependToReceiveBuffer(data: ByteArray) {
+        if (data.isEmpty()) return
+        receiveLock.withLock {
+            if (receiveBufferLen == 0) {
+                appendToBuffer(data)
+            } else {
+                val newSize = receiveBufferLen + data.size
+                val newBuf = ByteArray(maxOf(receiveBuffer.size, newSize))
+                System.arraycopy(data, 0, newBuf, 0, data.size)
+                System.arraycopy(receiveBuffer, 0, newBuf, data.size, receiveBufferLen)
+                receiveBuffer = newBuf
+                receiveBufferLen = newSize
+            }
         }
     }
 
@@ -416,11 +442,10 @@ class TlsRecordConnection(
         val ct = ciphertext.copyOfRange(0, tagOffset)
         val tag = ciphertext.copyOfRange(tagOffset, ciphertext.size)
 
-        // AES-GCM decrypt: ciphertext + tag
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, serverKeySpec, GCMParameterSpec(128, nonce))
+        val cipher = Cipher.getInstance(cipherTransform)
+        val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
+        cipher.init(Cipher.DECRYPT_MODE, serverKeySpec, paramSpec)
         cipher.updateAAD(header)
-        // Java's GCM expects ciphertext||tag concatenated for doFinal
         val ctWithTag = ct + tag
         val decrypted = cipher.doFinal(ctWithTag)
 
@@ -464,8 +489,9 @@ class TlsRecordConnection(
             (encryptedLen and 0xFF).toByte()
         )
 
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, GCMParameterSpec(128, nonce))
+        val cipher = Cipher.getInstance(cipherTransform)
+        val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
+        cipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, paramSpec)
         cipher.updateAAD(aad)
         val encrypted = cipher.doFinal(innerPlaintext)
 

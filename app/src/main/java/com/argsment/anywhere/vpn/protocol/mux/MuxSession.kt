@@ -14,7 +14,8 @@ class MuxSession(
     val network: MuxNetwork,
     val targetHost: String,
     val targetPort: Int,          // UInt16 range
-    private val client: MuxClient
+    private val client: MuxClient,
+    private val globalID: ByteArray? = null
 ) {
     @Volatile
     var closed: Boolean = false
@@ -26,13 +27,23 @@ class MuxSession(
     /** Called by MuxClient when the session is closed (End frame received or connection error). */
     var closeHandler: (() -> Unit)? = null
 
+    // For XUDP: the first send must include a New frame with the data payload and GlobalID.
+    // Matching iOS behavior which defers the New frame until first data arrives.
+    private var firstFrameSent: Boolean = (globalID == null)
+
     /**
      * Sends data through the mux connection as a Keep frame with payload.
+     * For XUDP, the first call sends a New frame with the data and GlobalID.
      */
     suspend fun send(data: ByteArray) {
         if (closed) throw ProxyError.ConnectionFailed("Mux session closed")
 
-        val frame = encodeKeepFrame(data)
+        val frame = if (!firstFrameSent) {
+            firstFrameSent = true
+            encodeNewFrameWithData(data)
+        } else {
+            encodeKeepFrame(data)
+        }
         client.writeFrame(frame)
     }
 
@@ -45,8 +56,29 @@ class MuxSession(
     fun sendAsync(data: ByteArray) {
         if (closed) return
 
-        val frame = encodeKeepFrame(data)
+        val frame = if (!firstFrameSent) {
+            firstFrameSent = true
+            encodeNewFrameWithData(data)
+        } else {
+            encodeKeepFrame(data)
+        }
         client.writeFrameAsync(frame)
+    }
+
+    /**
+     * Encodes a New frame with data payload and GlobalID for XUDP first-frame deferral.
+     */
+    private fun encodeNewFrameWithData(data: ByteArray): ByteArray {
+        val metadata = MuxFrameMetadata(
+            sessionID = sessionID,
+            status = MuxSessionStatus.NEW,
+            option = MuxOption.DATA,
+            network = network,
+            targetHost = targetHost,
+            targetPort = targetPort,
+            globalID = globalID
+        )
+        return encodeMuxFrame(metadata = metadata, payload = data)
     }
 
     private fun encodeKeepFrame(data: ByteArray): ByteArray {

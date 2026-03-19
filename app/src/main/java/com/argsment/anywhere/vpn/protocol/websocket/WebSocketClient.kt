@@ -3,6 +3,7 @@ package com.argsment.anywhere.vpn.protocol.websocket
 import android.util.Base64
 import android.util.Log
 import com.argsment.anywhere.data.model.WebSocketConfiguration
+import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
 import com.argsment.anywhere.vpn.util.NioSocket
 import kotlinx.coroutines.CoroutineScope
@@ -12,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.IOException
 import java.security.SecureRandom
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -43,6 +45,8 @@ class WebSocketConnection private constructor(
         get() = lock.withLock { _isConnected }
 
     companion object {
+        private const val MAX_RECEIVE_BUFFER_SIZE = 1_048_576  // 1 MB (matching iOS)
+
         /**
          * Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
          * Uses a fixed base version (Chrome 144, released 2026-01-13) and advances
@@ -82,6 +86,17 @@ class WebSocketConnection private constructor(
         transportSendAsync = { data -> tlsConnection.sendAsync(data) },
         transportReceive = { tlsConnection.receive() },
         transportCancel = { tlsConnection.cancel() }
+    )
+
+    /**
+     * Creates a WebSocket connection over a generic transport, including tunneled chaining.
+     */
+    constructor(transport: Transport, configuration: WebSocketConfiguration) : this(
+        configuration = configuration,
+        transportSend = { data -> transport.send(data) },
+        transportSendAsync = { data -> transport.sendAsync(data) },
+        transportReceive = { transport.receive() },
+        transportCancel = { transport.forceCancel() }
     )
 
     // =========================================================================
@@ -446,6 +461,11 @@ class WebSocketConnection private constructor(
      * Appends data to the receive buffer. Must be called with lock held.
      */
     private fun appendToReceiveBuffer(data: ByteArray) {
+        // Buffer overflow protection (matching iOS maxReceiveBufferSize = 1MB)
+        if (receiveBufferLen + data.size > MAX_RECEIVE_BUFFER_SIZE) {
+            receiveBufferLen = 0
+            throw IOException("WebSocket receive buffer overflow (>${MAX_RECEIVE_BUFFER_SIZE} bytes)")
+        }
         if (receiveBufferLen + data.size > receiveBuffer.size) {
             val newSize = maxOf(receiveBuffer.size * 2, receiveBufferLen + data.size)
             val newBuf = ByteArray(newSize)

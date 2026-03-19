@@ -79,7 +79,6 @@ class RuleSetRepository(private val context: Context) {
 
     fun syncRoutingFile(
         configurations: List<ProxyConfiguration>,
-        selectedConfigId: String?,
         resolveAddress: (String) -> String?
     ) {
         val routingFile = File(context.filesDir, "routing.json")
@@ -88,8 +87,7 @@ class RuleSetRepository(private val context: Context) {
         val configsObj = JSONObject()
 
         for (ruleSet in _ruleSets.value) {
-            // "Default" (null) → use the selected configuration
-            val assignedId = ruleSet.assignedConfigurationId ?: selectedConfigId ?: continue
+            val assignedId = ruleSet.assignedConfigurationId ?: continue
             val domainRules = loadRules(ruleSet.name)
             if (domainRules.isEmpty()) continue
 
@@ -129,9 +127,9 @@ class RuleSetRepository(private val context: Context) {
                 val config = configurations.find { it.id == configUuid } ?: continue
                 ruleEntry.put("action", "proxy")
                 ruleEntry.put("configId", assignedId)
-                val configJson = Json.encodeToString(ProxyConfiguration.serializer(), config)
+                val resolvedConfig = resolveConfigurationAddresses(config, resolveAddress)
+                val configJson = Json.encodeToString(ProxyConfiguration.serializer(), resolvedConfig)
                 val configObj = JSONObject(configJson)
-                resolveAddress(config.serverAddress)?.let { configObj.put("resolvedIP", it) }
                 configsObj.put(assignedId, configObj)
             }
 
@@ -148,6 +146,18 @@ class RuleSetRepository(private val context: Context) {
         }.onFailure {
             Log.e(TAG, "Failed to write routing.json: $it")
         }
+    }
+
+    private fun resolveConfigurationAddresses(
+        config: ProxyConfiguration,
+        resolveAddress: (String) -> String?
+    ): ProxyConfiguration {
+        val resolvedChain = config.chain?.map { resolveConfigurationAddresses(it, resolveAddress) }
+        val resolvedIp = config.resolvedIP ?: resolveAddress(config.serverAddress)
+        return config.copy(
+            resolvedIP = resolvedIp,
+            chain = resolvedChain
+        )
     }
 
     private fun loadAssignments(): Map<String, String> {

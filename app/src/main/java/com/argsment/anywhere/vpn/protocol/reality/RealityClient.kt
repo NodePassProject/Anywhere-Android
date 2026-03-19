@@ -3,8 +3,10 @@ package com.argsment.anywhere.vpn.protocol.reality
 import android.util.Log
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.vpn.NativeBridge
+import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.tls.Tls13KeyDerivation
 import com.argsment.anywhere.vpn.protocol.tls.TlsApplicationKeys
+import com.argsment.anywhere.vpn.protocol.tls.TlsCipherSuite
 import com.argsment.anywhere.vpn.protocol.tls.TlsClientHelloBuilder
 import com.argsment.anywhere.vpn.protocol.tls.TlsHandshakeKeys
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
@@ -16,6 +18,7 @@ import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 private const val TAG = "RealityClient"
@@ -34,7 +37,7 @@ private const val TAG = "RealityClient"
 class RealityClient(
     private val configuration: RealityConfiguration
 ) {
-    private var connection: NioSocket? = null
+    private var connection: Transport? = null
 
     // Ephemeral key pair (cleared after handshake)
     private var ephemeralPrivateKey: java.security.PrivateKey? = null
@@ -49,6 +52,7 @@ class RealityClient(
     private var applicationKeys: TlsApplicationKeys? = null
     private var handshakeTranscript: ByteArray? = null
     private var serverHandshakeSeqNum: Long = 0
+    private var serverCertVerified = false
 
     // =========================================================================
     // Public API
@@ -79,6 +83,19 @@ class RealityClient(
             throw RealityError.HandshakeFailed("TCP connection failed: ${e.message}")
         }
 
+        return performRealityHandshake()
+    }
+
+    /**
+     * Performs the Reality handshake over an existing transport (for proxy chaining).
+     */
+    suspend fun connect(transport: Transport): TlsRecordConnection {
+        val kpg = KeyPairGenerator.getInstance("X25519")
+        val keyPair = kpg.generateKeyPair()
+        ephemeralPrivateKey = keyPair.private
+        ephemeralPublicKeyBytes = extractX25519PublicKeyBytes(keyPair.public)
+
+        connection = transport
         return performRealityHandshake()
     }
 
@@ -474,6 +491,11 @@ class RealityClient(
                         val hsMessage = decrypted.copyOfRange(hsOffset, hsOffset + 4 + hsLen)
                         fullTranscript = fullTranscript + hsMessage
 
+                        if (hsType == 0x0B) { // Certificate
+                            val certBody = decrypted.copyOfRange(hsOffset + 4, hsOffset + 4 + hsLen)
+                            serverCertVerified = verifyRealityCertificate(certBody)
+                        }
+
                         if (hsType == 0x14) { // Finished
                             foundServerFinished = true
                         }
@@ -492,6 +514,10 @@ class RealityClient(
         handshakeTranscript = fullTranscript
 
         if (foundServerFinished) {
+            if (!serverCertVerified) {
+                throw RealityError.AuthenticationFailed()
+            }
+
             applicationKeys = kd.deriveApplicationKeys(handshakeSecret!!, fullTranscript)
 
             sendClientFinished()
@@ -503,12 +529,19 @@ class RealityClient(
                 clientKey = appKeys.clientKey,
                 clientIV = appKeys.clientIV,
                 serverKey = appKeys.serverKey,
-                serverIV = appKeys.serverIV
+                serverIV = appKeys.serverIV,
+                cipherSuite = keyDerivation?.cipherSuite ?: TlsCipherSuite.TLS_AES_128_GCM_SHA256
             )
             realityConnection.connection = connection
             connection = null
 
             clearHandshakeState()
+            // Pass any remaining buffer data (e.g., NewSessionTicket) to the
+            // TlsRecordConnection so it isn't lost (matching iOS prependToReceiveBuffer)
+            if (processedOffset < buffer.size) {
+                val remaining = buffer.copyOfRange(processedOffset, buffer.size)
+                realityConnection.prependToReceiveBuffer(remaining)
+            }
             return realityConnection
         } else {
             // Need more handshake data
@@ -599,6 +632,187 @@ class RealityClient(
     }
 
     // =========================================================================
+    // Reality Certificate Verification
+    // =========================================================================
+
+    /**
+     * Verifies a Reality server certificate by checking HMAC-SHA512 signature.
+     *
+     * The Reality server sends an ed25519 certificate where:
+     * - The 32-byte public key is the HMAC data
+     * - The signature is HMAC-SHA512(authKey, publicKey)
+     *
+     * Returns false (not an error) if the certificate is not ed25519,
+     * since it may be a real website certificate (not a Reality certificate).
+     */
+    private fun verifyRealityCertificate(certBody: ByteArray): Boolean {
+        val certDER = extractFirstCertificate(certBody) ?: return false
+        val components = extractEd25519Components(certDER) ?: return false
+
+        val (publicKey, signature) = components
+        val currentAuthKey = authKey ?: return false
+
+        // Compute HMAC-SHA512(authKey, publicKey)
+        val mac = javax.crypto.Mac.getInstance("HmacSHA512")
+        mac.init(SecretKeySpec(currentAuthKey, "HmacSHA512"))
+        val expected = mac.doFinal(publicKey)
+
+        // Compare with signature
+        if (expected.size != signature.size) return false
+        var result = 0
+        for (i in expected.indices) {
+            result = result or (expected[i].toInt() xor signature[i].toInt())
+        }
+        return result == 0
+    }
+
+    /**
+     * Extracts the first DER certificate from a TLS 1.3 Certificate message body.
+     *
+     * Format: contextLen(1) + context + listLen(3) + [certLen(3) + certDER + extLen(2) + ext]*
+     */
+    private fun extractFirstCertificate(certBody: ByteArray): ByteArray? {
+        if (certBody.size < 4) return null
+
+        var offset = 0
+
+        // Certificate request context length
+        val contextLen = certBody[offset].toInt() and 0xFF
+        offset += 1 + contextLen
+
+        if (offset + 3 > certBody.size) return null
+
+        // Certificate list length (3 bytes)
+        offset += 3
+
+        if (offset + 3 > certBody.size) return null
+
+        // First certificate length (3 bytes)
+        val certLen = ((certBody[offset].toInt() and 0xFF) shl 16) or
+                ((certBody[offset + 1].toInt() and 0xFF) shl 8) or
+                (certBody[offset + 2].toInt() and 0xFF)
+        offset += 3
+
+        if (offset + certLen > certBody.size) return null
+
+        return certBody.copyOfRange(offset, offset + certLen)
+    }
+
+    /**
+     * Extracts ed25519 public key and signature from a DER certificate.
+     *
+     * Searches for the ed25519 OID [06 03 2b 65 70] followed by
+     * BIT STRING [03 21 00] + 32-byte public key in the TBSCertificate.
+     * Then extracts the signatureValue BIT STRING after TBSCertificate.
+     *
+     * Returns null if the certificate is not ed25519.
+     */
+    private fun extractEd25519Components(certDER: ByteArray): Pair<ByteArray, ByteArray>? {
+        // Parse outer SEQUENCE
+        val outerOffset = IntArray(1) { 0 }
+        parseDERSequence(certDER, outerOffset) ?: return null
+
+        // Parse TBSCertificate SEQUENCE
+        val tbsStart = outerOffset[0]
+        val tbsContentLen = parseDERSequence(certDER, outerOffset) ?: return null
+        val tbsEnd = outerOffset[0] + tbsContentLen
+
+        // Search for ed25519 OID [06 03 2b 65 70] within TBSCertificate
+        val ed25519OID = byteArrayOf(0x06, 0x03, 0x2b, 0x65, 0x70)
+        var publicKey: ByteArray? = null
+
+        for (i in outerOffset[0] - tbsContentLen until tbsEnd - ed25519OID.size) {
+            if (i < 0 || i + ed25519OID.size > certDER.size) continue
+
+            var match = true
+            for (j in ed25519OID.indices) {
+                if (certDER[i + j] != ed25519OID[j]) {
+                    match = false
+                    break
+                }
+            }
+            if (!match) continue
+
+            // Found OID, look for BIT STRING [03 21 00] + 32-byte key after it
+            val afterOID = i + ed25519OID.size
+            if (afterOID + 3 + 32 > certDER.size) continue
+
+            if (certDER[afterOID] == 0x03.toByte() &&
+                certDER[afterOID + 1] == 0x21.toByte() &&
+                certDER[afterOID + 2] == 0x00.toByte()
+            ) {
+                publicKey = certDER.copyOfRange(afterOID + 3, afterOID + 3 + 32)
+                break
+            }
+        }
+
+        if (publicKey == null) return null
+
+        // Skip past TBSCertificate to signatureAlgorithm
+        outerOffset[0] = tbsEnd
+
+        // Skip signatureAlgorithm SEQUENCE
+        if (outerOffset[0] >= certDER.size) return null
+        parseDERSequence(certDER, outerOffset)?.let { len ->
+            outerOffset[0] += len
+        } ?: return null
+
+        // Read signatureValue BIT STRING
+        if (outerOffset[0] >= certDER.size) return null
+        if (certDER[outerOffset[0]].toInt() and 0xFF != 0x03) return null
+        outerOffset[0]++
+
+        val sigLen = parseDERLength(certDER, outerOffset) ?: return null
+        if (outerOffset[0] + sigLen > certDER.size) return null
+
+        // Skip the unused-bits byte (0x00) at the start of BIT STRING
+        if (sigLen < 1) return null
+        val signature = certDER.copyOfRange(outerOffset[0] + 1, outerOffset[0] + sigLen)
+
+        return Pair(publicKey, signature)
+    }
+
+    /**
+     * Parses a DER SEQUENCE tag at the given offset.
+     * Expects tag 0x30, then reads length.
+     * Updates offset past the tag and length bytes.
+     * Returns the content length, or null on failure.
+     */
+    private fun parseDERSequence(data: ByteArray, offset: IntArray): Int? {
+        if (offset[0] >= data.size) return null
+        if (data[offset[0]].toInt() and 0xFF != 0x30) return null
+        offset[0]++
+        return parseDERLength(data, offset)
+    }
+
+    /**
+     * Parses a DER length at the given offset.
+     * Short form: single byte < 0x80.
+     * Long form: first byte & 0x7F = number of length bytes, then big-endian.
+     * Updates offset past the length bytes.
+     */
+    private fun parseDERLength(data: ByteArray, offset: IntArray): Int? {
+        if (offset[0] >= data.size) return null
+        val first = data[offset[0]].toInt() and 0xFF
+        offset[0]++
+
+        if (first < 0x80) {
+            return first
+        }
+
+        val numBytes = first and 0x7F
+        if (numBytes == 0 || numBytes > 4) return null
+        if (offset[0] + numBytes > data.size) return null
+
+        var length = 0
+        for (i in 0 until numBytes) {
+            length = (length shl 8) or (data[offset[0]].toInt() and 0xFF)
+            offset[0]++
+        }
+        return length
+    }
+
+    // =========================================================================
     // Crypto Helpers
     // =========================================================================
 
@@ -621,7 +835,7 @@ class RealityClient(
     }
 
     /**
-     * Encrypts a TLS 1.3 handshake record using AES-GCM.
+     * Encrypts a TLS 1.3 handshake record.
      * Returns a complete TLS record (header + ciphertext + tag).
      */
     private fun encryptHandshakeRecord(
@@ -642,9 +856,12 @@ class RealityClient(
             (encryptedLen and 0xFF).toByte()
         )
 
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val secretKey = SecretKeySpec(key, "AES")
-        val parameterSpec = GCMParameterSpec(128, nonce)
+        val isChaCha = keyDerivation?.cipherSuite == TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256
+        val cipherTransform = if (isChaCha) "ChaCha20-Poly1305" else "AES/GCM/NoPadding"
+        val cipherAlgo = if (isChaCha) "ChaCha20" else "AES"
+        val cipher = Cipher.getInstance(cipherTransform)
+        val secretKey = SecretKeySpec(key, cipherAlgo)
+        val parameterSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey, parameterSpec)
         cipher.updateAAD(aad)
         val ciphertextAndTag = cipher.doFinal(innerPlaintext)
@@ -653,7 +870,7 @@ class RealityClient(
     }
 
     /**
-     * Decrypts a TLS 1.3 handshake record using AES-GCM.
+     * Decrypts a TLS 1.3 handshake record.
      * Returns the decrypted handshake messages (stripped of inner content type and padding).
      */
     private fun decryptHandshakeRecord(
@@ -669,9 +886,12 @@ class RealityClient(
 
         val nonce = buildNonce(iv, seqNum)
 
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val secretKey = SecretKeySpec(key, "AES")
-        val parameterSpec = GCMParameterSpec(128, nonce)
+        val isChaCha = keyDerivation?.cipherSuite == TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256
+        val cipherTransform = if (isChaCha) "ChaCha20-Poly1305" else "AES/GCM/NoPadding"
+        val cipherAlgo = if (isChaCha) "ChaCha20" else "AES"
+        val cipher = Cipher.getInstance(cipherTransform)
+        val secretKey = SecretKeySpec(key, cipherAlgo)
+        val parameterSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
         cipher.init(Cipher.DECRYPT_MODE, secretKey, parameterSpec)
         cipher.updateAAD(recordHeader)
         val decrypted = cipher.doFinal(ciphertext)
@@ -798,5 +1018,6 @@ class RealityClient(
         handshakeSecret = null
         handshakeKeys = null
         handshakeTranscript = null
+        serverCertVerified = false
     }
 }

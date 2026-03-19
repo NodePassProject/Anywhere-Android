@@ -14,6 +14,7 @@ import java.security.cert.X509Certificate
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 private const val TAG = "TlsClient"
@@ -418,7 +419,14 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 }
             }
 
-            return finishHandshake(fullTranscript)
+            val tlsConn = finishHandshake(fullTranscript)
+            // Pass any remaining buffer data (e.g., NewSessionTicket) to the
+            // TlsRecordConnection so it isn't lost (matching iOS prependToReceiveBuffer)
+            if (processedOffset < buf.size) {
+                val remaining = buf.copyOfRange(processedOffset, buf.size)
+                tlsConn.prependToReceiveBuffer(remaining)
+            }
+            return tlsConn
         } else {
             // Need more handshake data
             val conn = connection ?: throw TlsError.ConnectionFailed("Connection cancelled")
@@ -454,9 +462,13 @@ class TlsClient(private val configuration: TlsConfiguration) {
         val ct = ciphertext.copyOfRange(0, tagOffset)
         val tag = ciphertext.copyOfRange(tagOffset, ciphertext.size)
 
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val keySpec = SecretKeySpec(key, "AES")
-        cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, nonce))
+        val isChaCha = keyDerivation?.cipherSuite == TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256
+        val cipherTransform = if (isChaCha) "ChaCha20-Poly1305" else "AES/GCM/NoPadding"
+        val cipherAlgo = if (isChaCha) "ChaCha20" else "AES"
+        val cipher = Cipher.getInstance(cipherTransform)
+        val keySpec = SecretKeySpec(key, cipherAlgo)
+        val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
+        cipher.init(Cipher.DECRYPT_MODE, keySpec, paramSpec)
         cipher.updateAAD(recordHeader)
         val decrypted = cipher.doFinal(ct + tag)
 
@@ -586,10 +598,12 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 x509tm.checkServerTrusted(serverCertificates.toTypedArray(), authType)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Chain trust validation failed (non-fatal): ${e.message}")
-            // System trust failed — check user-trusted certificate fingerprints
+            Log.w(TAG, "Chain trust validation failed: ${e.message}")
+            // System trust failed — check user-trusted certificate fingerprints (matching iOS)
             if (!isUserTrusted(leafCert)) {
-                Log.w(TAG, "Certificate not in user trust store either")
+                throw TlsError.CertificateValidationFailed(
+                    "Certificate not trusted by system or user: ${e.message}"
+                )
             }
         }
     }
@@ -685,7 +699,8 @@ class TlsClient(private val configuration: TlsConfiguration) {
             clientKey = appKeys.clientKey,
             clientIV = appKeys.clientIV,
             serverKey = appKeys.serverKey,
-            serverIV = appKeys.serverIV
+            serverIV = appKeys.serverIV,
+            cipherSuite = keyDerivation?.cipherSuite ?: TlsCipherSuite.TLS_AES_128_GCM_SHA256
         )
         tlsConnection.connection = connection
         connection = null
@@ -749,9 +764,13 @@ class TlsClient(private val configuration: TlsConfiguration) {
             (encryptedLen and 0xFF).toByte()
         )
 
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val keySpec = SecretKeySpec(key, "AES")
-        cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, nonce))
+        val isChaCha = keyDerivation?.cipherSuite == TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256
+        val cipherTransform = if (isChaCha) "ChaCha20-Poly1305" else "AES/GCM/NoPadding"
+        val cipherAlgo = if (isChaCha) "ChaCha20" else "AES"
+        val cipher = Cipher.getInstance(cipherTransform)
+        val keySpec = SecretKeySpec(key, cipherAlgo)
+        val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
+        cipher.init(Cipher.ENCRYPT_MODE, keySpec, paramSpec)
         cipher.updateAAD(aad)
         val encrypted = cipher.doFinal(innerPlaintext)
 

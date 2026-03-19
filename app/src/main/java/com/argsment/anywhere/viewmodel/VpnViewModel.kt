@@ -24,6 +24,7 @@ import com.argsment.anywhere.data.repository.RuleSetRepository
 import com.argsment.anywhere.data.repository.SubscriptionRepository
 import com.argsment.anywhere.vpn.protocol.tls.TlsClient
 import com.argsment.anywhere.vpn.AnywhereVpnService
+import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -58,6 +59,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // VPN state
     private val _vpnStatus = MutableStateFlow(VpnStatus.DISCONNECTED)
     val vpnStatus: StateFlow<VpnStatus> = _vpnStatus.asStateFlow()
+    private var pendingReconnect = false
 
     // Traffic stats
     private val _bytesIn = MutableStateFlow(0L)
@@ -109,7 +111,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             if (localBinder.service.isRunning) {
                 _vpnStatus.value = VpnStatus.CONNECTED
                 startStatsPolling()
-                syncProxyServerAddresses()
+                selectedConfiguration?.let { syncProxyServerAddresses(it) }
             }
         }
 
@@ -225,6 +227,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             val resolvedConfig = withContext(Dispatchers.IO) {
                 resolveServerAddress(config)
             }
+            DnsCache.setActiveProxyDomain(resolvedConfig.serverAddress)
+            syncProxyServerAddresses(resolvedConfig)
 
             val configJson = json.encodeToString(ProxyConfiguration.serializer(), resolvedConfig)
             val intent = Intent(context, AnywhereVpnService::class.java).apply {
@@ -263,6 +267,23 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _bytesIn.value = 0
         _bytesOut.value = 0
         _vpnStatus.value = VpnStatus.DISCONNECTED
+
+        // Auto-reconnect if pending (matching iOS reconnectVPN)
+        if (pendingReconnect) {
+            pendingReconnect = false
+            connect()
+        }
+    }
+
+    /**
+     * Stops the VPN and automatically reconnects once disconnected.
+     * Used when switching configurations while connected (matching iOS reconnectVPN).
+     */
+    fun reconnect() {
+        val status = _vpnStatus.value
+        if (status != VpnStatus.CONNECTED && status != VpnStatus.CONNECTING) return
+        pendingReconnect = true
+        disconnect()
     }
 
     private fun switchConfig(config: ProxyConfiguration) {
@@ -271,6 +292,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             val resolvedConfig = withContext(Dispatchers.IO) {
                 resolveServerAddress(config)
             }
+            DnsCache.setActiveProxyDomain(resolvedConfig.serverAddress)
+            syncProxyServerAddresses(resolvedConfig)
             val configJson = json.encodeToString(ProxyConfiguration.serializer(), resolvedConfig)
             val intent = Intent(context, AnywhereVpnService::class.java).apply {
                 action = AnywhereVpnService.ACTION_SWITCH_CONFIG
@@ -351,20 +374,25 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun resolveAddress(config: ProxyConfiguration): ProxyConfiguration {
-        val address = config.serverAddress
-        // Check if already an IP
-        try {
-            val addr = InetAddress.getByName(address)
-            if (addr.hostAddress == address) return config
-        } catch (_: Exception) {}
+        val resolved = resolveServerAddress(config.serverAddress) ?: return config
+        return config.copy(resolvedIP = resolved)
+    }
 
-        // Resolve domain to IP, preferring IPv4 for reliable connectivity.
+    private fun resolveServerAddress(address: String): String? {
+        val bare = if (address.startsWith("[") && address.endsWith("]")) {
+            address.substring(1, address.length - 1)
+        } else {
+            address
+        }
+
+        if (DnsCache.isIpAddress(bare)) return bare
+
         return try {
-            val all = InetAddress.getAllByName(address)
+            val all = InetAddress.getAllByName(bare)
             val resolved = all.firstOrNull { it is Inet4Address } ?: all.firstOrNull()
-            config.copy(resolvedIP = resolved?.hostAddress ?: address)
+            resolved?.hostAddress
         } catch (_: Exception) {
-            config
+            null
         }
     }
 
@@ -481,6 +509,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
 
     fun testLatency(forConfig: ProxyConfiguration) {
+        syncProxyServerAddresses(forConfig)
         _latencyResults.value = _latencyResults.value + (forConfig.id to LatencyResult.Testing)
         viewModelScope.launch {
             val result = LatencyTester.test(forConfig)
@@ -490,6 +519,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun testAllLatencies() {
         val configs = configRepository.getAll()
+        syncProxyServerAddresses(configs)
         configs.forEach { config ->
             _latencyResults.value = _latencyResults.value + (config.id to LatencyResult.Testing)
         }
@@ -563,6 +593,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun testChainLatency(chain: ProxyChain) {
         val resolved = resolveChain(chain) ?: return
+        syncProxyServerAddresses(resolved)
         _chainLatencyResults.value = _chainLatencyResults.value + (chain.id to LatencyResult.Testing)
         viewModelScope.launch {
             val result = LatencyTester.test(resolved)
@@ -575,6 +606,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         val resolvedChains = chains.mapNotNull { chain ->
             resolveChain(chain)?.let { chain.id to it }
         }
+        syncProxyServerAddresses(resolvedChains.map { it.second })
         resolvedChains.forEach { (chainId, _) ->
             _chainLatencyResults.value = _chainLatencyResults.value + (chainId to LatencyResult.Testing)
         }
@@ -594,9 +626,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun syncRoutingConfigurationToNE() {
         ruleSetRepository.syncRoutingFile(
-            configRepository.getAll(),
-            _selectedConfigId.value?.toString()
-        ) { null }
+            configRepository.getAll()
+        ) { address -> resolveServerAddress(address) }
         // Signal service to reload routing if connected
         if (_vpnStatus.value == VpnStatus.CONNECTED) {
             prefs.edit().putLong("routingChanged", System.currentTimeMillis()).apply()
@@ -610,14 +641,31 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     /** Collects all proxy server addresses (domains + resolved IPs) from all
      *  configurations and sends them to the VPN service. This prevents routing
      *  loops when proxy server domains match routing rules. */
-    private fun syncProxyServerAddresses() {
-        val service = vpnService ?: return
-        val addresses = mutableListOf<String>()
-        for (config in configRepository.getAll()) {
-            addresses.add(config.serverAddress)
-            config.resolvedIP?.let { addresses.add(it) }
+    private fun syncProxyServerAddresses(configuration: ProxyConfiguration) {
+        syncProxyServerAddresses(listOf(configuration))
+    }
+
+    private fun syncProxyServerAddresses(configurations: List<ProxyConfiguration>) {
+        val addresses = linkedSetOf<String>()
+        for (config in configurations) {
+            collectProxyServerAddresses(config, addresses)
         }
-        service.updateProxyServerAddresses(addresses)
+
+        val persisted = addresses.toList()
+        prefs.edit().putString("proxyServerAddresses", json.encodeToString(persisted)).apply()
+        vpnService?.updateProxyServerAddresses(persisted)
+    }
+
+    private fun collectProxyServerAddresses(
+        configuration: ProxyConfiguration,
+        addresses: MutableSet<String>
+    ) {
+        addresses.add(configuration.serverAddress)
+        configuration.resolvedIP?.let(addresses::add)
+        DnsCache.cachedIPs(configuration.serverAddress)?.let(addresses::addAll)
+        configuration.chain?.forEach { hop ->
+            collectProxyServerAddresses(hop, addresses)
+        }
     }
 
     // =========================================================================

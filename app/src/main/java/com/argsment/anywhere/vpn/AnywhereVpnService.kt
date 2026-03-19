@@ -14,6 +14,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.argsment.anywhere.MainActivity
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.serialization.json.Json
 
 /**
@@ -78,7 +79,12 @@ class AnywhereVpnService : VpnService() {
                 val config = runCatching {
                     json.decodeFromString(ProxyConfiguration.serializer(), configJson)
                 }.getOrNull() ?: return START_NOT_STICKY
+                getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("lastConfigurationData", configJson)
+                    .apply()
                 currentConfig = config
+                DnsCache.setActiveProxyDomain(config.serverAddress)
                 lwipStack?.switchConfiguration(config)
                 updateNotification(config.name)
             }
@@ -114,6 +120,7 @@ class AnywhereVpnService : VpnService() {
                 "(connect: ${config.connectAddress}), security: ${config.security}, transport: ${config.transport}")
 
         currentConfig = config
+        DnsCache.setActiveProxyDomain(config.serverAddress)
         getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
             .edit()
             .putString("lastConfigurationData", json.encodeToString(ProxyConfiguration.serializer(), config))
@@ -163,6 +170,7 @@ class AnywhereVpnService : VpnService() {
         tunFd = null
 
         currentConfig = null
+        DnsCache.setActiveProxyDomain(null)
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
