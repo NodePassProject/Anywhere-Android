@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
@@ -167,6 +169,11 @@ class AnywhereVpnService : VpnService() {
             datagramFn = { protect(it) }
         )
 
+        // Set the underlying physical network for DnsCache so DNS resolution
+        // bypasses the VPN tunnel — matching iOS ProxyDNSCache behavior where
+        // getaddrinfo always resolves through the physical interface.
+        findUnderlyingNetwork()?.let { DnsCache.setUnderlyingNetwork(it) }
+
         val stack = LwipStack(this)
         lwipStack = stack
 
@@ -179,6 +186,7 @@ class AnywhereVpnService : VpnService() {
 
     private fun stopVpn() {
         SocketProtector.clearProtector()
+        DnsCache.setUnderlyingNetwork(null)
 
         lwipStack?.stop()
         lwipStack = null
@@ -343,6 +351,24 @@ class AnywhereVpnService : VpnService() {
      */
     fun protectSocket(fd: Int): Boolean {
         return protect(fd)
+    }
+
+    /**
+     * Finds the underlying physical (non-VPN) network for DNS resolution.
+     * Returns the first network that has internet capability and is not a VPN transport.
+     * This allows DnsCache to resolve proxy server domains through the physical
+     * interface, matching iOS behavior where getaddrinfo in Network Extension
+     * always resolves through the physical network.
+     */
+    @Suppress("DEPRECATION")
+    private fun findUnderlyingNetwork(): android.net.Network? {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return null
+        for (network in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(network) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return network
+        }
+        return null
     }
 
     // =========================================================================

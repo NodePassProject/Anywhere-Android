@@ -81,7 +81,7 @@ class NaiveClient(
         val destination = "$destinationHost:$destinationPort"
 
         val naiveConfig = NaiveConfiguration(
-            proxyHost = configuration.connectAddress,
+            proxyHost = configuration.serverAddress,
             proxyPort = configuration.serverPort.toInt(),
             username = configuration.naiveUsername,
             password = configuration.naivePassword,

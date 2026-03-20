@@ -1,5 +1,6 @@
 package com.argsment.anywhere.vpn.util
 
+import android.net.Network
 import android.util.Log
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -14,14 +15,19 @@ private const val TAG = "DnsCache"
  * Wraps [InetAddress.getAllByName] with caching so repeated lookups for the same
  * host (e.g. during latency tests or reconnects) avoid redundant system DNS calls.
  *
+ * When an underlying [Network] is set (via [setUnderlyingNetwork]), DNS resolution
+ * uses that network, bypassing the VPN tunnel. This matches the iOS behavior where
+ * `ProxyDNSCache` resolves through the physical network interface via `getaddrinfo`.
+ *
  * IP addresses bypass the cache entirely. Results are stored as IP strings so they
  * can be shared by both TCP ([NioSocket]) and UDP callers.
  *
- * Modeled after the iOS `DNSCache` (General/DNSCache.swift).
+ * Modeled after the iOS `ProxyDNSCache` (General/ProxyDNSCache.swift).
  */
 object DnsCache {
 
     private const val DEFAULT_TTL_MS = 120_000L
+    private const val EVICTION_THRESHOLD = 256
     private val ipv4Regex = Regex("""^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$""")
 
     private data class CacheEntry(val ips: List<String>, val expiry: Long)
@@ -30,8 +36,29 @@ object DnsCache {
     @Volatile
     private var activeProxyDomain: String? = null
 
+    /**
+     * The underlying physical network for DNS resolution.
+     * When set, [resolveAndCache] uses [Network.getAllByName] to resolve through the
+     * physical interface, bypassing the VPN tunnel. This prevents circular dependency
+     * where proxy DNS resolution would go through the (possibly broken) proxy tunnel.
+     *
+     * Matching iOS behavior: `ProxyDNSCache.resolveViaGetaddrinfo()` always resolves
+     * through the physical network interface in the Network Extension.
+     */
+    @Volatile
+    private var underlyingNetwork: Network? = null
+
     fun setActiveProxyDomain(domain: String?) {
         activeProxyDomain = domain?.let { stripBrackets(it).lowercase() }
+    }
+
+    /**
+     * Sets the underlying physical network for DNS resolution.
+     * Called from VpnService after the tunnel is established.
+     * Pass `null` when VPN is stopped to revert to default resolution.
+     */
+    fun setUnderlyingNetwork(network: Network?) {
+        underlyingNetwork = network
     }
 
     /**
@@ -52,10 +79,17 @@ object DnsCache {
 
         cache[key]?.let { entry ->
             if (now < entry.expiry) return entry.ips
+            // Expired entry — remove it (prevents unbounded cache growth)
+            cache.remove(key)
             if (activeProxyDomain == key) {
                 refreshAsync(key, bare)
                 return entry.ips
             }
+        }
+
+        // Periodic eviction: when cache exceeds threshold, purge all expired entries
+        if (cache.size > EVICTION_THRESHOLD) {
+            evictExpired(now)
         }
 
         // Cache miss — resolve via system DNS
@@ -110,6 +144,16 @@ object DnsCache {
         }
     }
 
+    private fun evictExpired(now: Long) {
+        val iter = cache.entries.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            if (now >= entry.value.expiry && entry.key != activeProxyDomain) {
+                iter.remove()
+            }
+        }
+    }
+
     private fun refreshAsync(key: String, bare: String) {
         Thread({
             resolveAndCache(key, bare)
@@ -118,9 +162,16 @@ object DnsCache {
 
     private fun resolveAndCache(key: String, bare: String): List<String> {
         val ips = try {
-            InetAddress.getAllByName(bare)
-                .mapNotNull { it.hostAddress }
-                .distinct()
+            // Resolve through the underlying physical network when available,
+            // bypassing the VPN tunnel. Matches iOS ProxyDNSCache.resolveViaGetaddrinfo()
+            // which always resolves through the physical interface in the Network Extension.
+            val network = underlyingNetwork
+            val addresses = if (network != null) {
+                network.getAllByName(bare)
+            } else {
+                InetAddress.getAllByName(bare)
+            }
+            addresses.mapNotNull { it.hostAddress }.distinct()
         } catch (e: Exception) {
             Log.w(TAG, "DNS resolution failed for $bare: ${e.message}")
             emptyList()

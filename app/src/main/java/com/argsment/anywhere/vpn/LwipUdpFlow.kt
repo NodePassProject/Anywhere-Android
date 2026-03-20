@@ -249,7 +249,7 @@ class LwipUdpFlow(
                     val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
                     previousConnection = ProxyClientFactory.connect(
                         hopConfig,
-                        nextConfig.connectAddress,
+                        nextConfig.serverAddress,
                         nextConfig.serverPort.toInt(),
                         tunnel = previousConnection
                     )
@@ -379,7 +379,7 @@ class LwipUdpFlow(
 
         scope.launch {
             try {
-                relay.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                relay.connect(configuration.serverAddress, configuration.serverPort.toInt())
 
                 lwipExecutor.execute {
                     vlessConnecting = false

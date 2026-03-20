@@ -15,6 +15,7 @@ import com.argsment.anywhere.vpn.protocol.TunneledTransport
 import com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection
 import com.argsment.anywhere.vpn.protocol.reality.RealityClient
 import com.argsment.anywhere.vpn.protocol.tls.TlsClient
+import com.argsment.anywhere.vpn.protocol.tls.TlsError
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
 import com.argsment.anywhere.vpn.protocol.websocket.WebSocketConnection
 import com.argsment.anywhere.vpn.protocol.xhttp.TransportClosures
@@ -188,7 +189,7 @@ class VlessClient(
             val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
             previousConnection = ProxyClientFactory.connect(
                 hopConfig,
-                nextConfig.connectAddress,
+                nextConfig.serverAddress,
                 nextConfig.serverPort.toInt(),
                 tunnel = previousConnection
             )
@@ -307,7 +308,7 @@ class VlessClient(
                 } else {
                     val socket = NioSocket()
                     this.connection = socket
-                    socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                    socket.connect(configuration.serverAddress, configuration.serverPort.toInt())
                     WebSocketConnection(socket = socket, configuration = wsConfig)
                 }
                 this.webSocketConnection = wsConnection
@@ -319,6 +320,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "WS connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -362,7 +364,7 @@ class VlessClient(
                 val tlsConn = if (tunnel != null) {
                     tlsClient.connect(requireTunnelTransport())
                 } else {
-                    tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                    tlsClient.connect(configuration.serverAddress, configuration.serverPort.toInt())
                 }
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
@@ -377,6 +379,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "WSS connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -465,7 +468,7 @@ class VlessClient(
                 } else {
                     val socket = NioSocket()
                     this.connection = socket
-                    socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                    socket.connect(configuration.serverAddress, configuration.serverPort.toInt())
                     HttpUpgradeConnection(socket = socket, configuration = huConfig)
                 }
                 this.httpUpgradeConnection = huConnection
@@ -477,6 +480,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "HTTP upgrade attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -510,7 +514,7 @@ class VlessClient(
                 val tlsConn = if (tunnel != null) {
                     tlsClient.connect(requireTunnelTransport())
                 } else {
-                    tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                    tlsClient.connect(configuration.serverAddress, configuration.serverPort.toInt())
                 }
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
@@ -525,6 +529,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "HTTPS upgrade attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -727,7 +732,7 @@ class VlessClient(
                                 )
                             } else {
                                 val uploadSocket = NioSocket()
-                                uploadSocket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                                uploadSocket.connect(configuration.serverAddress, configuration.serverPort.toInt())
                                 TransportClosures(
                                     send = { data -> uploadSocket.send(data) },
                                     sendAsync = { data -> uploadSocket.sendAsync(data) },
@@ -744,7 +749,7 @@ class VlessClient(
                     transport = if (tunnel != null) requireTunnelTransport() else run {
                         val socket = NioSocket()
                         this.connection = socket
-                        socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                        socket.connect(configuration.serverAddress, configuration.serverPort.toInt())
                         socket
                     },
                     configuration = xhttpConfig,
@@ -761,6 +766,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "XHTTP attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -801,7 +807,7 @@ class VlessClient(
                 val tlsConn = if (tunnel != null) {
                     tlsClient.connect(requireTunnelTransport())
                 } else {
-                    tlsClient.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                    tlsClient.connect(configuration.serverAddress, configuration.serverPort.toInt())
                 }
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
@@ -816,7 +822,7 @@ class VlessClient(
                                 uploadTlsClient.connect(TunneledTransport(buildUploadTunnel()))
                             } else {
                                 uploadTlsClient.connect(
-                                    configuration.connectAddress, configuration.serverPort.toInt()
+                                    configuration.serverAddress, configuration.serverPort.toInt()
                                 )
                             }
                             TransportClosures(
@@ -847,6 +853,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "XHTTPS attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -881,7 +888,7 @@ class VlessClient(
                     realityClient.connect(requireTunnelTransport())
                 } else {
                     realityClient.connect(
-                        configuration.connectAddress, configuration.serverPort.toInt()
+                        configuration.serverAddress, configuration.serverPort.toInt()
                     )
                 }
                 this.realityClient = realityClient
@@ -904,6 +911,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "XHTTP Reality attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -979,13 +987,14 @@ class VlessClient(
                 val socket = NioSocket()
                 this.connection = socket
 
-                socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+                socket.connect(configuration.serverAddress, configuration.serverPort.toInt())
 
                 return performHandshake(
                     command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "Connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -1024,7 +1033,7 @@ class VlessClient(
                     realityClient.connect(requireTunnelTransport())
                 } else {
                     realityClient.connect(
-                        configuration.connectAddress, configuration.serverPort.toInt()
+                        configuration.serverAddress, configuration.serverPort.toInt()
                     )
                 }
                 this.realityClient = realityClient
@@ -1035,6 +1044,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "Reality attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }
@@ -1079,7 +1089,7 @@ class VlessClient(
             try {
                 val tlsClient = TlsClient(tlsConfig)
                 val tlsConn = tlsClient.connect(
-                    configuration.connectAddress, configuration.serverPort.toInt()
+                    configuration.serverAddress, configuration.serverPort.toInt()
                 )
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
@@ -1089,6 +1099,7 @@ class VlessClient(
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "TLS attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
         }

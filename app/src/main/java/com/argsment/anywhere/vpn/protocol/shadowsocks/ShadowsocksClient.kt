@@ -76,6 +76,7 @@ class ShadowsocksClient(
 
                 return connection
             } catch (e: Exception) {
+                if (e is com.argsment.anywhere.vpn.protocol.tls.TlsError.CertificateValidationFailed) throw e
                 lastError = e
                 Log.w(TAG, "Connect attempt $attempt failed: ${e.message}")
             }
@@ -157,6 +158,11 @@ class ShadowsocksClient(
     /**
      * Creates the underlying transport — either a direct NioSocket
      * or a tunnel through an existing proxy connection, optionally wrapped with TLS.
+     *
+     * Uses [ProxyConfiguration.serverAddress] (the domain name) for direct socket
+     * connections, matching iOS `ProxyClient.directDialHost` which defaults to
+     * `serverAddress`. DNS resolution is handled by [DnsCache] through the
+     * underlying physical network, allowing DNS to refresh naturally.
      */
     private suspend fun connectTransport(): Transport {
         val transport: Transport
@@ -165,7 +171,7 @@ class ShadowsocksClient(
             transport = TunneledTransport(tunnel)
         } else {
             val socket = NioSocket()
-            socket.connect(configuration.connectAddress, configuration.serverPort.toInt())
+            socket.connect(configuration.serverAddress, configuration.serverPort.toInt())
             transport = socket
         }
 

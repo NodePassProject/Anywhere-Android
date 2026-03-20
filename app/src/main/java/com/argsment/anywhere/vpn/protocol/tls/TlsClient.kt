@@ -6,13 +6,10 @@ import com.argsment.anywhere.vpn.NativeBridge
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.util.NioSocket
 import java.io.IOException
-import java.security.KeyFactory
-import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import javax.crypto.Cipher
-import javax.crypto.KeyAgreement
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -53,8 +50,8 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
     private var connection: Transport? = null
 
-    // Ephemeral key pair (cleared after handshake)
-    private var ephemeralPrivateKey: java.security.PrivateKey? = null
+    // Ephemeral X25519 key pair (cleared after handshake)
+    private var ephemeralPrivateKeyBytes: ByteArray? = null
     private var ephemeralPublicKeyBytes: ByteArray? = null
     private var storedClientHello: ByteArray? = null
 
@@ -79,15 +76,10 @@ class TlsClient(private val configuration: TlsConfiguration) {
      * @return The established [TlsRecordConnection].
      */
     suspend fun connect(host: String, port: Int): TlsRecordConnection {
-        // Generate ephemeral X25519 key pair
-        val kpg = KeyPairGenerator.getInstance("X25519")
-        val kp = kpg.generateKeyPair()
-
-        // Extract raw 32-byte X25519 public key from X.509 DER encoding
-        // (matches RealityClient's extractX25519PublicKeyBytes approach)
-        val encoded = kp.public.encoded
-        ephemeralPublicKeyBytes = encoded.copyOfRange(encoded.size - 32, encoded.size)
-        ephemeralPrivateKey = kp.private
+        // Generate ephemeral X25519 key pair via native bridge (works on all Android versions)
+        val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
+        ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
+        ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
 
         val socket = NioSocket()
         connection = socket
@@ -107,11 +99,9 @@ class TlsClient(private val configuration: TlsConfiguration) {
      * The transport is already connected to the server — no TCP connect needed.
      */
     suspend fun connect(transport: Transport): TlsRecordConnection {
-        val kpg = KeyPairGenerator.getInstance("X25519")
-        val kp = kpg.generateKeyPair()
-        val encoded = kp.public.encoded
-        ephemeralPublicKeyBytes = encoded.copyOfRange(encoded.size - 32, encoded.size)
-        ephemeralPrivateKey = kp.private
+        val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
+        ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
+        ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
 
         connection = transport
         return performTLSHandshake()
@@ -233,14 +223,10 @@ class TlsClient(private val configuration: TlsConfiguration) {
         val clientHello = storedClientHello
             ?: throw TlsError.HandshakeFailed("Missing stored ClientHello")
 
-        // X25519 key agreement (using X.509 DER encoding, matching RealityClient)
-        val privateKey = ephemeralPrivateKey
+        // X25519 key agreement via native bridge (works on all Android versions)
+        val privateKey = ephemeralPrivateKeyBytes
             ?: throw TlsError.HandshakeFailed("No ephemeral key")
-        val serverPubKey = buildX25519PublicKey(serverKeyShare)
-        val ka = KeyAgreement.getInstance("X25519")
-        ka.init(privateKey)
-        ka.doPhase(serverPubKey, true)
-        val sharedSecretData = ka.generateSecret()
+        val sharedSecretData = NativeBridge.nativeX25519KeyAgreement(privateKey, serverKeyShare)
 
         val serverHello = extractServerHelloMessage(buf)
 
@@ -277,24 +263,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
             offset += 5 + recordLen
         }
         return ByteArray(0)
-    }
-
-    // -- X25519 Key Helpers --
-
-    /**
-     * Builds a Java PublicKey from raw 32-byte X25519 key material.
-     * Uses X.509 DER encoding (matching RealityClient's approach).
-     */
-    private fun buildX25519PublicKey(rawBytes: ByteArray): java.security.PublicKey {
-        // X.509 SubjectPublicKeyInfo header for X25519
-        val header = byteArrayOf(
-            0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65,
-            0x6E, 0x03, 0x21, 0x00
-        )
-        val encoded = header + rawBytes
-        val keySpec = java.security.spec.X509EncodedKeySpec(encoded)
-        val kf = KeyFactory.getInstance("X25519")
-        return kf.generatePublic(keySpec)
     }
 
     // -- Encrypted Handshake Processing --
@@ -458,10 +426,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
         val nonce = NativeBridge.nativeXorNonce(iv, seqNum)
 
-        val tagOffset = ciphertext.size - 16
-        val ct = ciphertext.copyOfRange(0, tagOffset)
-        val tag = ciphertext.copyOfRange(tagOffset, ciphertext.size)
-
         val isChaCha = keyDerivation?.cipherSuite == TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256
         val cipherTransform = if (isChaCha) "ChaCha20-Poly1305" else "AES/GCM/NoPadding"
         val cipherAlgo = if (isChaCha) "ChaCha20" else "AES"
@@ -470,7 +434,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
         cipher.init(Cipher.DECRYPT_MODE, keySpec, paramSpec)
         cipher.updateAAD(recordHeader)
-        val decrypted = cipher.doFinal(ct + tag)
+        val decrypted = cipher.doFinal(ciphertext)
 
         if (decrypted.isEmpty()) {
             throw TlsError.HandshakeFailed("Empty decrypted data")
@@ -790,7 +754,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
     /** Frees handshake-only state to reduce memory after the connection is established. */
     private fun clearHandshakeState() {
-        ephemeralPrivateKey = null
+        ephemeralPrivateKeyBytes = null
         ephemeralPublicKeyBytes = null
         storedClientHello = null
         keyDerivation = null

@@ -12,5 +12,6 @@ data class Subscription(
     val upload: Long? = null,
     val download: Long? = null,
     val total: Long? = null,
-    val expire: Long? = null
+    val expire: Long? = null,
+    val collapsed: Boolean = false
 )

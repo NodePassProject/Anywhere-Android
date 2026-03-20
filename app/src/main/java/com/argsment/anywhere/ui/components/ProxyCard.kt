@@ -110,7 +110,7 @@ fun LatencyBadge(latency: LatencyResult?, modifier: Modifier = Modifier) {
             Text(
                 text = stringResource(R.string.insecure),
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFFF44336), // red
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = modifier
             )
         }

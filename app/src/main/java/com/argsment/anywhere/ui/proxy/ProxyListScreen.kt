@@ -1,6 +1,9 @@
 package com.argsment.anywhere.ui.proxy
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
@@ -45,6 +49,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -73,6 +78,9 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
     var updatingSubscriptionId by remember { mutableStateOf<java.util.UUID?>(null) }
     var showSubscriptionError by remember { mutableStateOf(false) }
     var subscriptionErrorMessage by remember { mutableStateOf("") }
+    var collapsedSubscriptions by remember(subscriptions) {
+        mutableStateOf(subscriptions.filter { it.collapsed }.map { it.id }.toSet())
+    }
 
     val scope = rememberCoroutineScope()
 
@@ -152,10 +160,20 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
 
                 // Subscription groups
                 subscribedGroups.forEach { (subscription, configs) ->
+                    val isCollapsed = collapsedSubscriptions.contains(subscription.id)
                     item(key = "header_${subscription.id}") {
                         SubscriptionHeader(
                             subscription = subscription,
+                            isCollapsed = isCollapsed,
                             isUpdating = updatingSubscriptionId == subscription.id,
+                            onToggleCollapse = {
+                                collapsedSubscriptions = if (isCollapsed) {
+                                    collapsedSubscriptions - subscription.id
+                                } else {
+                                    collapsedSubscriptions + subscription.id
+                                }
+                                viewModel.toggleSubscriptionCollapsed(subscription)
+                            },
                             onUpdate = {
                                 if (updatingSubscriptionId == null) {
                                     updatingSubscriptionId = subscription.id
@@ -173,16 +191,18 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                             onDelete = { viewModel.deleteSubscription(subscription) }
                         )
                     }
-                    items(configs, key = { it.id }) { config ->
-                        ConfigurationRow(
-                            configuration = config,
-                            isSelected = config.id == selectedConfigId,
-                            latency = latencyResults[config.id],
-                            onSelect = { viewModel.setSelectedConfiguration(config) },
-                            onEdit = { configurationToEdit = config },
-                            onDelete = { viewModel.deleteConfiguration(config) },
-                            onTestLatency = { viewModel.testLatency(forConfig = config) }
-                        )
+                    if (!isCollapsed) {
+                        items(configs, key = { it.id }) { config ->
+                            ConfigurationRow(
+                                configuration = config,
+                                isSelected = config.id == selectedConfigId,
+                                latency = latencyResults[config.id],
+                                onSelect = { viewModel.setSelectedConfiguration(config) },
+                                onEdit = { configurationToEdit = config },
+                                onDelete = { viewModel.deleteConfiguration(config) },
+                                onTestLatency = { viewModel.testLatency(forConfig = config) }
+                            )
+                        }
                     }
                 }
             }
@@ -265,18 +285,31 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
 @Composable
 private fun SubscriptionHeader(
     subscription: Subscription,
+    isCollapsed: Boolean,
     isUpdating: Boolean,
+    onToggleCollapse: () -> Unit,
     onUpdate: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (isCollapsed) 0f else 90f, label = "chevron"
+    )
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClick = onToggleCollapse)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp).rotate(chevronRotation),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Spacer(modifier = Modifier.width(4.dp))
         Text(
             text = subscription.name,
             style = MaterialTheme.typography.titleSmall,

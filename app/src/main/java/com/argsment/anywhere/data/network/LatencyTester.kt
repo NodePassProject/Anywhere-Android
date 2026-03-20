@@ -2,16 +2,15 @@ package com.argsment.anywhere.data.network
 
 import android.util.Log
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.tls.TlsError
-import com.argsment.anywhere.vpn.protocol.vless.VlessClient
+import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
@@ -25,44 +24,53 @@ sealed class LatencyResult {
 }
 
 /**
- * Tests proxy latency by establishing a full VLESS connection and
- * sending an HTTP request through the proxy chain.
+ * Tests full proxy round-trip latency by establishing a proxy connection
+ * and sending an HTTP request through the proxy chain.
  *
- * Measures only the HTTP round-trip time through the established VLESS
- * tunnel, excluding connection setup.
+ * Connects to the test endpoint through the full proxy chain, sends a
+ * warmup request (to drain proxy-side buffers), then measures the
+ * receive-only RTT of a second request — matching the iOS LatencyTester
+ * timing methodology.
  */
 object LatencyTester {
 
     private const val TAG = "LatencyTester"
     private const val TIMEOUT_MS = 10_000L
 
+    /** Latency test endpoint. */
+    private const val LATENCY_HOST = "www.gstatic.com"
+    private const val LATENCY_PORT = 80
+
     suspend fun test(config: ProxyConfiguration): LatencyResult = withContext(Dispatchers.IO) {
-        withTimeoutOrNull(TIMEOUT_MS) {
-            try {
-                performTest(resolveConfig(config))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.d(TAG, "Latency test failed for ${config.name}: ${e.message}")
-                LatencyResult.Failed
-            }
-        } ?: LatencyResult.Failed
+        try {
+            withTimeoutOrNull(TIMEOUT_MS) {
+                try {
+                    performTest(resolveConfig(config))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.d(TAG, "Latency test failed for ${config.name}: ${e.message}")
+                    LatencyResult.Failed
+                }
+            } ?: LatencyResult.Failed
+        } catch (e: TlsError.CertificateValidationFailed) {
+            Log.d(TAG, "Latency test insecure for ${config.name}: ${e.message}")
+            LatencyResult.Insecure
+        }
     }
 
-    fun testAll(configurations: List<ProxyConfiguration>): Flow<Pair<UUID, LatencyResult>> = flow {
+    fun testAll(configurations: List<ProxyConfiguration>): Flow<Pair<UUID, LatencyResult>> = channelFlow {
         // Pre-warm DNS cache for all hosts (including chain proxies)
         configurations.forEach { config ->
             DnsCache.prewarm(config.serverAddress)
             config.chain?.forEach { DnsCache.prewarm(it.serverAddress) }
         }
 
-        // Run all tests concurrently (no batching)
-        coroutineScope {
-            val results = configurations.map { config ->
-                async(Dispatchers.IO) { config.id to test(config) }
-            }.awaitAll()
-            for (result in results) {
-                emit(result)
+        // Run all tests concurrently, emitting each result as it completes
+        // (matching iOS `for await pair in group { continuation.yield(pair) }`)
+        for (config in configurations) {
+            launch(Dispatchers.IO) {
+                send(config.id to test(config))
             }
         }
     }.flowOn(Dispatchers.IO)
@@ -88,45 +96,77 @@ object LatencyTester {
     }
 
     /**
-     * Establishes a VLESS connection (optionally through a chain) and measures
-     * HTTP round-trip latency.
+     * Establishes a proxy connection and measures HTTP round-trip latency.
      *
-     * Phase 1 (not timed): Build chain connections (if any), then connect to test target.
-     * Phase 2 (timed): Send HTTP HEAD request and wait for response.
+     * Phase 1 (untimed): Establish proxy connection (TCP + proxy handshake).
+     * Phase 2 (untimed): Warmup request — establishes the proxy-to-destination
+     *                     TCP connection and drains any proxy-side buffers.
+     * Phase 3 (untimed): Send the timed HTTP request.
+     * Phase 4 (timed):   Wait for the response — measures actual network RTT:
+     *                     client -> proxy chain -> destination -> back.
      */
     private suspend fun performTest(config: ProxyConfiguration): LatencyResult {
-        val clients = mutableListOf<VlessClient>()
+        val connections = mutableListOf<VlessConnection>()
         try {
-            // Phase 1: Build connection chain and connect to test target (not timed)
-            var tunnelConnection: com.argsment.anywhere.vpn.protocol.vless.VlessConnection? = null
+            // Pre-warm DNS cache so resolution is excluded from timing
+            DnsCache.prewarm(config.serverAddress)
+            config.chain?.forEach { DnsCache.prewarm(it.serverAddress) }
+
+            // Phase 1 (untimed): Establish proxy connection.
+            var tunnelConnection: VlessConnection? = null
 
             val chain = config.chain
             if (!chain.isNullOrEmpty()) {
-                // Build chain: each hop tunnels through the previous
                 for (i in chain.indices) {
                     val hopConfig = chain[i]
                     val nextConfig = if (i + 1 < chain.size) chain[i + 1] else config
-                    val hopClient = VlessClient(hopConfig, tunnel = tunnelConnection)
-                    clients.add(hopClient)
-                    tunnelConnection = hopClient.connect(
+                    tunnelConnection = ProxyClientFactory.connect(
+                        hopConfig,
                         nextConfig.connectAddress,
-                        nextConfig.serverPort.toInt()
+                        nextConfig.serverPort.toInt(),
+                        tunnel = tunnelConnection
                     )
+                    connections.add(tunnelConnection)
                 }
             }
 
-            val exitClient = VlessClient(config, tunnel = tunnelConnection)
-            clients.add(exitClient)
-            val connection = exitClient.connect("www.gstatic.com", 80)
+            val connection = ProxyClientFactory.connect(
+                config, LATENCY_HOST, LATENCY_PORT, tunnel = tunnelConnection
+            )
+            connections.add(connection)
 
-            // Phase 2: Send HTTP request and measure round-trip (timed)
-            val httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n"
+            // Phase 2 (untimed warmup): Send a first request to establish the
+            // proxy-to-destination connection and drain any proxy-side buffers.
+            val warmupRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: $LATENCY_HOST\r\n\r\n"
                 .toByteArray(Charsets.US_ASCII)
+            connection.send(warmupRequest)
+            val warmupData = connection.receive()
 
-            val startNs = System.nanoTime()
+            // Validate warmup response
+            val warmupStatus = warmupData?.let { String(it, Charsets.US_ASCII) }
+                ?.split("\r\n", limit = 2)?.firstOrNull()
+            if (warmupStatus == null || !warmupStatus.contains("204")) {
+                throw LatencyTestError("Unexpected warmup status: ${warmupStatus ?: "no response"}")
+            }
+
+            // Phase 3 (untimed): Send the timed HTTP request.
+            val httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: $LATENCY_HOST\r\nConnection: close\r\n\r\n"
+                .toByteArray(Charsets.US_ASCII)
             connection.send(httpRequest)
-            connection.receive()
+
+            // Phase 4 (timed): Wait for the response.
+            // Timer starts after send completes — measures the actual network
+            // round-trip: data traverses client -> proxy chain -> target -> back.
+            val startNs = System.nanoTime()
+            val responseData = connection.receive()
             val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+
+            // Validate HTTP 204 response
+            val statusLine = responseData?.let { String(it, Charsets.US_ASCII) }
+                ?.split("\r\n", limit = 2)?.firstOrNull()
+            if (statusLine == null || !statusLine.contains("204")) {
+                throw LatencyTestError("Unexpected status: ${statusLine ?: "no response"}")
+            }
 
             return LatencyResult.Success(elapsedMs.toInt())
         } catch (e: TlsError.CertificateValidationFailed) {
@@ -136,7 +176,9 @@ object LatencyTester {
             Log.d(TAG, "Latency test failed for ${config.name}: ${e.message}")
             return LatencyResult.Failed
         } finally {
-            clients.forEach { it.cancel() }
+            connections.forEach { it.cancel() }
         }
     }
+
+    private class LatencyTestError(message: String) : Exception(message)
 }

@@ -332,10 +332,17 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         lwipExecutor.shutdown()
     }
 
-    /** Switches to a new configuration, tearing down all active connections. */
+    /** Switches to a new configuration, tearing down all active connections.
+     *
+     * Re-applies tunnel network settings before restarting the stack.
+     * This resets the virtual interface and flushes the OS DNS cache,
+     * causing apps to terminate stale connections and re-resolve domains
+     * through the new configuration — matching iOS LWIPStack.switchConfiguration()
+     * and handleSettingsChanged() behavior. */
     fun switchConfiguration(newConfig: ProxyConfiguration) {
         Log.i(TAG, "[LwipStack] Switching configuration")
         lwipExecutor.execute {
+            onTunnelSettingsNeedReapply?.invoke()
             restartStack(newConfig, ipv6ConnectionsEnabled, ipv6DNSEnabled)
         }
     }

@@ -54,6 +54,7 @@ set(BLAKE3_SOURCES
 # --------------------------------------------------------------------------
 set(CRYPTO_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/crypto/CTLSKeyDerivation.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/crypto/CX25519.c
 )
 
 # --------------------------------------------------------------------------

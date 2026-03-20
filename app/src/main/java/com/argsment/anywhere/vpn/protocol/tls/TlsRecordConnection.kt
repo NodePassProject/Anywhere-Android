@@ -296,30 +296,15 @@ class TlsRecordConnection(
         var hasError: Exception? = null
         var recordsProcessed = 0
         var failedRecordData: ByteArray? = null
+        var offset = 0  // Current read position within receiveBuffer
 
-        while (receiveBufferLen >= 5) {
-            val contentType = receiveBuffer[0].toInt() and 0xFF
-            val recordLen = ((receiveBuffer[3].toInt() and 0xFF) shl 8) or
-                    (receiveBuffer[4].toInt() and 0xFF)
+        while (offset + 5 <= receiveBufferLen) {
+            val contentType = receiveBuffer[offset].toInt() and 0xFF
+            val recordLen = ((receiveBuffer[offset + 3].toInt() and 0xFF) shl 8) or
+                    (receiveBuffer[offset + 4].toInt() and 0xFF)
 
             val totalLen = 5 + recordLen
-            if (receiveBufferLen < totalLen) break
-
-            val header = receiveBuffer.copyOfRange(0, 5)
-            val body = receiveBuffer.copyOfRange(5, totalLen)
-            val fullRecord = receiveBuffer.copyOfRange(0, totalLen)
-
-            // Remove processed record from buffer
-            val remaining = receiveBufferLen - totalLen
-            if (remaining > 0) {
-                System.arraycopy(receiveBuffer, totalLen, receiveBuffer, 0, remaining)
-            }
-            receiveBufferLen = remaining
-
-            // Compact buffer to reclaim storage
-            if (receiveBufferLen == 0) {
-                receiveBuffer = ByteArray(0)
-            }
+            if (offset + totalLen > receiveBufferLen) break
 
             recordsProcessed++
 
@@ -331,10 +316,13 @@ class TlsRecordConnection(
                 }
 
                 try {
+                    // Pass header and body slices without copying the full record
+                    val header = receiveBuffer.copyOfRange(offset, offset + 5)
+                    val body = receiveBuffer.copyOfRange(offset + 5, offset + totalLen)
                     val decrypted = decryptTLSRecord(body, header, seqNum)
                     if (decrypted.isNotEmpty()) {
                         if (batchedData == null) {
-                            batchedData = ByteArray(receiveBufferLen + totalLen * 2)
+                            batchedData = ByteArray(maxOf(decrypted.size, totalLen))
                         }
                         if (batchedLen + decrypted.size > batchedData.size) {
                             val newBatched = ByteArray(maxOf(batchedData.size * 2, batchedLen + decrypted.size))
@@ -345,27 +333,34 @@ class TlsRecordConnection(
                         batchedLen += decrypted.size
                     }
                 } catch (e: Exception) {
-                    failedRecordData = fullRecord
-                    if (receiveBufferLen > 0) {
-                        val leftover = receiveBuffer.copyOfRange(0, receiveBufferLen)
-                        failedRecordData = failedRecordData!! + leftover
-                        receiveBufferLen = 0
-                        receiveBuffer = ByteArray(0)
-                    }
+                    // Collect the failed record + all remaining unprocessed data
+                    failedRecordData = receiveBuffer.copyOfRange(offset, receiveBufferLen)
                     hasError = e
+                    offset = receiveBufferLen
                     break
                 }
             } else if (contentType == 0x15) { // Alert
                 hasError = RealityError.HandshakeFailed("TLS Alert received")
+                offset += totalLen
                 break
             }
             // Other content types (ChangeCipherSpec, etc.) are skipped
+            offset += totalLen
+        }
+
+        // Compact buffer: shift remaining unprocessed data to front
+        val remaining = receiveBufferLen - offset
+        if (remaining > 0 && offset > 0) {
+            System.arraycopy(receiveBuffer, offset, receiveBuffer, 0, remaining)
+        }
+        receiveBufferLen = remaining
+        if (receiveBufferLen == 0) {
+            receiveBuffer = ByteArray(0)
         }
 
         if (hasError != null) {
             if (batchedData != null && batchedLen > 0) {
                 if (failedRecordData != null) {
-                    // Put failed data back for next call
                     receiveBuffer = failedRecordData
                     receiveBufferLen = failedRecordData.size
                 }
@@ -438,16 +433,11 @@ class TlsRecordConnection(
 
         val nonce = NativeBridge.nativeXorNonce(serverIV, seqNum)
 
-        val tagOffset = ciphertext.size - 16
-        val ct = ciphertext.copyOfRange(0, tagOffset)
-        val tag = ciphertext.copyOfRange(tagOffset, ciphertext.size)
-
         val cipher = Cipher.getInstance(cipherTransform)
         val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
         cipher.init(Cipher.DECRYPT_MODE, serverKeySpec, paramSpec)
         cipher.updateAAD(header)
-        val ctWithTag = ct + tag
-        val decrypted = cipher.doFinal(ctWithTag)
+        val decrypted = cipher.doFinal(ciphertext)
 
         if (decrypted.isEmpty()) {
             throw RealityError.HandshakeFailed("Empty decrypted data")

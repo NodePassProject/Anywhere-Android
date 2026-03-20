@@ -480,6 +480,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun toggleSubscriptionCollapsed(subscription: Subscription) {
+        subscriptionRepository.update(subscription.copy(collapsed = !subscription.collapsed))
+    }
+
     fun deleteSubscription(subscription: Subscription) {
         subscriptionRepository.delete(subscription.id, configRepository)
         ensureValidSelection()

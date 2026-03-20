@@ -144,6 +144,26 @@ object NativeBridge {
     external fun nativeBlake3DeriveKey(context: String, input: ByteArray, outLen: Int): ByteArray
 
     // =========================================================================
+    // X25519 Key Exchange
+    // =========================================================================
+
+    /**
+     * Generate an X25519 key pair.
+     * @return 64 bytes: privateKey(32) + publicKey(32)
+     */
+    @JvmStatic
+    external fun nativeX25519GenerateKeyPair(): ByteArray
+
+    /**
+     * Compute X25519 shared secret.
+     * @param privateKey 32-byte private key
+     * @param peerPublicKey 32-byte peer public key
+     * @return 32-byte shared secret
+     */
+    @JvmStatic
+    external fun nativeX25519KeyAgreement(privateKey: ByteArray, peerPublicKey: ByteArray): ByteArray
+
+    // =========================================================================
     // TLS 1.3 Key Derivation
     // =========================================================================
 

@@ -9,6 +9,7 @@
 #include <string.h>
 #include "crypto/blake3.h"
 #include "crypto/CTLSKeyDerivation.h"
+#include "crypto/CX25519.h"
 
 /* --------------------------------------------------------------------------
  * Helper: resolve cipher suite parameters.
@@ -528,5 +529,103 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTls13TranscriptHash(
         return NULL;
     }
     (*env)->SetByteArrayRegion(env, result, 0, (jsize)hashLen, (const jbyte *)hash_out);
+    return result;
+}
+
+/* ==========================================================================
+ * X25519: nativeX25519GenerateKeyPair() -> byte[64]
+ *
+ * Returns flat array: privateKey(32) + publicKey(32)
+ * ========================================================================== */
+JNIEXPORT jbyteArray JNICALL
+Java_com_argsment_anywhere_vpn_NativeBridge_nativeX25519GenerateKeyPair(
+    JNIEnv *env,
+    jclass  clazz)
+{
+    (void)clazz;
+
+    uint8_t private_key[32];
+    uint8_t public_key[32];
+
+    x25519_generate_keypair(public_key, private_key);
+
+    jbyteArray result = (*env)->NewByteArray(env, 64);
+    if (!result) {
+        return NULL;
+    }
+    (*env)->SetByteArrayRegion(env, result, 0, 32, (const jbyte *)private_key);
+    (*env)->SetByteArrayRegion(env, result, 32, 32, (const jbyte *)public_key);
+    return result;
+}
+
+/* ==========================================================================
+ * X25519: nativeX25519KeyAgreement(byte[] privateKey,
+ *             byte[] peerPublicKey) -> byte[32]
+ *
+ * Returns 32-byte shared secret.
+ * ========================================================================== */
+JNIEXPORT jbyteArray JNICALL
+Java_com_argsment_anywhere_vpn_NativeBridge_nativeX25519KeyAgreement(
+    JNIEnv *env,
+    jclass  clazz,
+    jbyteArray privateKey,
+    jbyteArray peerPublicKey)
+{
+    (void)clazz;
+
+    if (!privateKey) {
+        throw_illegal_argument(env, "privateKey must not be null");
+        return NULL;
+    }
+    if (!peerPublicKey) {
+        throw_illegal_argument(env, "peerPublicKey must not be null");
+        return NULL;
+    }
+
+    jsize priv_len = (*env)->GetArrayLength(env, privateKey);
+    if (priv_len != 32) {
+        throw_illegal_argument(env, "privateKey must be exactly 32 bytes");
+        return NULL;
+    }
+
+    jsize pub_len = (*env)->GetArrayLength(env, peerPublicKey);
+    if (pub_len != 32) {
+        throw_illegal_argument(env, "peerPublicKey must be exactly 32 bytes");
+        return NULL;
+    }
+
+    jbyte *priv_bytes = (*env)->GetByteArrayElements(env, privateKey, NULL);
+    if (!priv_bytes) {
+        throw_runtime(env, "Failed to access privateKey byte array");
+        return NULL;
+    }
+
+    jbyte *pub_bytes = (*env)->GetByteArrayElements(env, peerPublicKey, NULL);
+    if (!pub_bytes) {
+        (*env)->ReleaseByteArrayElements(env, privateKey, priv_bytes, JNI_ABORT);
+        throw_runtime(env, "Failed to access peerPublicKey byte array");
+        return NULL;
+    }
+
+    uint8_t shared_secret[32];
+    int rc = x25519_key_agreement(
+        shared_secret,
+        (const uint8_t *)priv_bytes,
+        (const uint8_t *)pub_bytes
+    );
+
+    (*env)->ReleaseByteArrayElements(env, privateKey, priv_bytes, JNI_ABORT);
+    (*env)->ReleaseByteArrayElements(env, peerPublicKey, pub_bytes, JNI_ABORT);
+
+    if (rc != 0) {
+        throw_runtime(env, "X25519 key agreement failed (low-order point)");
+        return NULL;
+    }
+
+    jbyteArray result = (*env)->NewByteArray(env, 32);
+    if (!result) {
+        return NULL;
+    }
+    (*env)->SetByteArrayRegion(env, result, 0, 32, (const jbyte *)shared_secret);
     return result;
 }

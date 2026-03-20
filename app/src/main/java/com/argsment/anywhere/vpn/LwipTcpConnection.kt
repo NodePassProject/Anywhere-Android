@@ -333,7 +333,7 @@ class LwipTcpConnection(
                     val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
                     val conn = ProxyClientFactory.connect(
                         hopConfig,
-                        nextConfig.connectAddress,
+                        nextConfig.serverAddress,
                         nextConfig.serverPort.toInt(),
                         tunnel = previousConnection
                     )
@@ -679,6 +679,9 @@ class LwipTcpConnection(
 private class ByteArrayOutputStream {
     private var buf = ByteArray(256)
     private var count = 0
+    companion object {
+        private const val SHRINK_THRESHOLD = 8192
+    }
 
     fun write(data: ByteArray) {
         write(data, 0, data.size)
@@ -699,6 +702,11 @@ private class ByteArrayOutputStream {
 
     fun reset() {
         count = 0
+        // Shrink backing array if it grew well beyond the initial size,
+        // preventing long-lived connections from retaining peak memory.
+        if (buf.size > SHRINK_THRESHOLD) {
+            buf = ByteArray(256)
+        }
     }
 
     /** Removes the first [n] bytes, shifting remaining data to the front. */

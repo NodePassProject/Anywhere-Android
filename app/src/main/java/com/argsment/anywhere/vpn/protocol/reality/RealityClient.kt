@@ -12,11 +12,8 @@ import com.argsment.anywhere.vpn.protocol.tls.TlsHandshakeKeys
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
 import com.argsment.anywhere.vpn.protocol.vless.RealityError
 import com.argsment.anywhere.vpn.util.NioSocket
-import java.security.KeyFactory
-import java.security.KeyPairGenerator
 import java.security.SecureRandom
 import javax.crypto.Cipher
-import javax.crypto.KeyAgreement
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -39,8 +36,8 @@ class RealityClient(
 ) {
     private var connection: Transport? = null
 
-    // Ephemeral key pair (cleared after handshake)
-    private var ephemeralPrivateKey: java.security.PrivateKey? = null
+    // Ephemeral X25519 key pair (cleared after handshake)
+    private var ephemeralPrivateKeyBytes: ByteArray? = null
     private var ephemeralPublicKeyBytes: ByteArray? = null
     private var authKey: ByteArray? = null
     private var storedClientHello: ByteArray? = null
@@ -66,12 +63,10 @@ class RealityClient(
      * @return The established [TlsRecordConnection].
      */
     suspend fun connect(host: String, port: Int): TlsRecordConnection {
-        // Generate ephemeral X25519 key pair
-        val kpg = KeyPairGenerator.getInstance("X25519")
-        val keyPair = kpg.generateKeyPair()
-        ephemeralPrivateKey = keyPair.private
-        // Extract raw 32-byte public key
-        ephemeralPublicKeyBytes = extractX25519PublicKeyBytes(keyPair.public)
+        // Generate ephemeral X25519 key pair via native bridge (works on all Android versions)
+        val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
+        ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
+        ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
 
         val socket = NioSocket()
         connection = socket
@@ -90,10 +85,9 @@ class RealityClient(
      * Performs the Reality handshake over an existing transport (for proxy chaining).
      */
     suspend fun connect(transport: Transport): TlsRecordConnection {
-        val kpg = KeyPairGenerator.getInstance("X25519")
-        val keyPair = kpg.generateKeyPair()
-        ephemeralPrivateKey = keyPair.private
-        ephemeralPublicKeyBytes = extractX25519PublicKeyBytes(keyPair.public)
+        val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
+        ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
+        ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
 
         connection = transport
         return performRealityHandshake()
@@ -117,7 +111,7 @@ class RealityClient(
      * derives encryption keys, and sends Client Finished.
      */
     private suspend fun performRealityHandshake(): TlsRecordConnection {
-        val privateKey = ephemeralPrivateKey
+        val privateKey = ephemeralPrivateKeyBytes
             ?: throw RealityError.HandshakeFailed("No ephemeral key")
 
         val clientHello = buildRealityClientHello(privateKey)
@@ -146,7 +140,7 @@ class RealityClient(
      * @param privateKey The ephemeral X25519 private key for this connection.
      * @return A complete TLS record containing the ClientHello.
      */
-    private fun buildRealityClientHello(privateKey: java.security.PrivateKey): ByteArray {
+    private fun buildRealityClientHello(privateKey: ByteArray): ByteArray {
         val random = ByteArray(32)
         SecureRandom().nextBytes(random)
 
@@ -168,12 +162,8 @@ class RealityClient(
             sessionId[8 + i] = configuration.shortId[i]
         }
 
-        // ECDH with server's public key to derive auth key
-        val serverPubKey = buildX25519PublicKey(configuration.publicKey)
-        val ka = KeyAgreement.getInstance("X25519")
-        ka.init(privateKey)
-        ka.doPhase(serverPubKey, true)
-        val sharedSecretBytes = ka.generateSecret()
+        // X25519 ECDH with server's public key to derive auth key (via native bridge)
+        val sharedSecretBytes = NativeBridge.nativeX25519KeyAgreement(privateKey, configuration.publicKey)
 
         val salt = random.copyOfRange(0, 20)
         val info = "REALITY".toByteArray(Charsets.UTF_8)
@@ -281,17 +271,13 @@ class RealityClient(
         val serverKeyShare = parsed.first
         val cipherSuite = parsed.second
 
-        val privateKey = ephemeralPrivateKey
+        val privateKey = ephemeralPrivateKeyBytes
             ?: throw RealityError.HandshakeFailed("No ephemeral key")
         val clientHello = storedClientHello
             ?: throw RealityError.HandshakeFailed("No stored ClientHello")
 
-        // Perform ECDH with server's ephemeral key
-        val serverEphPubKey = buildX25519PublicKey(serverKeyShare)
-        val ka = KeyAgreement.getInstance("X25519")
-        ka.init(privateKey)
-        ka.doPhase(serverEphPubKey, true)
-        val sharedSecretData = ka.generateSecret()
+        // X25519 ECDH with server's ephemeral key (via native bridge)
+        val sharedSecretData = NativeBridge.nativeX25519KeyAgreement(privateKey, serverKeyShare)
 
         val serverHello = extractServerHelloMessage(buf)
 
@@ -974,35 +960,6 @@ class RealityClient(
     }
 
     // =========================================================================
-    // X25519 Key Helpers
-    // =========================================================================
-
-    /**
-     * Extracts the raw 32-byte X25519 public key from a Java PublicKey.
-     * The encoded form is X.509 SubjectPublicKeyInfo; the raw key is the last 32 bytes.
-     */
-    private fun extractX25519PublicKeyBytes(publicKey: java.security.PublicKey): ByteArray {
-        val encoded = publicKey.encoded
-        // X.509 encoding for X25519 is 44 bytes: 12-byte header + 32-byte key
-        return encoded.copyOfRange(encoded.size - 32, encoded.size)
-    }
-
-    /**
-     * Builds a Java PublicKey from raw 32-byte X25519 key material.
-     */
-    private fun buildX25519PublicKey(rawBytes: ByteArray): java.security.PublicKey {
-        // X.509 SubjectPublicKeyInfo header for X25519
-        val header = byteArrayOf(
-            0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65,
-            0x6E, 0x03, 0x21, 0x00
-        )
-        val encoded = header + rawBytes
-        val keySpec = java.security.spec.X509EncodedKeySpec(encoded)
-        val kf = KeyFactory.getInstance("X25519")
-        return kf.generatePublic(keySpec)
-    }
-
-    // =========================================================================
     // Cleanup
     // =========================================================================
 
@@ -1010,7 +967,7 @@ class RealityClient(
      * Frees handshake-only state to reduce memory after the connection is established.
      */
     private fun clearHandshakeState() {
-        ephemeralPrivateKey = null
+        ephemeralPrivateKeyBytes = null
         ephemeralPublicKeyBytes = null
         authKey = null
         storedClientHello = null
