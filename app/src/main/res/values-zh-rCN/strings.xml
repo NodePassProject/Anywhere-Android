@@ -145,4 +145,22 @@
     <string name="exit">出口</string>
     <string name="route_preview">路由预览</string>
     <string name="n_proxies">%d 个代理</string>
+
+    <!-- Missing general -->
+    <string name="join_telegram_group">加入 Telegram 群组</string>
+    <string name="select_configuration">代理</string>
+    <string name="reject">拒绝</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">国家分流</string>
+    <string name="country_bypass_description">将访问本国的流量直连，绕过代理以获得更快的本地访问速度。</string>
+    <string name="ad_blocking_title">广告拦截</string>
+    <string name="ad_blocking_description">在网络层拦截广告和追踪器，获得更清爽的浏览体验。</string>
+    <string name="enable_ad_blocking">启用广告拦截</string>
+    <string name="get_started">开始使用</string>
+    <string name="next">下一步</string>
+    <string name="back">返回</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">暂不支持</string>
 </resources>

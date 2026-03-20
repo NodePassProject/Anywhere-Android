@@ -245,7 +245,9 @@ object HpackEncoder {
 
     // -- HPACK Static Table (RFC 7541 Appendix A) --
 
-    private val STATIC_TABLE: List<Pair<String, String>> = listOf(
+    // -- HPACK Static Table (accessible to HpackDecoder) --
+
+    internal val STATIC_TABLE: List<Pair<String, String>> = listOf(
         ":authority" to "",                          // 1
         ":method" to "GET",                          // 2
         ":method" to "POST",                         // 3
@@ -453,4 +455,116 @@ object HpackHuffman {
         0xfffffdc0u to 27, 0xfffffde0u to 27, 0xfffffe00u to 27, 0xfffffb80u to 26,
         0xfffffffcu to 30,  // 256 = EOS
     )
+}
+
+/**
+ * Stateful HPACK decoder with persistent dynamic table across calls.
+ *
+ * Used by [Http2Session] for multiplexed streams where the dynamic table must persist
+ * across multiple HEADERS frames on the same connection (RFC 7541 §2.3.3).
+ * The legacy [HpackEncoder.decodeHeaders] creates a fresh table per call, which is
+ * correct only for single-stream connections like [Http2Connection].
+ */
+class HpackDecoder {
+    private val dynamicTable = mutableListOf<Pair<String, String>>()
+    private val staticTable = HpackEncoder.STATIC_TABLE
+
+    fun decode(data: ByteArray): List<Pair<String, String>>? {
+        val headers = mutableListOf<Pair<String, String>>()
+        val offset = intArrayOf(0)
+
+        while (offset[0] < data.size) {
+            val byte = data[offset[0]].toInt() and 0xFF
+
+            when {
+                byte and 0x80 != 0 -> {
+                    // §6.1 Indexed Header Field
+                    val index = decodeInteger(data, offset, 7) ?: return null
+                    val entry = lookupEntry(index) ?: return null
+                    headers.add(entry)
+                }
+
+                byte and 0xC0 == 0x40 -> {
+                    // §6.2.1 Literal with Incremental Indexing
+                    val (name, value) = decodeLiteral(data, offset, 6) ?: return null
+                    headers.add(name to value)
+                    dynamicTable.add(0, name to value)
+                }
+
+                byte and 0xF0 == 0x00 || byte and 0xF0 == 0x10 -> {
+                    // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
+                    val (name, value) = decodeLiteral(data, offset, 4) ?: return null
+                    headers.add(name to value)
+                }
+
+                byte and 0xE0 == 0x20 -> {
+                    // §6.3 Dynamic Table Size Update
+                    decodeInteger(data, offset, 5)
+                }
+
+                else -> return null
+            }
+        }
+
+        return headers
+    }
+
+    fun reset() {
+        dynamicTable.clear()
+    }
+
+    private fun lookupEntry(index: Int): Pair<String, String>? {
+        if (index < 1) return null
+        if (index <= staticTable.size) return staticTable[index - 1]
+        val dynIndex = index - staticTable.size - 1
+        if (dynIndex >= dynamicTable.size) return null
+        return dynamicTable[dynIndex]
+    }
+
+    private fun decodeLiteral(data: ByteArray, offset: IntArray, prefixBits: Int): Pair<String, String>? {
+        val nameIndex = decodeInteger(data, offset, prefixBits) ?: return null
+        val name = if (nameIndex == 0) {
+            decodeString(data, offset) ?: return null
+        } else {
+            val entry = lookupEntry(nameIndex) ?: return null
+            entry.first
+        }
+        val value = decodeString(data, offset) ?: return null
+        return name to value
+    }
+
+    private fun decodeInteger(data: ByteArray, offset: IntArray, prefixBits: Int): Int? {
+        if (offset[0] >= data.size) return null
+        val maxPrefix = (1 shl prefixBits) - 1
+        var value = data[offset[0]].toInt() and maxPrefix
+        offset[0]++
+        if (value < maxPrefix) return value
+
+        var m = 0
+        do {
+            if (offset[0] >= data.size) return null
+            val b = data[offset[0]].toInt() and 0xFF
+            offset[0]++
+            value += (b and 0x7F) shl m
+            m += 7
+            if (b and 0x80 == 0) break
+        } while (true)
+
+        return value
+    }
+
+    private fun decodeString(data: ByteArray, offset: IntArray): String? {
+        if (offset[0] >= data.size) return null
+        val huffman = data[offset[0]].toInt() and 0x80 != 0
+        val length = decodeInteger(data, offset, 7) ?: return null
+        if (offset[0] + length > data.size) return null
+        val stringData = data.copyOfRange(offset[0], offset[0] + length)
+        offset[0] += length
+        return if (huffman) {
+            val decoded = HpackHuffman.decode(stringData) ?: return null
+            String(decoded, Charsets.UTF_8)
+        } else {
+            String(stringData, Charsets.UTF_8)
+        }
+    }
 }

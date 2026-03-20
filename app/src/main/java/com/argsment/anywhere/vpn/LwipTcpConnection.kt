@@ -439,44 +439,74 @@ class LwipTcpConnection(
     // -- Data Writing to lwIP (downlink: remote → local app) --
 
     /**
+     * Feeds as many bytes as possible from [data] (starting at [dataOffset]) into
+     * lwIP's TCP send buffer. Returns bytes written, or -1 on fatal (non-transient)
+     * tcp_write error. ERR_MEM is treated as transient (breaks out of the loop).
+     *
+     * When [retryOnEmpty] is true, calls tcp_output once to flush if the send
+     * buffer is initially full, then retries — used by the initial write path.
+     */
+    private fun feedLwip(data: ByteArray, dataOffset: Int, count: Int, retryOnEmpty: Boolean = false): Int {
+        var offset = 0
+        while (offset < count) {
+            var sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
+            if (sndbuf <= 0) {
+                if (retryOnEmpty) {
+                    NativeBridge.nativeTcpOutput(pcb)
+                    sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
+                }
+                if (sndbuf <= 0) break
+            }
+            val chunkSize = minOf(sndbuf, count - offset, MAX_LWIP_WRITE_SIZE)
+            val err = NativeBridge.nativeTcpWrite(pcb, data, dataOffset + offset, chunkSize)
+            if (err != 0) {
+                if (err == -1) break  // ERR_MEM: transient — remaining data goes to overflow
+                return -1             // fatal error
+            }
+            offset += chunkSize
+        }
+        return offset
+    }
+
+    /**
      * Writes data from the remote side to the lwIP TCP send buffer.
      * Called from the receive loop when data arrives from VLESS/direct.
+     *
+     * If overflow buffer already has data, appends to preserve ordering.
+     * ERR_MEM from tcp_write is treated as transient (data goes to overflow),
+     * matching iOS behavior which avoids unnecessary RSTs under heavy load.
      */
     fun writeToLwip(data: ByteArray) {
         if (closed) return
 
-        var offset = 0
-        while (offset < data.size) {
-            var sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
-            if (sndbuf <= 0) {
-                NativeBridge.nativeTcpOutput(pcb)
-                sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
-                if (sndbuf <= 0) {
-                    val remaining = data.size - offset
-                    // Soft limit: pause receive instead of aborting (matching iOS).
-                    // Never abort on overflow — the connection can recover once the app reads.
-                    if (overflowBuffer.size() + remaining > MAX_OVERFLOW_BUFFER_SIZE) {
-                        Log.w(TAG, "[TCP] Overflow buffer soft limit reached for $dstHost:$dstPort, pausing receive")
-                    }
-                    overflowBuffer.write(data, offset, remaining)
-                    offset = data.size
-                    break
-                }
+        // If overflow already queued, append to preserve ordering (matching iOS).
+        if (overflowBuffer.size() > 0) {
+            overflowBuffer.write(data)
+            drainOverflowBuffer()
+            if (closed) return
+            if (overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE) {
+                requestNextReceive()
+            } else {
+                receivePaused = true
             }
-            // Cap write size at 16KB to limit pbuf/segment allocation pressure (matching iOS)
-            val chunkSize = minOf(sndbuf, data.size - offset, MAX_LWIP_WRITE_SIZE)
-            val err = NativeBridge.nativeTcpWrite(pcb, data, offset, chunkSize)
-            if (err != 0) {
-                Log.e(TAG, "[TCP] tcp_write error: $err for $dstHost:$dstPort")
-                abort()
-                return
-            }
-            offset += chunkSize
+            return
+        }
+
+        val written = feedLwip(data, 0, data.size, retryOnEmpty = true)
+        if (written == -1) {
+            Log.e(TAG, "[TCP] tcp_write error for $dstHost:$dstPort")
+            abort()
+            return
+        }
+        if (written < data.size) {
+            overflowBuffer.write(data, written, data.size - written)
         }
 
         if (closed) return
         NativeBridge.nativeTcpOutput(pcb)
 
+        // Backpressure gate: if overflow has accumulated beyond the soft limit,
+        // pause receives so the remote side stops sending.
         if (overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE) {
             requestNextReceive()
         } else {
@@ -490,40 +520,30 @@ class LwipTcpConnection(
 
         val data = overflowBuffer.backingArray()
         val dataSize = overflowBuffer.size()
-        var offset = 0
-        while (offset < dataSize) {
-            val sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
-            if (sndbuf <= 0) break
-            val chunkSize = minOf(sndbuf, dataSize - offset, MAX_LWIP_WRITE_SIZE)
-            val err = NativeBridge.nativeTcpWrite(pcb, data, offset, chunkSize)
-            if (err != 0) {
-                Log.e(TAG, "[TCP] tcp_write error: $err for $dstHost:$dstPort")
-                abort()
-                return
-            }
-            offset += chunkSize
+        val written = feedLwip(data, 0, dataSize)
+        if (written == -1) {
+            Log.e(TAG, "[TCP] tcp_write error for $dstHost:$dstPort")
+            abort()
+            return
         }
 
         if (closed) return
 
-        if (offset > 0) {
-            if (offset >= dataSize) {
+        if (written > 0) {
+            if (written >= dataSize) {
                 overflowBuffer.reset()
             } else {
-                overflowBuffer.consume(offset)
+                overflowBuffer.consume(written)
             }
             NativeBridge.nativeTcpOutput(pcb)
-        }
-
-        // If drain wrote zero bytes but overflow is non-empty, schedule a delayed retry.
-        // This handles the edge case where ERR_MEM occurs with an empty send buffer
-        // and no handleSent callback will fire (matching iOS 100ms retry).
-        if (offset == 0 && overflowBuffer.size() > 0) {
+        } else if (overflowBuffer.size() > 0) {
+            // Nothing drained (ERR_MEM with empty send buffer) — no handleSent will
+            // fire for this connection, so schedule a delayed retry (matching iOS).
             lwipExecutor.schedule({ drainOverflowBuffer() }, DRAIN_RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
             return
         }
 
-        if (overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE && receivePaused) {
+        if (receivePaused && overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE) {
             receivePaused = false
             requestNextReceive()
         }
@@ -596,18 +616,8 @@ class LwipTcpConnection(
     /** Best-effort flush of overflow data into lwIP send buffer before close. */
     private fun flushOverflowToLwip() {
         if (overflowBuffer.size() == 0) return
-        val data = overflowBuffer.backingArray()
-        val dataSize = overflowBuffer.size()
-        var offset = 0
-        while (offset < dataSize) {
-            val sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
-            if (sndbuf <= 0) break
-            val chunkSize = minOf(sndbuf, dataSize - offset, MAX_LWIP_WRITE_SIZE)
-            val err = NativeBridge.nativeTcpWrite(pcb, data, offset, chunkSize)
-            if (err != 0) break
-            offset += chunkSize
-        }
-        if (offset > 0) {
+        val written = feedLwip(overflowBuffer.backingArray(), 0, overflowBuffer.size())
+        if (written > 0) {
             NativeBridge.nativeTcpOutput(pcb)
         }
     }

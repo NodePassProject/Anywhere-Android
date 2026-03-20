@@ -580,6 +580,64 @@ class VlessClient(
      * - Reality -> stream-one with HTTP/2 (Xray-core forces h2 for Reality)
      * - TLS/none -> packet-up (CDN-safe, GET + POST over HTTP/1.1)
      */
+    /**
+     * Decides the HTTP version for XHTTP, matching Xray-core's decideHTTPVersion.
+     * - Reality always uses HTTP/2.
+     * - No TLS means plain HTTP/1.1.
+     * - TLS with a single "http/1.1" ALPN stays on HTTP/1.1.
+     * - TLS with a single "h3" ALPN expects QUIC/HTTP/3 (not implemented).
+     * - Everything else uses HTTP/2.
+     */
+    private enum class XHttpHttpVersion { HTTP11, HTTP2, HTTP3 }
+
+    private fun decideXHttpHttpVersion(): XHttpHttpVersion {
+        if (configuration.reality != null) return XHttpHttpVersion.HTTP2
+        val tlsConfig = configuration.tls ?: return XHttpHttpVersion.HTTP11
+        val alpn = tlsConfig.alpn ?: emptyList()
+        if (alpn.size != 1) return XHttpHttpVersion.HTTP2
+        return when (alpn[0].lowercase()) {
+            "http/1.1" -> XHttpHttpVersion.HTTP11
+            "h3" -> XHttpHttpVersion.HTTP3
+            else -> XHttpHttpVersion.HTTP2
+        }
+    }
+
+    /**
+     * Sanitizes TLS ALPN for XHTTP-over-TCP handshakes.
+     * Strips protocols like h3 that require QUIC, ensuring only TCP-compatible
+     * ALPN values are advertised (matching iOS sanitizedXHTTPTLSConfiguration).
+     */
+    private fun sanitizedXHttpTlsConfig(
+        base: TlsConfiguration,
+        httpVersion: XHttpHttpVersion
+    ): TlsConfiguration {
+        val sanitizedAlpn: List<String>? = when (httpVersion) {
+            XHttpHttpVersion.HTTP11 -> listOf("http/1.1")
+            XHttpHttpVersion.HTTP2 -> {
+                val configured = base.alpn
+                if (configured != null) {
+                    val filtered = configured.filter {
+                        it.equals("h2", ignoreCase = true) || it.equals("http/1.1", ignoreCase = true)
+                    }
+                    if (filtered.isEmpty() || (filtered.size == 1 && filtered[0].equals("http/1.1", ignoreCase = true))) {
+                        listOf("h2", "http/1.1")
+                    } else {
+                        filtered
+                    }
+                } else {
+                    null
+                }
+            }
+            XHttpHttpVersion.HTTP3 -> listOf("h3")
+        }
+        return TlsConfiguration(
+            serverName = base.serverName,
+            alpn = sanitizedAlpn,
+            allowInsecure = base.allowInsecure,
+            fingerprint = base.fingerprint
+        )
+    }
+
     private suspend fun connectWithXHttp(
         command: VlessCommand,
         destinationHost: String,
@@ -589,10 +647,14 @@ class VlessClient(
         val xhttpConfig = configuration.xhttp
             ?: throw ProxyError.ConnectionFailed("XHTTP transport specified but no XHTTP configuration")
 
-        val useHTTP2ForTls = configuration.tls?.let { tlsConfig ->
-            val alpn = tlsConfig.alpn ?: emptyList()
-            !(alpn.size == 1 && alpn[0] == "http/1.1")
-        } ?: false
+        val httpVersion = decideXHttpHttpVersion()
+        if (httpVersion == XHttpHttpVersion.HTTP3) {
+            throw ProxyError.ProtocolError(
+                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented yet"
+            )
+        }
+
+        val useHTTP2 = httpVersion == XHttpHttpVersion.HTTP2
 
         // Resolve mode: auto -> actual mode based on security
         val resolvedMode: XHttpMode = if (xhttpConfig.mode == XHttpMode.AUTO) {
@@ -603,8 +665,12 @@ class VlessClient(
             xhttpConfig.mode
         }
 
-        // Generate session ID for packet-up mode
-        val sessionId = if (resolvedMode == XHttpMode.PACKET_UP) UUID.randomUUID().toString() else ""
+        // Generate session ID for packet-up and stream-up modes (matching iOS)
+        val sessionId = if (resolvedMode == XHttpMode.PACKET_UP || resolvedMode == XHttpMode.STREAM_UP) {
+            UUID.randomUUID().toString()
+        } else {
+            ""
+        }
 
         return when {
             configuration.reality != null -> connectXHttpRealityWithRetry(
@@ -613,7 +679,7 @@ class VlessClient(
             )
 
             configuration.tls != null -> connectXHttpsWithRetry(
-                xhttpConfig, resolvedMode, sessionId, useHTTP2ForTls,
+                xhttpConfig, resolvedMode, sessionId, useHTTP2,
                 command, destinationHost, destinationPort, initialData
             )
 
@@ -645,9 +711,10 @@ class VlessClient(
             }
 
             try {
-                // Upload connection factory for packet-up mode
+                // Upload connection factory for packet-up and stream-up modes (matching iOS)
+                val needsUpload = mode == XHttpMode.PACKET_UP || mode == XHttpMode.STREAM_UP
                 val uploadFactory: (suspend () -> TransportClosures)? =
-                    if (mode == XHttpMode.PACKET_UP) {
+                    if (needsUpload) {
                         {
                             if (tunnel != null) {
                                 val uploadTunnel = buildUploadTunnel()
@@ -726,7 +793,11 @@ class VlessClient(
                 val baseTlsConfig = configuration.tls
                     ?: throw ProxyError.ConnectionFailed("XHTTPS requires TLS configuration")
 
-                val tlsClient = TlsClient(baseTlsConfig)
+                // Sanitize ALPN: strip h3 (requires QUIC), ensure h2 present for HTTP/2
+                val httpVersion = if (useHTTP2) XHttpHttpVersion.HTTP2 else XHttpHttpVersion.HTTP11
+                val tlsConfig = sanitizedXHttpTlsConfig(baseTlsConfig, httpVersion)
+
+                val tlsClient = TlsClient(tlsConfig)
                 val tlsConn = if (tunnel != null) {
                     tlsClient.connect(requireTunnelTransport())
                 } else {
@@ -735,11 +806,12 @@ class VlessClient(
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
 
-                // Upload connection factory for packet-up mode
+                // Upload connection factory for packet-up and stream-up modes (matching iOS)
+                val needsUpload = !useHTTP2 && (mode == XHttpMode.PACKET_UP || mode == XHttpMode.STREAM_UP)
                 val uploadFactory: (suspend () -> TransportClosures)? =
-                    if (!useHTTP2 && mode == XHttpMode.PACKET_UP) {
+                    if (needsUpload) {
                         {
-                            val uploadTlsClient = TlsClient(baseTlsConfig)
+                            val uploadTlsClient = TlsClient(tlsConfig)
                             val uploadTlsConn = if (tunnel != null) {
                                 uploadTlsClient.connect(TunneledTransport(buildUploadTunnel()))
                             } else {

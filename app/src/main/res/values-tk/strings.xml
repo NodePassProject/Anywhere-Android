@@ -145,4 +145,22 @@
     <string name="exit">Çykyş</string>
     <string name="route_preview">Ugur öňünden görmek</string>
     <string name="n_proxies">%d proksi</string>
+
+    <!-- Missing general -->
+    <string name="join_telegram_group">Telegram toparyna goşulyň</string>
+    <string name="select_configuration">Proksiler</string>
+    <string name="reject">Ret et</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">Ýurt aýlaw</string>
+    <string name="country_bypass_description">Ýerli elýeterliligi çaltlaşdyrmak üçin proksi aýlanyp, traffigi öz ýurduňyza gönüden-göni ugrugyň.</string>
+    <string name="ad_blocking_title">Mahabat blokirlemek</string>
+    <string name="ad_blocking_description">Arassa görmek tejribesi üçin tor derejesinde mahabatlary we yzarlaýjylary blokirläň.</string>
+    <string name="enable_ad_blocking">Mahabat blokirlemegi açmak</string>
+    <string name="get_started">Başla</string>
+    <string name="next">Indiki</string>
+    <string name="back">Yza</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">Entek goldanylmaýar</string>
 </resources>

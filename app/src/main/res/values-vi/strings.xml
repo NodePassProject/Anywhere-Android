@@ -145,4 +145,22 @@
     <string name="exit">Đầu ra</string>
     <string name="route_preview">Xem trước tuyến đường</string>
     <string name="n_proxies">%d proxy</string>
+
+    <!-- Missing general -->
+    <string name="join_telegram_group">Tham gia nhóm Telegram</string>
+    <string name="select_configuration">Proxy</string>
+    <string name="reject">Từ chối</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">Bỏ qua quốc gia</string>
+    <string name="country_bypass_description">Định tuyến lưu lượng đến quốc gia của bạn trực tiếp, bỏ qua proxy để truy cập nội địa nhanh hơn.</string>
+    <string name="ad_blocking_title">Chặn quảng cáo</string>
+    <string name="ad_blocking_description">Chặn quảng cáo và trình theo dõi ở cấp mạng để có trải nghiệm duyệt web sạch hơn.</string>
+    <string name="enable_ad_blocking">Bật chặn quảng cáo</string>
+    <string name="get_started">Bắt đầu</string>
+    <string name="next">Tiếp theo</string>
+    <string name="back">Quay lại</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">Chưa hỗ trợ</string>
 </resources>

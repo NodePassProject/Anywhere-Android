@@ -145,4 +145,22 @@
     <string name="exit">Выход</string>
     <string name="route_preview">Предпросмотр маршрута</string>
     <string name="n_proxies">%d прокси</string>
+
+    <!-- Missing general -->
+    <string name="join_telegram_group">Присоединиться к группе Telegram</string>
+    <string name="select_configuration">Прокси</string>
+    <string name="reject">Отклонить</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">Обход по стране</string>
+    <string name="country_bypass_description">Направляйте трафик в вашу страну напрямую, минуя прокси для более быстрого локального доступа.</string>
+    <string name="ad_blocking_title">Блокировка рекламы</string>
+    <string name="ad_blocking_description">Блокируйте рекламу и трекеры на сетевом уровне для более чистого просмотра.</string>
+    <string name="enable_ad_blocking">Включить блокировку рекламы</string>
+    <string name="get_started">Начать</string>
+    <string name="next">Далее</string>
+    <string name="back">Назад</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">Пока не поддерживается</string>
 </resources>

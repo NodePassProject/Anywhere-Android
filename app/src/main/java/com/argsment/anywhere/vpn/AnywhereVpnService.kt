@@ -10,6 +10,7 @@ import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
 import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.argsment.anywhere.MainActivity
@@ -115,23 +116,39 @@ class AnywhereVpnService : VpnService() {
     // VPN Setup
     // =========================================================================
 
-    private fun startVpn(config: ProxyConfiguration) {
-        Log.i(TAG, "[VPN] Starting tunnel to ${config.serverAddress}:${config.serverPort} " +
-                "(connect: ${config.connectAddress}), security: ${config.security}, transport: ${config.transport}")
+    /** Applies the global allowInsecure preference to a config's TLS settings. */
+    private fun applyGlobalAllowInsecure(config: ProxyConfiguration): ProxyConfiguration {
+        val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("allowInsecure", false)) return config
+        val tls = config.tls ?: return config
+        if (tls.allowInsecure) return config
+        val updatedTls = tls.copy(allowInsecure = true)
+        val updatedChain = config.chain?.map { applyGlobalAllowInsecure(it) }
+        return config.copy(tls = updatedTls, chain = updatedChain)
+    }
 
-        currentConfig = config
-        DnsCache.setActiveProxyDomain(config.serverAddress)
+    private fun startVpn(config: ProxyConfiguration) {
+        val effectiveConfig = applyGlobalAllowInsecure(config)
+        Log.i(TAG, "[VPN] Starting tunnel to ${effectiveConfig.serverAddress}:${effectiveConfig.serverPort} " +
+                "(connect: ${effectiveConfig.connectAddress}), security: ${effectiveConfig.security}, transport: ${effectiveConfig.transport}")
+
+        currentConfig = effectiveConfig
+        DnsCache.setActiveProxyDomain(effectiveConfig.serverAddress)
         getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
             .edit()
-            .putString("lastConfigurationData", json.encodeToString(ProxyConfiguration.serializer(), config))
+            .putString("lastConfigurationData", json.encodeToString(ProxyConfiguration.serializer(), effectiveConfig))
             .apply()
 
         // Create foreground notification
-        startForeground(NOTIFICATION_ID, buildNotification(config.name),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, buildNotification(effectiveConfig.name),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification(effectiveConfig.name))
+        }
 
         // Build and establish TUN interface
-        val fd = buildTunInterface(config) ?: run {
+        val fd = buildTunInterface(effectiveConfig) ?: run {
             Log.e(TAG, "[VPN] Failed to establish TUN interface")
             stopSelf()
             return
@@ -154,10 +171,10 @@ class AnywhereVpnService : VpnService() {
         lwipStack = stack
 
         stack.onTunnelSettingsNeedReapply = {
-            reapplyTunnelSettings(config)
+            reapplyTunnelSettings(effectiveConfig)
         }
 
-        stack.start(fd, config, ipv6Connections, ipv6Dns)
+        stack.start(fd, effectiveConfig, ipv6Connections, ipv6Dns)
     }
 
     private fun stopVpn() {
@@ -172,7 +189,12 @@ class AnywhereVpnService : VpnService() {
         currentConfig = null
         DnsCache.setActiveProxyDomain(null)
 
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        @Suppress("DEPRECATION")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            stopForeground(true)
+        }
         stopSelf()
     }
 

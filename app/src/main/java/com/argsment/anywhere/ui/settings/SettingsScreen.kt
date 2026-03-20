@@ -227,7 +227,7 @@ fun SettingsScreen(viewModel: VpnViewModel) {
             // About section
             SectionHeader(stringResource(R.string.about))
             SettingsNavRow(
-                painter = painterResource(R.drawable.ic_brand_telegram),
+                painter = painterResource(R.drawable.ic_telegram_symbol),
                 iconTint = Color(0xFF039BE5),
                 label = stringResource(R.string.join_telegram_group),
                 onClick = {

@@ -145,4 +145,22 @@
     <string name="exit">Salida</string>
     <string name="route_preview">Vista previa de ruta</string>
     <string name="n_proxies">%d proxies</string>
+
+    <!-- Missing general -->
+    <string name="join_telegram_group">Unirse al grupo de Telegram</string>
+    <string name="select_configuration">Proxies</string>
+    <string name="reject">Rechazar</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">Omitir país</string>
+    <string name="country_bypass_description">Dirige el tráfico a tu país directamente, evitando el proxy para un acceso local más rápido.</string>
+    <string name="ad_blocking_title">Bloqueo de anuncios</string>
+    <string name="ad_blocking_description">Bloquea anuncios y rastreadores a nivel de red para una experiencia de navegación más limpia.</string>
+    <string name="enable_ad_blocking">Activar bloqueo de anuncios</string>
+    <string name="get_started">Comenzar</string>
+    <string name="next">Siguiente</string>
+    <string name="back">Atrás</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">Aún no compatible</string>
 </resources>

@@ -21,9 +21,9 @@ android {
 
     defaultConfig {
         applicationId = "com.argsment.anywhere"
-        minSdk = 36
+        minSdk = 26
         targetSdk = 36
-        versionCode = 5
+        versionCode = 6
         versionName = "1.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

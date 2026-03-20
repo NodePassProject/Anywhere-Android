@@ -47,6 +47,11 @@ class ConfigRepository(context: Context) {
         saveToDisk()
     }
 
+    fun replaceBySubscription(subscriptionId: UUID, newConfigs: List<ProxyConfiguration>) {
+        _configurations.value = _configurations.value.filter { it.subscriptionId != subscriptionId } + newConfigs
+        saveToDisk()
+    }
+
     private fun loadFromDisk(): List<ProxyConfiguration> {
         if (!file.exists()) return emptyList()
         return runCatching {

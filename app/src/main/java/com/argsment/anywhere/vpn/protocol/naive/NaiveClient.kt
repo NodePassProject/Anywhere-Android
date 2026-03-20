@@ -6,8 +6,11 @@ import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.protocol.naive.http11.Http11Connection
 import com.argsment.anywhere.vpn.protocol.naive.http2.Http2Connection
+import com.argsment.anywhere.vpn.protocol.naive.http2.Http2SessionPool
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlin.coroutines.coroutineContext
 
 private const val TAG = "NaiveClient"
 
@@ -89,25 +92,21 @@ class NaiveClient(
             }
         )
 
-        val alpn = when (naiveProtocol) {
-            NaiveProtocol.HTTP11 -> listOf("http/1.1")
-            NaiveProtocol.HTTP2 -> listOf("h2")
-        }
-
-        val transport = NaiveTlsTransport(
-            host = naiveConfig.proxyHost,
-            port = naiveConfig.proxyPort,
-            sni = naiveConfig.effectiveSNI,
-            alpn = alpn,
-            tunnel = tunnel
-        )
-
         val naiveTunnel: NaiveTunnel = when (naiveProtocol) {
             NaiveProtocol.HTTP11 -> {
+                val transport = NaiveTlsTransport(
+                    host = naiveConfig.proxyHost,
+                    port = naiveConfig.proxyPort,
+                    sni = naiveConfig.effectiveSNI,
+                    alpn = listOf("http/1.1"),
+                    tunnel = tunnel
+                )
                 Http11Tunnel(Http11Connection(transport, naiveConfig, destination))
             }
             NaiveProtocol.HTTP2 -> {
-                Http2Tunnel(Http2Connection(transport, naiveConfig, destination))
+                // HTTP/2 stream multiplexing: multiple CONNECT tunnels share one TLS connection
+                val scope = CoroutineScope(coroutineContext)
+                Http2SessionPool.acquireStream(naiveConfig, destination, scope, tunnel)
             }
         }
 

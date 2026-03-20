@@ -371,6 +371,8 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         muxManager?.closeAll()
         muxManager = null
 
+        com.argsment.anywhere.vpn.protocol.naive.http2.Http2SessionPool.closeAll()
+
         val flowCount = udpFlows.size
         for (flow in udpFlows.values) {
             flow.close()
@@ -763,45 +765,15 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             return sendNodata(payload, srcIp, srcPort, dstIp, dstPort, isIpv6, qtype)
         }
 
-        // Only intercept A (1) and AAAA (28) queries
+        // Only intercept A (1) and AAAA (28) queries; let MX/SRV/etc. pass through
         if (qtype != 1 && qtype != 28) return false
 
-        // Skip if no routing rules loaded
-        if (!domainRouter.hasRules) return false
-
-        // Check routing rules
-        val match = domainRouter.matchDomain(domain)
-        val action = match.userAction
-        if (action == null && !match.isBypass) return false
-
-        val isDirect: Boolean
-        val isReject: Boolean
-        val routeConfig: ProxyConfiguration?
-        if (action is RouteAction.Proxy) {
-            isDirect = false
-            isReject = false
-            val resolved = domainRouter.resolveConfiguration(action)
-            if (resolved == null) {
-                Log.w(TAG, "[FakeIP] Proxy configuration ${action.configId} not found, forwarding DNS normally")
-                return false
-            }
-            // If the routing config matches the default config, use null so the
-            // resolved default config (with connectAddress already set) is used.
-            // The routing.json config has no resolvedIP, which would cause a DNS loop.
-            routeConfig = if (resolved.id == configuration?.id) null else resolved
-        } else if (action is RouteAction.Reject) {
-            isDirect = true
-            isReject = true
-            routeConfig = null
-        } else {
-            // Direct or bypass (no user action)
-            isDirect = true
-            isReject = false
-            routeConfig = null
-        }
-
-        // Allocate offset (same offset for both A and AAAA of the same domain)
-        val (offset, _) = fakeIpPool.allocate(domain, routeConfig, isDirect, isReject)
+        // Intercept ALL A/AAAA queries with fake IPs — including rejected domains.
+        // Routing decisions (direct/reject/proxy) are all made at connection time
+        // by checking domainRouter in resolveFakeIp(). This avoids NODATA responses
+        // that could be negatively cached by the OS, making rule changes stick even
+        // after the user removes a REJECT assignment. (Matching iOS)
+        val offset = fakeIpPool.allocate(domain)
 
         // Build fake IP bytes for the response.
         // A queries always get fake IPv4. AAAA queries get fake IPv6 only when

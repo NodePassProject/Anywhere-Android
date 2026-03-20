@@ -145,4 +145,22 @@
     <string name="exit">مخرج</string>
     <string name="route_preview">معاينة المسار</string>
     <string name="n_proxies">%d بروكسي</string>
+
+    <!-- Missing general -->
+    <string name="join_telegram_group">انضم إلى مجموعة تيليجرام</string>
+    <string name="select_configuration">البروكسيات</string>
+    <string name="reject">رفض</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">تجاوز البلد</string>
+    <string name="country_bypass_description">وجّه حركة المرور إلى بلدك مباشرة، متجاوزًا البروكسي للوصول المحلي الأسرع.</string>
+    <string name="ad_blocking_title">حظر الإعلانات</string>
+    <string name="ad_blocking_description">حظر الإعلانات والمتتبعات على مستوى الشبكة لتجربة تصفح أنظف.</string>
+    <string name="enable_ad_blocking">تفعيل حظر الإعلانات</string>
+    <string name="get_started">ابدأ</string>
+    <string name="next">التالي</string>
+    <string name="back">رجوع</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">غير مدعوم بعد</string>
 </resources>

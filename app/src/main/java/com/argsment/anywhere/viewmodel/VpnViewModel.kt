@@ -180,7 +180,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleVPN() {
         when (_vpnStatus.value) {
             VpnStatus.DISCONNECTED -> connect()
-            VpnStatus.CONNECTED -> disconnect()
+            VpnStatus.CONNECTED, VpnStatus.CONNECTING -> disconnect()
             else -> {}
         }
     }
@@ -215,6 +215,19 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _startError.value = "VPN permission denied"
     }
 
+    /**
+     * Applies the global allowInsecure setting to a proxy configuration's TLS config.
+     * The global toggle overrides per-proxy setting when enabled.
+     */
+    private fun applyGlobalAllowInsecure(config: ProxyConfiguration): ProxyConfiguration {
+        if (!allowInsecure) return config
+        val tls = config.tls ?: return config
+        if (tls.allowInsecure) return config  // already insecure
+        val updatedTls = tls.copy(allowInsecure = true)
+        val updatedChain = config.chain?.map { applyGlobalAllowInsecure(it) }
+        return config.copy(tls = updatedTls, chain = updatedChain)
+    }
+
     private fun startVpnService(config: ProxyConfiguration) {
         val context = getApplication<Application>()
         _vpnStatus.value = VpnStatus.CONNECTING
@@ -225,7 +238,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             // Resolve server domain on IO thread (avoids NetworkOnMainThreadException)
             val resolvedConfig = withContext(Dispatchers.IO) {
-                resolveServerAddress(config)
+                resolveServerAddress(applyGlobalAllowInsecure(config))
             }
             DnsCache.setActiveProxyDomain(resolvedConfig.serverAddress)
             syncProxyServerAddresses(resolvedConfig)
@@ -290,7 +303,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         val context = getApplication<Application>()
         viewModelScope.launch {
             val resolvedConfig = withContext(Dispatchers.IO) {
-                resolveServerAddress(config)
+                resolveServerAddress(applyGlobalAllowInsecure(config))
             }
             DnsCache.setActiveProxyDomain(resolvedConfig.serverAddress)
             syncProxyServerAddresses(resolvedConfig)
@@ -475,32 +488,46 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun updateSubscription(subscription: Subscription) {
         val result = SubscriptionFetcher.fetch(subscription.url)
+
+        // Match new configurations against old ones by name to preserve IDs (and routing rules).
+        // When multiple configs share the same name, they are matched positionally within that group.
+        val oldConfigs = configRepository.getAll().filter { it.subscriptionId == subscription.id }
+
+        // Group old configs by name, preserving order within each group
+        val oldByName = mutableMapOf<String, MutableList<ProxyConfiguration>>()
+        for (old in oldConfigs) {
+            oldByName.getOrPut(old.name) { mutableListOf() }.add(old)
+        }
+        // Track how many old configs per name have been consumed
+        val oldNameCursor = mutableMapOf<String, Int>()
+
+        val newConfigs = result.configurations.map { newConfig ->
+            val name = newConfig.name
+            val cursor = oldNameCursor.getOrDefault(name, 0)
+            val group = oldByName[name]
+            val id = if (group != null && cursor < group.size) {
+                oldNameCursor[name] = cursor + 1
+                group[cursor].id
+            } else {
+                newConfig.id
+            }
+            newConfig.copy(id = id, subscriptionId = subscription.id)
+        }
+
+        // Atomically replace old configurations with new ones (single StateFlow emission)
+        configRepository.replaceBySubscription(subscription.id, newConfigs)
+
+        // Update subscription metadata (preserve old values when new ones are null)
         val updated = subscription.copy(
             lastUpdate = System.currentTimeMillis(),
-            upload = result.upload,
-            download = result.download,
-            total = result.total,
-            expire = result.expire
+            name = result.name ?: subscription.name,
+            upload = result.upload ?: subscription.upload,
+            download = result.download ?: subscription.download,
+            total = result.total ?: subscription.total,
+            expire = result.expire ?: subscription.expire
         )
         subscriptionRepository.update(updated)
 
-        // Content-based matching: preserve IDs of unchanged configs (keeps routing rule assignments)
-        val oldConfigs = configRepository.getAll().filter { it.subscriptionId == subscription.id }
-        val usedOldIds = mutableSetOf<UUID>()
-        val newConfigs = result.configurations.map { newConfig ->
-            val match = oldConfigs.firstOrNull { old ->
-                !usedOldIds.contains(old.id) && old.contentEquals(newConfig)
-            }
-            if (match != null) {
-                usedOldIds.add(match.id)
-                newConfig.copy(id = match.id, subscriptionId = subscription.id)
-            } else {
-                newConfig.copy(subscriptionId = subscription.id)
-            }
-        }
-
-        configRepository.deleteBySubscription(subscription.id)
-        newConfigs.forEach { configRepository.add(it) }
         ensureValidSelection()
     }
 
@@ -512,7 +539,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         syncProxyServerAddresses(forConfig)
         _latencyResults.value = _latencyResults.value + (forConfig.id to LatencyResult.Testing)
         viewModelScope.launch {
-            val result = LatencyTester.test(forConfig)
+            val result = LatencyTester.test(applyGlobalAllowInsecure(forConfig))
             _latencyResults.value = _latencyResults.value + (forConfig.id to result)
         }
     }
@@ -524,7 +551,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             _latencyResults.value = _latencyResults.value + (config.id to LatencyResult.Testing)
         }
         viewModelScope.launch {
-            LatencyTester.testAll(configs).collect { (id, result) ->
+            LatencyTester.testAll(configs.map { applyGlobalAllowInsecure(it) }).collect { (id, result) ->
                 _latencyResults.value = _latencyResults.value + (id to result)
             }
         }
@@ -596,7 +623,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         syncProxyServerAddresses(resolved)
         _chainLatencyResults.value = _chainLatencyResults.value + (chain.id to LatencyResult.Testing)
         viewModelScope.launch {
-            val result = LatencyTester.test(resolved)
+            val result = LatencyTester.test(applyGlobalAllowInsecure(resolved))
             _chainLatencyResults.value = _chainLatencyResults.value + (chain.id to result)
         }
     }
@@ -611,7 +638,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             _chainLatencyResults.value = _chainLatencyResults.value + (chainId to LatencyResult.Testing)
         }
         viewModelScope.launch {
-            val configs = resolvedChains.map { it.second }
+            val configs = resolvedChains.map { applyGlobalAllowInsecure(it.second) }
             val idMap = resolvedChains.associate { (chainId, config) -> config.id to chainId }
             LatencyTester.testAll(configs).collect { (configId, result) ->
                 val chainId = idMap[configId] ?: return@collect

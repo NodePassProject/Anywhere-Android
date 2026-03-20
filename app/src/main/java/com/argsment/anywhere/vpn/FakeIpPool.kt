@@ -1,8 +1,5 @@
 package com.argsment.anywhere.vpn
 
-import android.util.Log
-import com.argsment.anywhere.data.model.ProxyConfiguration
-
 /**
  * Manages a pool of synthetic ("fake") IP addresses mapped to domain names.
  *
@@ -18,10 +15,7 @@ import com.argsment.anywhere.data.model.ProxyConfiguration
 class FakeIpPool {
 
     data class Entry(
-        val domain: String,
-        val configuration: ProxyConfiguration?,  // null = DIRECT bypass
-        val isDirect: Boolean,
-        val isReject: Boolean = false
+        val domain: String
     )
 
     // IPv4: 198.18.0.0/15 → offsets 1..131071
@@ -45,15 +39,16 @@ class FakeIpPool {
     /**
      * Allocate (or reuse) an offset for the given domain.
      * Use [ipv4Bytes] or [ipv6Bytes] to get the actual address bytes.
+     *
+     * Routing decisions are NOT stored in the entry — they are made at connection
+     * time via [LwipStack.resolveFakeIp] which checks [DomainRouter]. This ensures
+     * routing rule changes take effect immediately without rebuilding the pool.
      */
-    fun allocate(domain: String, configuration: ProxyConfiguration?, isDirect: Boolean, isReject: Boolean = false): Pair<Int, Entry> {
-        val entry = Entry(domain, configuration, isDirect, isReject)
-
-        // Already allocated? Touch LRU and update entry (configuration may have changed)
+    fun allocate(domain: String): Int {
+        // Already allocated? Touch LRU and return existing offset
         domainToOffset[domain]?.let { offset ->
-            offsetToEntry[offset] = entry
             touchLru(offset)
-            return offset to entry
+            return offset
         }
 
         // Need a new offset
@@ -67,12 +62,10 @@ class FakeIpPool {
         }
 
         domainToOffset[domain] = offset
-        offsetToEntry[offset] = entry
+        offsetToEntry[offset] = Entry(domain)
         appendLru(offset)
 
-        val ip = ipv4Bytes(offset)
-        Log.d(TAG, "[FakeIP] $domain → ${ip[0].toInt() and 0xFF}.${ip[1].toInt() and 0xFF}.${ip[2].toInt() and 0xFF}.${ip[3].toInt() and 0xFF}")
-        return offset to entry
+        return offset
     }
 
     /** Look up an entry by its fake IP string (IPv4 or IPv6). */
@@ -91,59 +84,6 @@ class FakeIpPool {
         lruHead = null
         lruTail = null
         nextOffset = 1
-    }
-
-    /**
-     * Updates existing entries' configurations from the current routing rules.
-     * Called on stack restart instead of [reset] so that apps holding cached fake IPs
-     * still resolve to valid domain→proxy mappings.
-     */
-    fun rebuild(router: DomainRouter) {
-        val domainsToRemove = mutableListOf<String>()
-
-        for ((domain, offset) in domainToOffset) {
-            val match = router.matchDomain(domain)
-            val action = match.userAction
-            if (action == null && !match.isBypass) {
-                domainsToRemove.add(domain)
-                continue
-            }
-
-            val isDirect: Boolean
-            val isReject: Boolean
-            val configuration: ProxyConfiguration?
-            if (action is RouteAction.Proxy) {
-                isDirect = false
-                isReject = false
-                configuration = router.resolveConfiguration(action)
-                if (configuration == null) {
-                    domainsToRemove.add(domain)
-                    continue
-                }
-            } else if (action is RouteAction.Reject) {
-                isDirect = true
-                isReject = true
-                configuration = null
-            } else {
-                // Direct or bypass (no user action)
-                isDirect = true
-                isReject = false
-                configuration = null
-            }
-
-            offsetToEntry[offset] = Entry(domain, configuration, isDirect, isReject)
-        }
-
-        for (domain in domainsToRemove) {
-            domainToOffset.remove(domain)?.let { offset ->
-                offsetToEntry.remove(offset)
-                offsetToNode.remove(offset)?.let { node -> removeNode(node) }
-            }
-        }
-
-        if (domainsToRemove.isNotEmpty()) {
-            Log.i(TAG, "[FakeIP] Rebuild: removed ${domainsToRemove.size} stale entries, ${domainToOffset.size} active")
-        }
     }
 
     // -- IP ↔ Offset Conversion --
@@ -262,8 +202,6 @@ class FakeIpPool {
     }
 
     companion object {
-        private const val TAG = "FakeIpPool"
-
         private const val BASE_IPV4: Long = 0xC6120000L  // 198.18.0.0
         const val POOL_SIZE = 131_071  // usable offsets
 

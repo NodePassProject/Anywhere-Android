@@ -145,4 +145,22 @@
     <string name="exit">ထွက်ပေါက်</string>
     <string name="route_preview">လမ်းကြောင်း အကြိုကြည့်ရှုမှု</string>
     <string name="n_proxies">ပရောက်စီ %d ခု</string>
+
+    <!-- Missing general -->
+    <string name="join_telegram_group">Telegram အုပ်စုသို့ ဝင်ရောက်ရန်</string>
+    <string name="select_configuration">ပရောက်စီများ</string>
+    <string name="reject">ပိတ်ဆို့</string>
+
+    <!-- Onboarding -->
+    <string name="country_bypass_title">နိုင်ငံရှောင်ကွင်း</string>
+    <string name="country_bypass_description">ပိုမြန်သော ပြည်တွင်းဝင်ရောက်မှုအတွက် ပရောက်စီကို ကျော်ပြီး သင့်နိုင်ငံသို့ တိုက်ရိုက်လမ်းကြောင်းပေးပါ။</string>
+    <string name="ad_blocking_title">ကြော်ငြာပိတ်ဆို့ခြင်း</string>
+    <string name="ad_blocking_description">ကွန်ရက်အဆင့်တွင် ကြော်ငြာနှင့် ခြေရာခံများကို ပိတ်ဆို့ပြီး ပိုသန့်ရှင်းသော ဘရောက်ဆာအတွေ့အကြုံကို ရယူပါ။</string>
+    <string name="enable_ad_blocking">ကြော်ငြာပိတ်ဆို့ခြင်းကို ဖွင့်ရန်</string>
+    <string name="get_started">စတင်ရန်</string>
+    <string name="next">နောက်တစ်ခု</string>
+    <string name="back">နောက်သို့</string>
+
+    <!-- HTTP/3 -->
+    <string name="not_yet_supported">မပံ့ပိုးရသေးပါ</string>
 </resources>

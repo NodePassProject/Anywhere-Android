@@ -27,6 +27,7 @@ private val iconResources = mapOf(
     "TikTok" to R.drawable.ic_brand_tiktok,
     "ChatGPT" to R.drawable.ic_brand_chatgpt,
     "Claude" to R.drawable.ic_brand_claude,
+    "Gemini" to R.drawable.ic_brand_gemini,
 )
 
 private val iconColors = mapOf(

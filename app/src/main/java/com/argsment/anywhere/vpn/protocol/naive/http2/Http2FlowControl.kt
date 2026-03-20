@@ -1,6 +1,56 @@
 package com.argsment.anywhere.vpn.protocol.naive.http2
 
 /**
+ * Per-stream flow control for multiplexed HTTP/2 streams.
+ *
+ * Each stream has its own send window (limited by the peer) and tracks received bytes
+ * to issue WINDOW_UPDATE frames at 50% of the stream's 64 MB receive window.
+ */
+class Http2StreamFlowControl(initialSendWindow: Int = Http2FlowControl.DEFAULT_INITIAL_WINDOW_SIZE) {
+
+    /** How many bytes we can send on this stream. */
+    var sendWindow: Int = initialSendWindow
+        private set
+
+    /** Bytes received but not yet acknowledged via WINDOW_UPDATE. */
+    private var recvConsumed: Int = 0
+
+    /** The receive window size we advertised for streams. */
+    private val recvWindowSize: Int = Http2FlowControl.NAIVE_INITIAL_WINDOW_SIZE
+
+    /** Consumes [bytes] from the send window. Returns true if allowed. */
+    fun consumeSend(bytes: Int): Boolean {
+        if (sendWindow < bytes) return false
+        sendWindow -= bytes
+        return true
+    }
+
+    /** Applies a WINDOW_UPDATE received from the server for this stream. */
+    fun applyWindowUpdate(increment: Int) {
+        sendWindow += increment
+    }
+
+    /** Adjusts the send window when SETTINGS_INITIAL_WINDOW_SIZE changes (RFC 7540 §6.9.2). */
+    fun adjustSendWindow(delta: Int) {
+        sendWindow += delta
+    }
+
+    /**
+     * Records that [bytes] of DATA have been received on this stream.
+     * Returns the WINDOW_UPDATE increment to send, or null if not needed yet.
+     */
+    fun consumeRecv(bytes: Int): Int? {
+        recvConsumed += bytes
+        if (recvConsumed >= recvWindowSize / 2) {
+            val increment = recvConsumed
+            recvConsumed = 0
+            return increment
+        }
+        return null
+    }
+}
+
+/**
  * Tracks HTTP/2 send and receive flow-control windows for a single connection + stream.
  *
  * Window sizing matches NaiveProxy's bandwidth-delay product calculation:
