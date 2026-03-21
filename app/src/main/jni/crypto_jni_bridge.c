@@ -28,6 +28,10 @@ static int cipher_suite_params(jint cipher_suite,
             *out_hash_len = 48;
             *out_key_len  = 32;
             return 0;
+        case TLS_CHACHA20_POLY1305_SHA256:
+            *out_hash_len = 32;
+            *out_key_len  = 32;
+            return 0;
         default:
             return -1;
     }

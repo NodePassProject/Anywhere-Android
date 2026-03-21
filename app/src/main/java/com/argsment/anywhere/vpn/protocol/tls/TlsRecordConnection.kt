@@ -4,6 +4,9 @@ import android.util.Log
 import com.argsment.anywhere.vpn.NativeBridge
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.vless.RealityError
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock as withMutexLock
 import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -40,10 +43,22 @@ class TlsRecordConnection(
     private val clientKeySpec = SecretKeySpec(clientKey, cipherAlgo)
     private val serverKeySpec = SecretKeySpec(serverKey, cipherAlgo)
 
+    // Cached Cipher instances to avoid Cipher.getInstance() on every record.
+    // Cipher is not thread-safe, so separate instances for encrypt/decrypt.
+    private val encryptCipher: Cipher = Cipher.getInstance(cipherTransform)
+    private val decryptCipher: Cipher = Cipher.getInstance(cipherTransform)
+
     // Sequence numbers
     private var clientSeqNum: Long = 0
     private var serverSeqNum: Long = 0
     private val seqLock = ReentrantLock()
+
+    /** Serialises the encrypt-then-enqueue path so that TLS records arrive at
+     *  the socket in sequence-number order. Without this, two concurrent `send`
+     *  calls can allocate consecutive sequence numbers but enqueue the encrypted
+     *  records in reverse order, causing TLS decryption failures on the server
+     *  and a "Broken pipe" on the next write. Matching iOS sendLock. */
+    private val sendLock = Mutex()
 
     /** TLS 1.3 maximum plaintext per record (RFC 8446 S5.1). */
     companion object {
@@ -61,21 +76,27 @@ class TlsRecordConnection(
      * Sends data through the TLS tunnel, encrypting it as TLS Application Data records.
      */
     suspend fun send(data: ByteArray) {
-        val conn = connection ?: throw RealityError.HandshakeFailed("Connection cancelled")
-        val record = buildTLSRecords(data)
-        conn.send(record)
+        sendLock.withMutexLock {
+            val conn = connection ?: throw RealityError.HandshakeFailed("Connection cancelled")
+            val record = buildTLSRecords(data)
+            conn.send(record)
+        }
     }
 
     /**
      * Sends data through the TLS tunnel without tracking completion.
      */
     fun sendAsync(data: ByteArray) {
-        val conn = connection ?: return
-        try {
-            val record = buildTLSRecords(data)
-            conn.sendAsync(record)
-        } catch (e: Exception) {
-            Log.e(TAG, "Encryption error: ${e.message}")
+        runBlocking {
+            sendLock.withMutexLock {
+                val conn = connection ?: return@withMutexLock
+                try {
+                    val record = buildTLSRecords(data)
+                    conn.sendAsync(record)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Encryption error: ${e.message}")
+                }
+            }
         }
     }
 
@@ -164,43 +185,46 @@ class TlsRecordConnection(
      * Sends a TLS close_notify alert record (best-effort, fire-and-forget).
      */
     private fun sendCloseNotify() {
-        val conn = connection ?: return
+        runBlocking {
+            sendLock.withMutexLock {
+                val conn = connection ?: return@withMutexLock
 
-        val seqNum: Long
-        seqLock.withLock {
-            seqNum = clientSeqNum
-            clientSeqNum++
-        }
+                val seqNum: Long
+                seqLock.withLock {
+                    seqNum = clientSeqNum
+                    clientSeqNum++
+                }
 
-        // Alert plaintext: level=warning(1), desc=close_notify(0), inner content type=alert(0x15)
-        val alertPlaintext = byteArrayOf(0x01, 0x00, 0x15)
-        val encryptedLen = alertPlaintext.size + 16 // +16 for GCM tag
+                // Alert plaintext: level=warning(1), desc=close_notify(0), inner content type=alert(0x15)
+                val alertPlaintext = byteArrayOf(0x01, 0x00, 0x15)
+                val encryptedLen = alertPlaintext.size + 16 // +16 for GCM tag
 
-        val nonce = NativeBridge.nativeXorNonce(clientIV, seqNum)
-        val aad = byteArrayOf(
-            0x17, 0x03, 0x03,
-            ((encryptedLen shr 8) and 0xFF).toByte(),
-            (encryptedLen and 0xFF).toByte()
-        )
+                val nonce = NativeBridge.nativeXorNonce(clientIV, seqNum)
+                val aad = byteArrayOf(
+                    0x17, 0x03, 0x03,
+                    ((encryptedLen shr 8) and 0xFF).toByte(),
+                    (encryptedLen and 0xFF).toByte()
+                )
 
-        try {
-            val cipher = Cipher.getInstance(cipherTransform)
-            val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
-            cipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, paramSpec)
-            cipher.updateAAD(aad)
-            val encrypted = cipher.doFinal(alertPlaintext)
+                try {
+                    val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
+                    encryptCipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, paramSpec)
+                    encryptCipher.updateAAD(aad)
+                    val encrypted = encryptCipher.doFinal(alertPlaintext)
 
-            val record = ByteArray(5 + encrypted.size)
-            record[0] = 0x17
-            record[1] = 0x03
-            record[2] = 0x03
-            record[3] = ((encrypted.size shr 8) and 0xFF).toByte()
-            record[4] = (encrypted.size and 0xFF).toByte()
-            System.arraycopy(encrypted, 0, record, 5, encrypted.size)
+                    val record = ByteArray(5 + encrypted.size)
+                    record[0] = 0x17
+                    record[1] = 0x03
+                    record[2] = 0x03
+                    record[3] = ((encrypted.size shr 8) and 0xFF).toByte()
+                    record[4] = (encrypted.size and 0xFF).toByte()
+                    System.arraycopy(encrypted, 0, record, 5, encrypted.size)
 
-            conn.sendAsync(record)
-        } catch (_: Exception) {
-            // Best-effort, ignore errors
+                    conn.sendAsync(record)
+                } catch (_: Exception) {
+                    // Best-effort, ignore errors
+                }
+            }
         }
     }
 
@@ -433,11 +457,10 @@ class TlsRecordConnection(
 
         val nonce = NativeBridge.nativeXorNonce(serverIV, seqNum)
 
-        val cipher = Cipher.getInstance(cipherTransform)
         val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
-        cipher.init(Cipher.DECRYPT_MODE, serverKeySpec, paramSpec)
-        cipher.updateAAD(header)
-        val decrypted = cipher.doFinal(ciphertext)
+        decryptCipher.init(Cipher.DECRYPT_MODE, serverKeySpec, paramSpec)
+        decryptCipher.updateAAD(header)
+        val decrypted = decryptCipher.doFinal(ciphertext)
 
         if (decrypted.isEmpty()) {
             throw RealityError.HandshakeFailed("Empty decrypted data")
@@ -479,11 +502,10 @@ class TlsRecordConnection(
             (encryptedLen and 0xFF).toByte()
         )
 
-        val cipher = Cipher.getInstance(cipherTransform)
         val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
-        cipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, paramSpec)
-        cipher.updateAAD(aad)
-        val encrypted = cipher.doFinal(innerPlaintext)
+        encryptCipher.init(Cipher.ENCRYPT_MODE, clientKeySpec, paramSpec)
+        encryptCipher.updateAAD(aad)
+        val encrypted = encryptCipher.doFinal(innerPlaintext)
 
         // Build TLS record: header + encrypted (ciphertext + tag)
         val record = ByteArray(5 + encrypted.size)

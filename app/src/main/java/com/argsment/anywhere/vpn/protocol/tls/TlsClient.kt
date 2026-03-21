@@ -363,6 +363,11 @@ class TlsClient(private val configuration: TlsConfiguration) {
             }
 
             offset += 5 + recordLen
+
+            // Stop processing once Server Finished is found — any subsequent
+            // records (e.g. NewSessionTicket) are encrypted with application keys
+            // and must be handled by TlsRecordConnection, not the handshake loop.
+            if (foundServerFinished) break
         }
 
         val processedOffset = offset

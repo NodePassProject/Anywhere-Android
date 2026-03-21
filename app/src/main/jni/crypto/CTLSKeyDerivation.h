@@ -12,8 +12,9 @@
 #include <stddef.h>
 
 // Cipher suite constants
-#define TLS_AES_128_GCM_SHA256 0x1301
-#define TLS_AES_256_GCM_SHA384 0x1302
+#define TLS_AES_128_GCM_SHA256       0x1301
+#define TLS_AES_256_GCM_SHA384       0x1302
+#define TLS_CHACHA20_POLY1305_SHA256 0x1303
 
 /// Derive TLS 1.3 handshake keys from ECDH shared secret + transcript.
 /// @param cipher_suite 0x1301 (AES-128-GCM) or 0x1302 (AES-256-GCM)

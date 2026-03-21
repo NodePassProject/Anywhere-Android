@@ -96,11 +96,14 @@ class NioSocket : Transport {
         /** Reusable read buffer for the selector thread (only accessed from selectorThread). */
         private val selectorReadBuffer = ByteBuffer.allocate(65536)
 
+        /** Maximum total bytes queued across all pending sends (2 MB). */
+        private const val MAX_PENDING_SEND_BYTES = 2_097_152
+
         /** Single shared selector thread. */
         private val selectorThread = Thread({
             while (true) {
                 try {
-                    sharedSelector.select(200)
+                    sharedSelector.select()
 
                     // Execute pending operations (registrations, interest changes)
                     while (true) {
@@ -379,6 +382,9 @@ class NioSocket : Transport {
     override suspend fun send(data: ByteArray) {
         val ch = channel ?: throw NioSocketError.NotConnected()
         if (!ch.isOpen) throw NioSocketError.NotConnected()
+        if (queuedSendBytes() + data.size > MAX_PENDING_SEND_BYTES) {
+            throw NioSocketError.SendFailed("Send queue full")
+        }
 
         // Only attempt immediate write if no pending sends are queued.
         // Otherwise we must queue behind them to preserve byte stream ordering.
@@ -428,6 +434,10 @@ class NioSocket : Transport {
     override fun sendAsync(data: ByteArray) {
         val ch = channel ?: return
         if (!ch.isOpen) return
+        if (queuedSendBytes() + data.size > MAX_PENDING_SEND_BYTES) {
+            Log.w(TAG, "Send queue full, dropping ${data.size} bytes")
+            return
+        }
 
         pendingSends.add(PendingSend(data, 0, null))
         runOnSelector {
@@ -516,5 +526,13 @@ class NioSocket : Transport {
         channel = null
         selectionKey = null
         fastPathBuffer = null
+    }
+
+    private fun queuedSendBytes(): Int {
+        var total = 0
+        for (send in pendingSends) {
+            total += send.data.size - send.offset
+        }
+        return total
     }
 }

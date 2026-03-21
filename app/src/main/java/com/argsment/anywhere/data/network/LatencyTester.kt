@@ -2,11 +2,17 @@ package com.argsment.anywhere.data.network
 
 import android.util.Log
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
+import com.argsment.anywhere.vpn.protocol.tls.TlsClient
 import com.argsment.anywhere.vpn.protocol.tls.TlsError
+import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
+import com.argsment.anywhere.vpn.protocol.TunneledTransport
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
@@ -37,9 +43,9 @@ object LatencyTester {
     private const val TAG = "LatencyTester"
     private const val TIMEOUT_MS = 10_000L
 
-    /** Latency test endpoint. */
-    private const val LATENCY_HOST = "www.gstatic.com"
-    private const val LATENCY_PORT = 80
+    /** Latency test endpoint (HTTPS — matching iOS latency.argsment.com:443). */
+    private const val LATENCY_HOST = "latency.argsment.com"
+    private const val LATENCY_PORT = 443
 
     suspend fun test(config: ProxyConfiguration): LatencyResult = withContext(Dispatchers.IO) {
         try {
@@ -98,15 +104,33 @@ object LatencyTester {
     /**
      * Establishes a proxy connection and measures HTTP round-trip latency.
      *
+     * Matching iOS LatencyTester methodology:
      * Phase 1 (untimed): Establish proxy connection (TCP + proxy handshake).
-     * Phase 2 (untimed): Warmup request — establishes the proxy-to-destination
-     *                     TCP connection and drains any proxy-side buffers.
-     * Phase 3 (untimed): Send the timed HTTP request.
-     * Phase 4 (timed):   Wait for the response — measures actual network RTT:
+     * Phase 2 (untimed): TLS handshake with destination through the proxy tunnel.
+     * Phase 3 (untimed): Warmup request — drains TLS NewSessionTicket records
+     *                     and proxy-side buffers.
+     * Phase 4 (untimed): Send the timed HTTP request.
+     * Phase 5 (timed):   Wait for the response — measures actual network RTT:
      *                     client -> proxy chain -> destination -> back.
      */
-    private suspend fun performTest(config: ProxyConfiguration): LatencyResult {
+    private suspend fun performTest(config: ProxyConfiguration): LatencyResult = coroutineScope {
         val connections = mutableListOf<VlessConnection>()
+        var destinationTlsClient: TlsClient? = null
+        var destinationTlsConnection: TlsRecordConnection? = null
+
+        // Cancellation watcher: closes connections when this scope is cancelled
+        // (e.g., by withTimeoutOrNull). NioSocket.receive() uses suspendCoroutine
+        // which is not cancellation-aware, so we must actively close the underlying
+        // sockets to unblock pending I/O.
+        // Matches iOS `withTaskCancellationHandler { ... } onCancel: { client.cancel() }`.
+        val watcher = launch {
+            try { awaitCancellation() } finally {
+                destinationTlsConnection?.cancel()
+                destinationTlsClient?.cancel()
+                connections.forEach { it.cancel() }
+            }
+        }
+
         try {
             // Pre-warm DNS cache so resolution is excluded from timing
             DnsCache.prewarm(config.serverAddress)
@@ -130,17 +154,28 @@ object LatencyTester {
                 }
             }
 
-            val connection = ProxyClientFactory.connect(
+            val proxyConnection = ProxyClientFactory.connect(
                 config, LATENCY_HOST, LATENCY_PORT, tunnel = tunnelConnection
             )
-            connections.add(connection)
+            connections.add(proxyConnection)
 
-            // Phase 2 (untimed warmup): Send a first request to establish the
-            // proxy-to-destination connection and drain any proxy-side buffers.
+            // Phase 2 (untimed): TLS handshake with destination through the proxy tunnel.
+            // Matching iOS: TLSClient.connect(overTunnel: proxyConnection)
+            val destTlsConfig = TlsConfiguration(
+                serverName = LATENCY_HOST,
+                alpn = listOf("http/1.1")
+            )
+            destinationTlsClient = TlsClient(destTlsConfig)
+            destinationTlsConnection = destinationTlsClient.connect(TunneledTransport(proxyConnection))
+
+            val tlsConn = destinationTlsConnection
+
+            // Phase 3 (untimed warmup): Send a first request to drain any TLS 1.3
+            // NewSessionTicket records and proxy-side buffers.
             val warmupRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: $LATENCY_HOST\r\n\r\n"
                 .toByteArray(Charsets.US_ASCII)
-            connection.send(warmupRequest)
-            val warmupData = connection.receive()
+            tlsConn.send(warmupRequest)
+            val warmupData = tlsConn.receive()
 
             // Validate warmup response
             val warmupStatus = warmupData?.let { String(it, Charsets.US_ASCII) }
@@ -149,16 +184,16 @@ object LatencyTester {
                 throw LatencyTestError("Unexpected warmup status: ${warmupStatus ?: "no response"}")
             }
 
-            // Phase 3 (untimed): Send the timed HTTP request.
+            // Phase 4 (untimed): Send the timed HTTP request.
             val httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: $LATENCY_HOST\r\nConnection: close\r\n\r\n"
                 .toByteArray(Charsets.US_ASCII)
-            connection.send(httpRequest)
+            tlsConn.send(httpRequest)
 
-            // Phase 4 (timed): Wait for the response.
+            // Phase 5 (timed): Wait for the response.
             // Timer starts after send completes — measures the actual network
             // round-trip: data traverses client -> proxy chain -> target -> back.
             val startNs = System.nanoTime()
-            val responseData = connection.receive()
+            val responseData = tlsConn.receive()
             val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
 
             // Validate HTTP 204 response
@@ -168,14 +203,19 @@ object LatencyTester {
                 throw LatencyTestError("Unexpected status: ${statusLine ?: "no response"}")
             }
 
-            return LatencyResult.Success(elapsedMs.toInt())
+            LatencyResult.Success(elapsedMs.toInt())
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: TlsError.CertificateValidationFailed) {
             Log.d(TAG, "Latency test insecure for ${config.name}: ${e.message}")
-            return LatencyResult.Insecure
+            LatencyResult.Insecure
         } catch (e: Exception) {
             Log.d(TAG, "Latency test failed for ${config.name}: ${e.message}")
-            return LatencyResult.Failed
+            LatencyResult.Failed
         } finally {
+            watcher.cancel()
+            destinationTlsConnection?.cancel()
+            destinationTlsClient?.cancel()
             connections.forEach { it.cancel() }
         }
     }

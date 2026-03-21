@@ -576,8 +576,8 @@ class VlessRealityUdpConnection(
 // =============================================================================
 
 sealed class RealityError(message: String) : Exception(message) {
-    class DecryptionFailed(val rawData: ByteArray? = null) : RealityError("Reality decryption failed")
-    class HandshakeFailed(msg: String) : RealityError("Reality handshake failed: $msg")
-    class InvalidResponse(msg: String) : RealityError("Reality invalid response: $msg")
+    class DecryptionFailed(val rawData: ByteArray? = null) : RealityError("TLS record decryption failed")
+    class HandshakeFailed(msg: String) : RealityError("TLS handshake failed: $msg")
+    class InvalidResponse(msg: String) : RealityError("Invalid response: $msg")
     class AuthenticationFailed : RealityError("Reality server authentication failed")
 }

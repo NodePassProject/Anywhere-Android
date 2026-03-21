@@ -494,6 +494,11 @@ class RealityClient(
             }
 
             offset += 5 + recordLen
+
+            // After Server Finished, subsequent records (e.g. NewSessionTicket) are
+            // encrypted with application keys. Stop here and let TlsRecordConnection
+            // handle them so the sequence numbers stay in sync.
+            if (foundServerFinished) break
         }
 
         val processedOffset = offset

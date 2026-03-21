@@ -269,8 +269,8 @@ enum class OutboundProtocol {
         get() = when (this) {
             VLESS -> "VLESS"
             SHADOWSOCKS -> "Shadowsocks"
-            NAIVE_HTTP11 -> "NaiveProxy (HTTP/1.1)"
-            NAIVE_HTTP2 -> "NaiveProxy (HTTP/2)"
+            NAIVE_HTTP11 -> "HTTPS"
+            NAIVE_HTTP2 -> "HTTP/2"
             NAIVE_HTTP3 -> "QUIC"
         }
 }
@@ -339,7 +339,7 @@ data class ProxyConfiguration(
                 naiveUsername == other.naiveUsername &&
                 naivePassword == other.naivePassword &&
                 naiveProtocol == other.naiveProtocol &&
-                chain?.size == other.chain?.size  // Compare chain presence/length (matching iOS)
+                chain == other.chain
 
     fun withChain(chain: List<ProxyConfiguration>?): ProxyConfiguration = copy(chain = chain)
 
@@ -420,7 +420,7 @@ data class ProxyConfiguration(
         val user = urlEncode(naiveUsername ?: "")
         val pass = urlEncode(naivePassword ?: "")
         val fragment = urlEncode(name)
-        return "naive+https://$user:$pass@$serverAddress:$serverPort#$fragment"
+        return "https://$user:$pass@$serverAddress:$serverPort#$fragment"
     }
 
     private fun toQuicUrl(): String {
@@ -454,10 +454,10 @@ data class ProxyConfiguration(
     companion object {
         fun fromUrl(url: String): ProxyConfiguration = when {
             url.startsWith("ss://") -> fromShadowsocksUrl(url)
-            url.startsWith("naive+https://") -> fromNaiveUrl(url)
+            url.startsWith("https://") || url.startsWith("naive+https://") -> fromNaiveUrl(url)
             url.startsWith("quic://") -> fromQuicUrl(url)
             url.startsWith("vless://") -> fromVlessUrl(url)
-            else -> throw ProxyError.InvalidUrl("URL must start with vless://, ss://, naive+https://, or quic://")
+            else -> throw ProxyError.InvalidUrl("URL must start with vless://, ss://, https://, or quic://")
         }
 
         private fun fromVlessUrl(url: String): ProxyConfiguration {
@@ -643,7 +643,11 @@ data class ProxyConfiguration(
         }
 
         private fun fromNaiveUrl(url: String): ProxyConfiguration {
-            var remaining = url.removePrefix("naive+https://")
+            var remaining = when {
+                url.startsWith("naive+https://") -> url.removePrefix("naive+https://")
+                url.startsWith("https://") -> url.removePrefix("https://")
+                else -> throw ProxyError.InvalidUrl("Naive URL must start with https://")
+            }
 
             // Extract fragment (#name)
             var fragmentName: String? = null

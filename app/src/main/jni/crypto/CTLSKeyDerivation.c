@@ -20,9 +20,11 @@ static void get_suite_params(uint16_t cs, CCHmacAlgorithm *alg,
         *hash_len = CC_SHA384_DIGEST_LENGTH; // 48
         *key_len = 32;
     } else {
+        // AES-128-GCM-SHA256 (0x1301) and ChaCha20-Poly1305-SHA256 (0x1303)
+        // both use SHA-256 for HKDF. Key length differs: 16 for AES-128, 32 for ChaCha20.
         *alg = kCCHmacAlgSHA256;
         *hash_len = CC_SHA256_DIGEST_LENGTH; // 32
-        *key_len = 16;
+        *key_len = (cs == TLS_CHACHA20_POLY1305_SHA256) ? 32 : 16;
     }
 }
 

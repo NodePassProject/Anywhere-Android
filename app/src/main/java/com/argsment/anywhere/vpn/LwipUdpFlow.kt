@@ -6,6 +6,7 @@ import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.protocol.direct.DirectUdpRelay
 import com.argsment.anywhere.vpn.protocol.mux.MuxNetwork
 import com.argsment.anywhere.vpn.protocol.mux.MuxSession
+import com.argsment.anywhere.vpn.protocol.mux.Xudp
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksClient
 import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksUdpRelay
@@ -167,10 +168,11 @@ class LwipUdpFlow(
         val isDefaultConfig = stack?.configuration?.id == configuration.id
         if (isDefaultConfig && stack?.muxManager != null) {
             val muxManager = stack.muxManager!!
-            // Cone NAT: GlobalID = blake3("udp:srcHost:srcPort")
+            // Cone NAT: GlobalID = blake3_keyed(BaseKey, "udp:srcHost:srcPort")[0:8]
+            // Uses keyed BLAKE3 with per-process BaseKey and 8-byte output,
+            // matching Xray-core xudp.go and iOS XUDP.swift.
             val globalId = if (configuration.xudpEnabled) {
-                val input = "udp:$srcHost:$srcPort".toByteArray()
-                NativeBridge.nativeBlake3Hash(input)
+                Xudp.generateGlobalID("udp:$srcHost:$srcPort")
             } else null
 
             scope.launch {

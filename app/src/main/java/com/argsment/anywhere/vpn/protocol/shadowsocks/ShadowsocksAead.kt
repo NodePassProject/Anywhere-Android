@@ -240,6 +240,19 @@ object ShadowsocksAEADCrypto {
 
     private val random = SecureRandom()
 
+    // Cached Cipher instances per thread to avoid Cipher.getInstance() on every operation.
+    // Cipher is not thread-safe, so ThreadLocal ensures each thread reuses its own instance.
+    private val tlAesGcm = ThreadLocal<Cipher>()
+    private val tlChaCha = ThreadLocal<Cipher>()
+
+    private fun aesGcmCipher(): Cipher {
+        return tlAesGcm.get() ?: Cipher.getInstance("AES/GCM/NoPadding").also { tlAesGcm.set(it) }
+    }
+
+    private fun chaCha20Cipher(): Cipher {
+        return tlChaCha.get() ?: Cipher.getInstance("ChaCha20/Poly1305/NoPadding").also { tlChaCha.set(it) }
+    }
+
     fun seal(cipher: ShadowsocksCipher, key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray {
         if (cipher == ShadowsocksCipher.NONE) return plaintext
 
@@ -266,43 +279,27 @@ object ShadowsocksAEADCrypto {
         return salt
     }
 
-    /**
-     * AES-GCM seal. Returns ciphertext + tag (no nonce prefix).
-     */
     private fun aesGcmSeal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray {
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(128, nonce)
-        c.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), spec)
+        val c = aesGcmCipher()
+        c.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
         return c.doFinal(plaintext)
     }
 
-    /**
-     * AES-GCM open. Input = ciphertext + tag.
-     */
     private fun aesGcmOpen(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray): ByteArray {
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        val spec = GCMParameterSpec(128, nonce)
-        c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), spec)
+        val c = aesGcmCipher()
+        c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
         return c.doFinal(ciphertext)
     }
 
-    /**
-     * ChaCha20-Poly1305 seal. Returns ciphertext + tag (no nonce prefix).
-     */
     private fun chaCha20Poly1305Seal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray {
-        val c = Cipher.getInstance("ChaCha20/Poly1305/NoPadding")
-        val spec = IvParameterSpec(nonce)
-        c.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "ChaCha20"), spec)
+        val c = chaCha20Cipher()
+        c.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "ChaCha20"), IvParameterSpec(nonce))
         return c.doFinal(plaintext)
     }
 
-    /**
-     * ChaCha20-Poly1305 open. Input = ciphertext + tag.
-     */
     private fun chaCha20Poly1305Open(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray): ByteArray {
-        val c = Cipher.getInstance("ChaCha20/Poly1305/NoPadding")
-        val spec = IvParameterSpec(nonce)
-        c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "ChaCha20"), spec)
+        val c = chaCha20Cipher()
+        c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "ChaCha20"), IvParameterSpec(nonce))
         return c.doFinal(ciphertext)
     }
 }
@@ -312,16 +309,22 @@ object ShadowsocksAEADCrypto {
 // =============================================================================
 
 object AesEcb {
+    private val tlCipher = ThreadLocal<Cipher>()
+
+    private fun cipher(): Cipher {
+        return tlCipher.get() ?: Cipher.getInstance("AES/ECB/NoPadding").also { tlCipher.set(it) }
+    }
+
     fun encrypt(key: ByteArray, block: ByteArray): ByteArray {
         require(block.size == 16)
-        val c = Cipher.getInstance("AES/ECB/NoPadding")
+        val c = cipher()
         c.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
         return c.doFinal(block)
     }
 
     fun decrypt(key: ByteArray, block: ByteArray): ByteArray {
         require(block.size == 16)
-        val c = Cipher.getInstance("AES/ECB/NoPadding")
+        val c = cipher()
         c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"))
         return c.doFinal(block)
     }

@@ -93,6 +93,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     /** Active UDP flows keyed by 5-tuple string. */
     val udpFlows = ConcurrentHashMap<String, LwipUdpFlow>()
 
+    /** Batched output packets awaiting flush to TUN fd (only accessed on lwipExecutor). */
+    private val outputPackets = mutableListOf<ByteArray>()
+    private var outputFlushScheduled = false
+
     /** Active TCP connections keyed by connection ID. */
     private val tcpConnections = ConcurrentHashMap<Long, LwipTcpConnection>()
     private val nextConnId = AtomicLong(1)
@@ -317,6 +321,8 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             shutdownInternal()
             fakeIpPool.reset()
             NativeBridge.callback = null
+            outputPackets.clear()
+            outputFlushScheduled = false
             tunInput = null
             tunOutput = null
             tunFd = null
@@ -342,7 +348,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     fun switchConfiguration(newConfig: ProxyConfiguration) {
         Log.i(TAG, "[LwipStack] Switching configuration")
         lwipExecutor.execute {
-            onTunnelSettingsNeedReapply?.invoke()
+            // Only restart the lwIP stack — do NOT reapply tunnel settings.
+            // The TUN fd stays open and the packet read loop continues uninterrupted.
+            // onTunnelSettingsNeedReapply is only called when IPv6/DNS settings change
+            // (matching iOS LWIPStack.switchConfiguration behavior).
             restartStack(newConfig, ipv6ConnectionsEnabled, ipv6DNSEnabled)
         }
     }
@@ -407,7 +416,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         loadBypassCountry()
         loadEncryptedDnsSettings()
 
-        if (config.muxEnabled && (config.flow == "xtls-rprx-vision" || config.flow == "xtls-rprx-vision-udp443")) {
+        if (config.outboundProtocol == com.argsment.anywhere.data.model.OutboundProtocol.VLESS &&
+            config.muxEnabled &&
+            (config.flow == "xtls-rprx-vision" || config.flow == "xtls-rprx-vision-udp443")
+        ) {
             muxManager = MuxManager(config, lwipExecutor.asCoroutineDispatcher())
         }
 
@@ -491,12 +503,32 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
     override fun onOutput(packet: ByteArray, length: Int, isIpv6: Boolean) {
         totalBytesIn.addAndGet(length.toLong())
-        // Write synchronously — TUN writes are fast kernel buffer copies.
+        // Accumulate packets for batched write. onOutput is called from within
+        // nativeInput/nativeTimerPoll on the lwipExecutor; the deferred flush runs
+        // after the current lwIP processing cycle completes, reducing per-packet
+        // syscall overhead.
+        val copy = ByteArray(length)
+        System.arraycopy(packet, 0, copy, 0, length)
+        outputPackets.add(copy)
+        if (!outputFlushScheduled) {
+            outputFlushScheduled = true
+            lwipExecutor.execute { flushOutputPackets() }
+        }
+    }
+
+    /** Flushes accumulated output packets to the TUN fd in a tight loop. */
+    private fun flushOutputPackets() {
+        outputFlushScheduled = false
+        if (outputPackets.isEmpty()) return
+        val out = tunOutput ?: return
         try {
-            tunOutput?.write(packet, 0, length)
+            for (packet in outputPackets) {
+                out.write(packet)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "[LwipStack] TUN write error: $e")
         }
+        outputPackets.clear()
     }
 
     override fun onTcpAccept(
@@ -657,29 +689,8 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
 
         if (udpFlows.size >= MAX_UDP_FLOWS) {
-            // Evict the oldest idle flow instead of dropping the new one.
-            // Prefer evicting DNS flows (port 53) since they're one-shot.
-            var oldestKey: String? = null
-            var oldestTime = Double.MAX_VALUE
-            var oldestDnsKey: String? = null
-            var oldestDnsTime = Double.MAX_VALUE
-            for ((key, flow) in udpFlows) {
-                if (flow.lastActivity < oldestTime) {
-                    oldestTime = flow.lastActivity
-                    oldestKey = key
-                }
-                if (flow.dstPort == 53 && flow.lastActivity < oldestDnsTime) {
-                    oldestDnsTime = flow.lastActivity
-                    oldestDnsKey = key
-                }
-            }
-            val evictKey = oldestDnsKey ?: oldestKey
-            if (evictKey != null) {
-                udpFlows.remove(evictKey)?.close()
-            } else {
-                Log.e(TAG, "[LwipStack] UDP max flows reached ($MAX_UDP_FLOWS), dropping $flowKey")
-                return
-            }
+            Log.e(TAG, "[LwipStack] UDP max flows reached ($MAX_UDP_FLOWS), dropping $flowKey")
+            return
         }
 
         val flow = LwipUdpFlow(
@@ -849,10 +860,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         } else {
             buildIcmpv4PortUnreachable(srcIp, srcPort, dstIp, dstPort, udpPayloadLength)
         }
-        try {
-            tunOutput?.write(packet)
-        } catch (e: Exception) {
-            Log.e(TAG, "[LwipStack] ICMP write error: $e")
+        outputPackets.add(packet)
+        if (!outputFlushScheduled) {
+            outputFlushScheduled = true
+            lwipExecutor.execute { flushOutputPackets() }
         }
     }
 
@@ -1001,7 +1012,9 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
     // -- Packet Reading --
 
-    /** Continuously reads IP packets from the TUN fd and feeds them into lwIP. */
+    /** Continuously reads IP packets from the TUN fd and feeds them into lwIP.
+     *  Batches multiple packets per executor dispatch to reduce task overhead,
+     *  matching iOS's NEPacketTunnelFlow.readPackets() batching behavior. */
     private fun startReadingPackets() {
         Thread({
             val buffer = ByteArray(1500)  // MTU-sized read buffer
@@ -1017,17 +1030,30 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
                     totalBytesOut.addAndGet(length.toLong())
 
-                    // Acquire a pooled buffer instead of allocating a new one per packet.
-                    // The buffer is returned to the pool after nativeInput completes.
                     val packet = packetPool.poll() ?: ByteArray(1500)
                     System.arraycopy(buffer, 0, packet, 0, length)
 
+                    // Batch: collect more packets if immediately available
+                    val batch = mutableListOf(Pair(packet, length))
+                    while (batch.size < MAX_INPUT_BATCH_SIZE) {
+                        val avail = try { input.available() } catch (_: Exception) { 0 }
+                        if (avail <= 0) break
+                        val len = input.read(buffer)
+                        if (len <= 0) break
+                        totalBytesOut.addAndGet(len.toLong())
+                        val pkt = packetPool.poll() ?: ByteArray(1500)
+                        System.arraycopy(buffer, 0, pkt, 0, len)
+                        batch.add(Pair(pkt, len))
+                    }
+
                     lwipExecutor.execute {
-                        if (running) {
-                            NativeBridge.nativeInput(packet, length)
-                        }
-                        if (packetPool.size < MAX_PACKET_POOL_SIZE) {
-                            packetPool.offer(packet)
+                        for ((pkt, len) in batch) {
+                            if (running) {
+                                NativeBridge.nativeInput(pkt, len)
+                            }
+                            if (packetPool.size < MAX_PACKET_POOL_SIZE) {
+                                packetPool.offer(pkt)
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -1051,16 +1077,14 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }, 250, 250, TimeUnit.MILLISECONDS)
     }
 
-    /** Starts the UDP flow cleanup timer (1-second interval). */
+    /** Starts the UDP flow cleanup timer (1-second interval, 60-second idle timeout). */
     private fun startUdpCleanupTimer() {
         udpCleanupTimer = lwipExecutor.scheduleAtFixedRate({
             if (!running) return@scheduleAtFixedRate
             val now = System.nanoTime() / 1_000_000_000.0
             val keysToRemove = mutableListOf<String>()
             for ((key, flow) in udpFlows) {
-                // DNS flows (port 53) use a shorter timeout since they're one-shot query/response
-                val timeout = if (flow.dstPort == 53) UDP_DNS_IDLE_TIMEOUT_SEC else UDP_IDLE_TIMEOUT_SEC
-                if (now - flow.lastActivity > timeout) {
+                if (now - flow.lastActivity > UDP_IDLE_TIMEOUT_SEC) {
                     flow.close()
                     keysToRemove.add(key)
                 }
@@ -1081,9 +1105,9 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     companion object {
         private const val TAG = "LwipStack"
         private const val MAX_PACKET_POOL_SIZE = 64
+        private const val MAX_INPUT_BATCH_SIZE = 64
         private const val MAX_UDP_FLOWS = 200
         private const val UDP_IDLE_TIMEOUT_SEC = 60.0
-        private const val UDP_DNS_IDLE_TIMEOUT_SEC = 10.0
 
         /** Singleton for callback access. */
         @Volatile
