@@ -22,6 +22,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,6 +42,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
+import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.data.model.Subscription
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.network.SubscriptionFetcher
@@ -49,6 +53,13 @@ private enum class ImportMethod(val titleResId: Int, val iconResId: Int) {
     QR_CODE(R.string.qr_code, android.R.drawable.ic_menu_camera),
     LINK(R.string.link, android.R.drawable.ic_menu_set_as),
     MANUAL(R.string.manual, android.R.drawable.ic_menu_edit);
+}
+
+/** Link type picker for https:// URLs — matches iOS AddProxyView's LinkType. */
+private enum class LinkType(val titleResId: Int) {
+    SUBSCRIPTION(R.string.subscription),
+    HTTPS_PROXY(R.string.https_proxy),
+    HTTP2_PROXY(R.string.http2_proxy);
 }
 
 @Composable
@@ -63,6 +74,7 @@ fun AddProxyScreen(
 
     var selectedMethod by remember { mutableStateOf<ImportMethod?>(null) }
     var linkURL by remember { mutableStateOf("") }
+    var linkType by remember { mutableStateOf(LinkType.SUBSCRIPTION) }
     var isLoading by remember { mutableStateOf(false) }
     var showLinkError by remember { mutableStateOf(false) }
     var linkErrorMessage by remember { mutableStateOf("") }
@@ -141,6 +153,25 @@ fun AddProxyScreen(
         // Link input field
         if (selectedMethod == ImportMethod.LINK) {
             Spacer(modifier = Modifier.height(12.dp))
+
+            // Show link type picker when URL starts with http:// or https://
+            // (matching iOS AddProxyView segmented picker)
+            val trimmedUrl = linkURL.trim()
+            if (trimmedUrl.startsWith("http://") || trimmedUrl.startsWith("https://")) {
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    LinkType.entries.forEachIndexed { index, type ->
+                        SegmentedButton(
+                            selected = linkType == type,
+                            onClick = { linkType = type },
+                            shape = SegmentedButtonDefaults.itemShape(index, LinkType.entries.size)
+                        ) {
+                            Text(stringResource(type.titleResId))
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             OutlinedTextField(
                 value = linkURL,
                 onValueChange = { linkURL = it },
@@ -166,15 +197,26 @@ fun AddProxyScreen(
                     ImportMethod.QR_CODE -> showQrScanner = true
                     ImportMethod.LINK -> {
                         val trimmed = linkURL.trim()
-                        if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://")) {
+                        val isHTTP = trimmed.startsWith("http://") || trimmed.startsWith("https://")
+
+                        if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://") ||
+                            (isHTTP && linkType != LinkType.SUBSCRIPTION)) {
+                            // Single proxy link (VLESS, Shadowsocks, NaiveProxy, QUIC,
+                            // or HTTPS/HTTP2 proxy selected via the link type picker)
+                            val naiveProtocol: OutboundProtocol? = when (linkType) {
+                                LinkType.HTTPS_PROXY -> OutboundProtocol.NAIVE_HTTP11
+                                LinkType.HTTP2_PROXY -> OutboundProtocol.NAIVE_HTTP2
+                                LinkType.SUBSCRIPTION -> null
+                            }
                             try {
-                                val config = ProxyConfiguration.fromUrl(trimmed)
+                                val config = ProxyConfiguration.fromUrl(trimmed, naiveProtocol)
                                 onImport(config)
                             } catch (e: Exception) {
                                 linkErrorMessage = e.message ?: context.getString(R.string.invalid_url)
                                 showLinkError = true
                             }
                         } else {
+                            // Subscription URL
                             isLoading = true
                             scope.launch {
                                 try {

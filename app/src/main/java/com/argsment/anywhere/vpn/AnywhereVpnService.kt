@@ -130,6 +130,22 @@ class AnywhereVpnService : VpnService() {
     }
 
     private fun startVpn(config: ProxyConfiguration) {
+        // Stop the existing stack before starting a new one. lwIP uses global
+        // state (netif_default) and LWIP_SINGLE_NETIF asserts if netif_add() is
+        // called while a netif is already registered. We must wait for
+        // nativeShutdown() (which calls netif_remove → netif_default = NULL)
+        // to complete before calling nativeInit() (which calls netif_add).
+        lwipStack?.let { oldStack ->
+            lwipStack = null
+            val latch = java.util.concurrent.CountDownLatch(1)
+            oldStack.stop(onComplete = Runnable { latch.countDown() })
+            try {
+                latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {}
+            tunFd?.close()
+            tunFd = null
+        }
+
         val effectiveConfig = applyGlobalAllowInsecure(config)
         Log.i(TAG, "[VPN] Starting tunnel to ${effectiveConfig.serverAddress}:${effectiveConfig.serverPort} " +
                 "(connect: ${effectiveConfig.connectAddress}), security: ${effectiveConfig.security}, transport: ${effectiveConfig.transport}")
@@ -188,9 +204,20 @@ class AnywhereVpnService : VpnService() {
         SocketProtector.clearProtector()
         DnsCache.setUnderlyingNetwork(null)
 
-        lwipStack?.stop()
+        val stack = lwipStack
         lwipStack = null
 
+        if (stack != null) {
+            // Use the completion callback so the TUN file descriptor is closed
+            // AFTER the lwIP executor finishes draining — avoids racing with the
+            // packet reader thread.  Matches iOS's lwipQueue.sync {} ordering.
+            stack.stop(onComplete = Runnable { finishStopVpn() })
+        } else {
+            finishStopVpn()
+        }
+    }
+
+    private fun finishStopVpn() {
         tunFd?.close()
         tunFd = null
 

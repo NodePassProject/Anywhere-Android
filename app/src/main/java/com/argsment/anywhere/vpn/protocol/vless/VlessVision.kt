@@ -395,13 +395,19 @@ class VlessVisionConnection(
      * Send an empty padding frame to camouflage the VLESS header.
      * Called when no initial data is available, so the header isn't sent alone.
      * Matches Xray-core outbound.go lines 331-337.
+     *
+     * Uses synchronous send to ensure the padding frame (containing the UUID)
+     * is fully written before control returns to the caller. The iOS version
+     * also sends synchronously — using sendAsync here would create a race
+     * condition where subsequent VLESS data could arrive at the server before
+     * the Vision padding frame.
      */
-    fun sendEmptyPadding() {
+    suspend fun sendEmptyPadding() {
         val padded: ByteArray
         synchronized(lock) {
             padded = visionPadding(null, VisionCommand.PADDING_CONTINUE, trafficState, true)
         }
-        innerConnection.sendAsync(padded)
+        innerConnection.send(padded)
     }
 
     override val isConnected: Boolean get() = innerConnection.isConnected

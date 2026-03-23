@@ -47,9 +47,15 @@ class Shadowsocks2022Connection(
     private var readNonce = ShadowsocksNonce(cipher.nonceSize)
     private var readSubkey: ByteArray? = null
     private var readBuffer = byteArrayOf()
+    private var readBufferOffset = 0
     private var responseHeaderParsed = false
     private var pendingVarHeaderLen: Int? = null
     private var pendingPayloadLength: Int? = null
+
+    /** Compact threshold — avoid O(n) shifts until dead space is significant (matching iOS). */
+    private companion object {
+        const val COMPACT_THRESHOLD = 4096
+    }
 
     private val sendLock = Any()
 
@@ -205,8 +211,29 @@ class Shadowsocks2022Connection(
 
     // -- Response Parsing --
 
+    /** Number of unprocessed bytes in the read buffer. */
+    private var _readBufferEnd = 0
+    private fun readBufferAvailable(): Int = _readBufferEnd - readBufferOffset
+
     private fun processReceived(data: ByteArray): ByteArray {
-        readBuffer += data
+        // Append incoming data
+        val activeLen = readBufferAvailable()
+        val needed = activeLen + data.size
+        if (readBufferOffset + activeLen + data.size > readBuffer.size) {
+            // Compact or grow
+            if (readBuffer.size >= needed && readBufferOffset > 0) {
+                System.arraycopy(readBuffer, readBufferOffset, readBuffer, 0, activeLen)
+            } else {
+                val newBuf = ByteArray(maxOf(readBuffer.size * 2, needed))
+                System.arraycopy(readBuffer, readBufferOffset, newBuf, 0, activeLen)
+                readBuffer = newBuf
+            }
+            readBufferOffset = 0
+            _readBufferEnd = activeLen
+        }
+        System.arraycopy(data, 0, readBuffer, _readBufferEnd, data.size)
+        _readBufferEnd += data.size
+
         val output = ByteArrayOutputStream()
 
         // Try to finish parsing the variable header if waiting
@@ -224,6 +251,19 @@ class Shadowsocks2022Connection(
             output.write(decryptChunks())
         }
 
+        // Compact buffer when dead space exceeds threshold (matching iOS)
+        if (readBufferOffset > COMPACT_THRESHOLD) {
+            val remaining = readBufferAvailable()
+            if (remaining > 0) {
+                System.arraycopy(readBuffer, readBufferOffset, readBuffer, 0, remaining)
+            }
+            readBufferOffset = 0
+            _readBufferEnd = remaining
+        } else if (readBufferOffset > 0 && readBufferAvailable() == 0) {
+            readBufferOffset = 0
+            _readBufferEnd = 0
+        }
+
         return output.toByteArray()
     }
 
@@ -233,9 +273,9 @@ class Shadowsocks2022Connection(
         // Need: salt(keySize) + sealed fixed header(1+8+keySize+2 + tagSize)
         val fixedHeaderPlainLen = 1 + 8 + keySize + 2
         val minNeeded = keySize + fixedHeaderPlainLen + TAG_SIZE
-        if (readBuffer.size < minNeeded) return null
+        if (readBufferAvailable() < minNeeded) return null
 
-        val salt = readBuffer.copyOf(keySize)
+        val salt = readBuffer.copyOfRange(readBufferOffset, readBufferOffset + keySize)
 
         // Derive read session key
         val sessionKey = ShadowsocksKeyDerivation.deriveSessionKey(psk, salt, keySize)
@@ -243,8 +283,8 @@ class Shadowsocks2022Connection(
 
         // Read and decrypt fixed header chunk
         val fixedChunkLen = fixedHeaderPlainLen + TAG_SIZE
-        val fixedChunk = readBuffer.copyOfRange(keySize, keySize + fixedChunkLen)
-        readBuffer = readBuffer.copyOfRange(keySize + fixedChunkLen, readBuffer.size)
+        val fixedChunk = readBuffer.copyOfRange(readBufferOffset + keySize, readBufferOffset + keySize + fixedChunkLen)
+        readBufferOffset += keySize + fixedChunkLen
 
         val fixedHeader = ShadowsocksAEADCrypto.open(cipher, sessionKey, readNonce.next(), fixedChunk)
         require(fixedHeader.size == fixedHeaderPlainLen)
@@ -275,13 +315,13 @@ class Shadowsocks2022Connection(
 
     private fun parseVariableHeader(varLen: Int): ByteArray? {
         val varChunkLen = varLen + TAG_SIZE
-        if (readBuffer.size < varChunkLen) {
+        if (readBufferAvailable() < varChunkLen) {
             pendingVarHeaderLen = varLen
             return null
         }
 
-        val varChunk = readBuffer.copyOf(varChunkLen)
-        readBuffer = readBuffer.copyOfRange(varChunkLen, readBuffer.size)
+        val varChunk = readBuffer.copyOfRange(readBufferOffset, readBufferOffset + varChunkLen)
+        readBufferOffset += varChunkLen
 
         val subkey = readSubkey ?: throw ShadowsocksError.DecryptionFailed()
         val varData = ShadowsocksAEADCrypto.open(cipher, subkey, readNonce.next(), varChunk)
@@ -294,10 +334,9 @@ class Shadowsocks2022Connection(
     private fun decryptChunks(): ByteArray {
         val subkey = readSubkey ?: return byteArrayOf()
         val output = ByteArrayOutputStream()
-        var offset = 0
 
         while (true) {
-            val remaining = readBuffer.size - offset
+            val remaining = readBufferAvailable()
             val payloadLen: Int
 
             val pending = pendingPayloadLength
@@ -307,31 +346,26 @@ class Shadowsocks2022Connection(
                 val lenNeeded = 2 + TAG_SIZE
                 if (remaining < lenNeeded) break
 
-                val encLen = readBuffer.copyOfRange(offset, offset + lenNeeded)
+                val encLen = readBuffer.copyOfRange(readBufferOffset, readBufferOffset + lenNeeded)
                 val lenData = ShadowsocksAEADCrypto.open(cipher, subkey, readNonce.next(), encLen)
                 require(lenData.size == 2)
-                offset += lenNeeded
+                readBufferOffset += lenNeeded
 
                 payloadLen = ((lenData[0].toInt() and 0xFF) shl 8) or (lenData[1].toInt() and 0xFF)
             }
 
             val payloadNeeded = payloadLen + TAG_SIZE
-            val remainingAfterLen = readBuffer.size - offset
-            if (remainingAfterLen < payloadNeeded) {
+            if (readBufferAvailable() < payloadNeeded) {
                 pendingPayloadLength = payloadLen
                 break
             }
 
             pendingPayloadLength = null
 
-            val encPayload = readBuffer.copyOfRange(offset, offset + payloadNeeded)
-            offset += payloadNeeded
+            val encPayload = readBuffer.copyOfRange(readBufferOffset, readBufferOffset + payloadNeeded)
+            readBufferOffset += payloadNeeded
 
             output.write(ShadowsocksAEADCrypto.open(cipher, subkey, readNonce.next(), encPayload))
-        }
-
-        if (offset > 0) {
-            readBuffer = readBuffer.copyOfRange(offset, readBuffer.size)
         }
 
         return output.toByteArray()

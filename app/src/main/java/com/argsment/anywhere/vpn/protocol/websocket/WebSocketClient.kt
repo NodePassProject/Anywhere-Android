@@ -258,7 +258,8 @@ class WebSocketConnection private constructor(
 
             // Need more data from transport
             val data = transportReceive()
-            if (data == null || data.isEmpty()) return null
+            if (data == null) return null  // true EOF
+            if (data.isEmpty()) continue   // temporary empty read, retry
             lock.withLock { appendToReceiveBuffer(data) }
         }
     }

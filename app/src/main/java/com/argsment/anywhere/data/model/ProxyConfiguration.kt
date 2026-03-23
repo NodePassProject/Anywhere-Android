@@ -452,9 +452,9 @@ data class ProxyConfiguration(
     // =========================================================================
 
     companion object {
-        fun fromUrl(url: String): ProxyConfiguration = when {
+        fun fromUrl(url: String, naiveProtocol: OutboundProtocol? = null): ProxyConfiguration = when {
             url.startsWith("ss://") -> fromShadowsocksUrl(url)
-            url.startsWith("https://") || url.startsWith("naive+https://") -> fromNaiveUrl(url)
+            url.startsWith("https://") || url.startsWith("naive+https://") -> fromNaiveUrl(url, naiveProtocol)
             url.startsWith("quic://") -> fromQuicUrl(url)
             url.startsWith("vless://") -> fromVlessUrl(url)
             else -> throw ProxyError.InvalidUrl("URL must start with vless://, ss://, https://, or quic://")
@@ -642,7 +642,7 @@ data class ProxyConfiguration(
             )
         }
 
-        private fun fromNaiveUrl(url: String): ProxyConfiguration {
+        private fun fromNaiveUrl(url: String, protocolOverride: OutboundProtocol? = null): ProxyConfiguration {
             var remaining = when {
                 url.startsWith("naive+https://") -> url.removePrefix("naive+https://")
                 url.startsWith("https://") -> url.removePrefix("https://")
@@ -679,16 +679,17 @@ data class ProxyConfiguration(
             // Parse host:port
             val (host, port) = parseHostPort(serverPart)
 
+            val proto = protocolOverride ?: OutboundProtocol.NAIVE_HTTP2
             return ProxyConfiguration(
                 name = fragmentName ?: "Untitled",
                 serverAddress = host,
                 serverPort = port,
                 uuid = UUID.randomUUID(), // placeholder, not used for naive
                 encryption = "none",
-                outboundProtocol = OutboundProtocol.NAIVE_HTTP2,
+                outboundProtocol = proto,
                 naiveUsername = username,
                 naivePassword = password,
-                naiveProtocol = NaiveProtocol.HTTP2
+                naiveProtocol = if (proto == OutboundProtocol.NAIVE_HTTP11) NaiveProtocol.HTTP11 else NaiveProtocol.HTTP2
             )
         }
 

@@ -308,14 +308,24 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         startObservingSettings()
     }
 
-    /** Stops the lwIP stack and closes all active flows. */
-    fun stop() {
+    /** Stops the lwIP stack and closes all active flows.
+     *
+     * Non-blocking: submits cleanup to the lwIP executor and shuts the executor
+     * down without waiting.  The previous implementation blocked the calling
+     * thread (often the Main Thread) with CountDownLatch.await(5s), which
+     * could freeze the UI.
+     *
+     * @param onComplete Optional callback invoked on the executor thread after
+     *   all cleanup is finished.  Callers that need to close shared resources
+     *   (e.g., the TUN file descriptor) should do so inside this callback to
+     *   avoid racing with in-flight I/O — matching iOS's lwipQueue.sync{}
+     *   ordering where resources are released only after the queue drains. */
+    fun stop(onComplete: Runnable? = null) {
         Log.i(TAG, "[LwipStack] Stopping")
         stopObservingSettings()
 
         // All state clearing happens on the lwipExecutor to avoid races with
         // in-flight callbacks (e.g., onOutput() reading tunOutput).
-        val latch = java.util.concurrent.CountDownLatch(1)
         lwipExecutor.execute {
             running = false
             shutdownInternal()
@@ -328,13 +338,11 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             tunFd = null
             configuration = null
             instance = null
-            latch.countDown()
+            onComplete?.run()
         }
 
-        // Wait for shutdown to complete, then release the executor thread
-        try {
-            latch.await(5, TimeUnit.SECONDS)
-        } catch (_: Exception) {}
+        // Orderly shutdown: the executor finishes the queued cleanup task,
+        // then terminates. Does NOT block the calling thread.
         lwipExecutor.shutdown()
     }
 
@@ -542,6 +550,13 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
 
         if (isIpv6 && !ipv6ConnectionsEnabled) {
+            return 0L
+        }
+
+        // Prevent lwIP resource exhaustion (TCP segment pool, heap) under
+        // heavy load.  Rejected connections get RST; the app retries and
+        // succeeds once older connections close.
+        if (tcpConnections.size >= MAX_TCP_CONNECTIONS) {
             return 0L
         }
 
@@ -1104,8 +1119,9 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
     companion object {
         private const val TAG = "LwipStack"
-        private const val MAX_PACKET_POOL_SIZE = 64
+        private const val MAX_PACKET_POOL_SIZE = 256
         private const val MAX_INPUT_BATCH_SIZE = 64
+        private const val MAX_TCP_CONNECTIONS = 128
         private const val MAX_UDP_FLOWS = 200
         private const val UDP_IDLE_TIMEOUT_SEC = 60.0
 

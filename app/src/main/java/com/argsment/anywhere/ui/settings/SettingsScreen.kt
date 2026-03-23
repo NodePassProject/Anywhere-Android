@@ -2,6 +2,7 @@ package com.argsment.anywhere.ui.settings
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -79,6 +80,19 @@ fun SettingsScreen(viewModel: VpnViewModel) {
     val adBlockRuleSet = remember { viewModel.ruleSetRepository.ruleSets.value.find { it.name == "ADBlock" } }
     var adBlockEnabled by remember {
         mutableStateOf(adBlockRuleSet?.assignedConfigurationId == "REJECT")
+    }
+
+    // Intercept the device back button when a sub-screen is showing.
+    // Without this, the NavHost handles back press by popping the SettingsRoute,
+    // sending the user to Home instead of back to the Settings list.
+    val activeSubScreen = showRoutingRules || showAcknowledgements ||
+            showIpv6Settings || showEncryptedDns || showTrustedCertificates
+    BackHandler(enabled = activeSubScreen) {
+        showRoutingRules = false
+        showAcknowledgements = false
+        showIpv6Settings = false
+        showEncryptedDns = false
+        showTrustedCertificates = false
     }
 
     if (showRoutingRules) {

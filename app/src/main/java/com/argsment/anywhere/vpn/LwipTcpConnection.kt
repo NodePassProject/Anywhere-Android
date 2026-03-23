@@ -668,7 +668,7 @@ class LwipTcpConnection(
         private const val DOWNLINK_ONLY_TIMEOUT_MS = 1_000L      // 1s (Xray-core downlinkOnly)
         private const val UPLINK_ONLY_TIMEOUT_MS = 1_000L        // 1s (Xray-core uplinkOnly)
         private const val HANDSHAKE_TIMEOUT_MS = 60_000L         // 60s (Xray-core Timeout.Handshake)
-        private const val MAX_OVERFLOW_BUFFER_SIZE = 512 * 1024  // 512 KB (soft limit, matching iOS)
+        private const val MAX_OVERFLOW_BUFFER_SIZE = 2 * 1024 * 1024  // 2 MB (soft limit, increased from iOS's 512 KB)
         private const val MAX_LWIP_WRITE_SIZE = 16 * 1024        // 16 KB per tcp_write (matching iOS, limits pbuf/segment pressure)
         private const val MAX_COALESCE_SIZE = 65535              // UInt16 max (matching iOS, protocol framing limit)
         private const val DRAIN_RETRY_DELAY_MS = 100L            // 100ms drain retry (matching iOS)

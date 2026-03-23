@@ -18,6 +18,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -94,10 +96,10 @@ class NioSocket : Transport {
         }
 
         /** Reusable read buffer for the selector thread (only accessed from selectorThread). */
-        private val selectorReadBuffer = ByteBuffer.allocate(65536)
+        private val selectorReadBuffer = ByteBuffer.allocate(131072)
 
-        /** Maximum total bytes queued across all pending sends (2 MB). */
-        private const val MAX_PENDING_SEND_BYTES = 2_097_152
+        /** Maximum total bytes queued across all pending sends (4 MB). */
+        private const val MAX_PENDING_SEND_BYTES = 4_194_304
 
         /** Single shared selector thread. */
         private val selectorThread = Thread({
@@ -216,9 +218,19 @@ class NioSocket : Transport {
             throw NioSocketError.ConnectionFailed(e.message ?: "Connect initiation failed")
         }
 
-        // Wait for connection with timeout
-        suspendCoroutine { cont: Continuation<Unit> ->
+        // Wait for connection with timeout.
+        // Uses suspendCancellableCoroutine so coroutine cancellation (e.g.
+        // withTimeoutOrNull in LatencyTester) can interrupt the wait.
+        suspendCancellableCoroutine { cont: CancellableContinuation<Unit> ->
             connectCont.set(cont)
+            cont.invokeOnCancellation {
+                // Atomically claim so onConnectable/timeout won't double-resume.
+                if (connectCont.compareAndSet(cont, null)) {
+                    connectTimeout?.cancel(false)
+                    connectTimeout = null
+                    runCatching { ch.close() }
+                }
+            }
 
             // Schedule connect timeout
             connectTimeout = timeoutScheduler.schedule({
@@ -226,9 +238,9 @@ class NioSocket : Transport {
                     val cc = connectCont.getAndSet(null) ?: return@runOnSelector
                     connectTimeout = null
                     runCatching { ch.close() }
-                    cc.resumeWithException(
+                    resumeSafe(cc) { it.resumeWithException(
                         NioSocketError.ConnectionFailed("Connection timed out")
-                    )
+                    ) }
                 }
             }, CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
 
@@ -241,9 +253,9 @@ class NioSocket : Transport {
                     connectTimeout?.cancel(false)
                     connectTimeout = null
                     runCatching { ch.close() }
-                    cc.resumeWithException(
+                    resumeSafe(cc) { it.resumeWithException(
                         NioSocketError.ConnectionFailed(e.message ?: "Registration failed")
-                    )
+                    ) }
                 }
             }
         }
@@ -268,7 +280,7 @@ class NioSocket : Transport {
                 // nobody has called receive() yet.
                 key.interestOps(0)
 
-                cc.resume(Unit)
+                resumeSafe(cc) { it.resume(Unit) }
             }
         } catch (e: IOException) {
             val cc = connectCont.getAndSet(null) ?: return
@@ -276,9 +288,9 @@ class NioSocket : Transport {
             connectTimeout = null
             runCatching { ch.close() }
             key.cancel()
-            cc.resumeWithException(
+            resumeSafe(cc) { it.resumeWithException(
                 NioSocketError.ConnectionFailed(e.message ?: "Connect failed")
-            )
+            ) }
         }
     }
 
@@ -311,9 +323,17 @@ class NioSocket : Transport {
             throw NioSocketError.ReceiveFailed(e.message ?: "Read failed")
         }
 
-        // Data not immediately available, suspend until readable
-        return suspendCoroutine { cont ->
+        // Data not immediately available, suspend until readable.
+        // Uses suspendCancellableCoroutine so coroutine cancellation (e.g.
+        // withTimeoutOrNull in LatencyTester) can interrupt the wait immediately,
+        // rather than hanging until forceCancel() is called externally.
+        return suspendCancellableCoroutine { cont ->
             pendingReceive.set(cont)
+            cont.invokeOnCancellation {
+                // Atomically claim the continuation so onReadable() won't
+                // try to resume an already-cancelled continuation.
+                pendingReceive.compareAndSet(cont, null)
+            }
             // Ensure OP_READ is registered so the selector wakes on data
             runOnSelector {
                 val key = selectionKey
@@ -356,7 +376,9 @@ class NioSocket : Transport {
                             key.interestOps(key.interestOps() and SelectionKey.OP_READ.inv())
                         } catch (_: CancelledKeyException) {}
                     }
-                    cont.resume(data)
+                    // Use resumeSafe: if the coroutine was cancelled between
+                    // getAndSet(null) above and this resume, ignore the race.
+                    resumeSafe(cont) { it.resume(data) }
                 }
                 n == 0 -> {
                     // No data ready, re-register
@@ -364,11 +386,26 @@ class NioSocket : Transport {
                 }
                 else -> {
                     // EOF
-                    cont.resume(null)
+                    resumeSafe(cont) { it.resume(null) }
                 }
             }
         } catch (e: IOException) {
-            cont.resumeWithException(NioSocketError.ReceiveFailed(e.message ?: "Read failed"))
+            resumeSafe(cont) { it.resumeWithException(NioSocketError.ReceiveFailed(e.message ?: "Read failed")) }
+        }
+    }
+
+    /**
+     * Safely resumes a continuation that may have been concurrently cancelled
+     * (via suspendCancellableCoroutine). Races between selector callbacks
+     * claiming the continuation and invokeOnCancellation are handled by the
+     * atomic references, but the continuation itself may already be in
+     * CANCELLED state — resuming it would throw IllegalStateException.
+     */
+    private inline fun <T> resumeSafe(cont: Continuation<T>, block: (Continuation<T>) -> Unit) {
+        try {
+            block(cont)
+        } catch (_: IllegalStateException) {
+            // Continuation was already cancelled — safe to ignore
         }
     }
 
@@ -507,13 +544,19 @@ class NioSocket : Transport {
         running = false
         state = State.CANCELLED
 
-        // Cancel connect (atomic claim prevents double-resume)
-        connectCont.getAndSet(null)?.resumeWithException(NioSocketError.NotConnected())
+        // Cancel connect (atomic claim prevents double-resume).
+        // resumeSafe: the continuation may already be cancelled via
+        // suspendCancellableCoroutine's invokeOnCancellation.
+        connectCont.getAndSet(null)?.let { cont ->
+            resumeSafe(cont) { it.resumeWithException(NioSocketError.NotConnected()) }
+        }
         connectTimeout?.cancel(false)
         connectTimeout = null
 
         // Cancel pending receive
-        pendingReceive.getAndSet(null)?.resume(null)
+        pendingReceive.getAndSet(null)?.let { cont ->
+            resumeSafe(cont) { it.resume(null) }
+        }
 
         // Cancel pending sends
         while (true) {
