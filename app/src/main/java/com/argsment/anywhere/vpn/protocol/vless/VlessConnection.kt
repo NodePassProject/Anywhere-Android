@@ -2,6 +2,7 @@ package com.argsment.anywhere.vpn.protocol.vless
 
 import android.util.Log
 import com.argsment.anywhere.data.model.ProxyError
+import com.argsment.anywhere.data.model.TlsVersion
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
@@ -12,14 +13,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 private const val TAG = "VlessConnection"
-
-/**
- * TLS version constants matching TLS protocol version numbers.
- */
-enum class TlsVersion(val value: Int) {
-    TLS12(0x0303),
-    TLS13(0x0304)
-}
 
 /**
  * Interface for all VLESS connection types.
@@ -351,7 +344,8 @@ open class VlessTlsConnection(
     private val tlsConnection: TlsRecordConnection
 ) : VlessConnection() {
 
-    override val outerTlsVersion: TlsVersion? get() = TlsVersion.TLS13
+    override val outerTlsVersion: TlsVersion?
+        get() = if (tlsConnection.isTls13) TlsVersion.TLS13 else TlsVersion.TLS12
 
     override val isConnected: Boolean
         get() = (tlsConnection.connection as? NioSocket)?.state == NioSocket.State.READY

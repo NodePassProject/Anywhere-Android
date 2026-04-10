@@ -1,6 +1,8 @@
 package com.argsment.anywhere.vpn.protocol.reality
 
+import android.os.Build
 import android.util.Log
+import androidx.annotation.RequiresApi
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.vpn.NativeBridge
 import com.argsment.anywhere.vpn.protocol.Transport
@@ -51,6 +53,10 @@ class RealityClient(
     private var serverHandshakeSeqNum: Long = 0
     private var serverCertVerified = false
 
+    // ML-KEM-768 state (API 35+, null on older Android)
+    private var mlkemEncapsulationKey: ByteArray? = null
+    private var mlkemPrivateKey: java.security.PrivateKey? = null
+
     // =========================================================================
     // Public API
     // =========================================================================
@@ -67,6 +73,7 @@ class RealityClient(
         val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
         ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
         ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
+        mlkemEncapsulationKey = tryGenerateMLKEMKeyPair()
 
         val socket = NioSocket()
         connection = socket
@@ -88,6 +95,7 @@ class RealityClient(
         val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
         ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
         ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
+        mlkemEncapsulationKey = tryGenerateMLKEMKeyPair()
 
         connection = transport
         return performRealityHandshake()
@@ -182,7 +190,8 @@ class RealityClient(
             random = random,
             sessionId = zeroSessionId,
             serverName = configuration.serverName,
-            publicKey = pubKeyBytes
+            publicKey = pubKeyBytes,
+            mlkemEncapsulationKey = mlkemEncapsulationKey
         )
 
         // Encrypt first 16 bytes of SessionId using AES-GCM
@@ -202,7 +211,8 @@ class RealityClient(
             random = random,
             sessionId = encryptedSessionId,
             serverName = configuration.serverName,
-            publicKey = pubKeyBytes
+            publicKey = pubKeyBytes,
+            mlkemEncapsulationKey = mlkemEncapsulationKey
         )
 
         return TlsClientHelloBuilder.wrapInTLSRecord(finalClientHello)
@@ -214,35 +224,40 @@ class RealityClient(
 
     /**
      * Receives and processes the server's TLS response.
+     *
+     * Buffers partial reads until at least 5 bytes are available for the TLS
+     * record header. The server may deliver data in small chunks, especially
+     * when tunneled through a proxy chain (matching iOS).
      */
-    private suspend fun receiveServerResponse(): TlsRecordConnection {
+    private suspend fun receiveServerResponse(
+        existingBuffer: ByteArray = ByteArray(0)
+    ): TlsRecordConnection {
+        if (existingBuffer.size >= 5) {
+            val contentType = existingBuffer[0].toInt() and 0xFF
+            return when (contentType) {
+                0x16 -> continueReceivingHandshake(existingBuffer)
+                0x15 -> {
+                    val alertLevel = if (existingBuffer.size > 5) existingBuffer[5].toInt() and 0xFF else 0
+                    val alertDesc = if (existingBuffer.size > 6) existingBuffer[6].toInt() and 0xFF else 0
+                    Log.e(TAG, "[Reality] TLS Alert: level=$alertLevel, desc=$alertDesc")
+                    throw RealityError.HandshakeFailed("TLS Alert: level=$alertLevel, desc=$alertDesc")
+                }
+                else -> {
+                    Log.e(TAG, "[Reality] Unexpected content type: 0x${String.format("%02x", contentType)}")
+                    throw RealityError.HandshakeFailed("Unexpected content type: $contentType")
+                }
+            }
+        }
+
         val conn = connection
             ?: throw RealityError.HandshakeFailed("Connection cancelled")
-
         val data = conn.receive()
-            ?: throw RealityError.HandshakeFailed("No server response")
 
-        if (data.size < 5) {
-            throw RealityError.HandshakeFailed("Server response too short")
+        if (data == null || data.isEmpty()) {
+            throw RealityError.HandshakeFailed("No server response (connection closed)")
         }
 
-        val contentType = data[0].toInt() and 0xFF
-
-        return when (contentType) {
-            0x16 -> { // Handshake
-                continueReceivingHandshake(data)
-            }
-            0x15 -> { // Alert
-                val alertLevel = if (data.size > 5) data[5].toInt() and 0xFF else 0
-                val alertDesc = if (data.size > 6) data[6].toInt() and 0xFF else 0
-                Log.e(TAG, "[Reality] TLS Alert: level=$alertLevel, desc=$alertDesc")
-                throw RealityError.HandshakeFailed("TLS Alert: level=$alertLevel, desc=$alertDesc")
-            }
-            else -> {
-                Log.e(TAG, "[Reality] Unexpected content type: 0x${String.format("%02x", contentType)}")
-                throw RealityError.HandshakeFailed("Unexpected content type: $contentType")
-            }
-        }
+        return receiveServerResponse(existingBuffer + data)
     }
 
     /**
@@ -251,13 +266,13 @@ class RealityClient(
     private suspend fun continueReceivingHandshake(buffer: ByteArray): TlsRecordConnection {
         var buf = buffer
 
-        while (buf.size < 100) {
+        // Keep reading until we have at least one complete TLS record (matching iOS)
+        while (!bufferContainsCompleteTlsRecord(buf)) {
             val conn = connection
                 ?: throw RealityError.HandshakeFailed("Connection cancelled")
             val moreData = conn.receive()
-            if (moreData != null) {
-                buf = buf + moreData
-            }
+                ?: throw RealityError.HandshakeFailed("Connection closed during handshake")
+            buf = buf + moreData
         }
 
         if (!verifyServerResponse(buf)) {
@@ -276,8 +291,23 @@ class RealityClient(
         val clientHello = storedClientHello
             ?: throw RealityError.HandshakeFailed("No stored ClientHello")
 
-        // X25519 ECDH with server's ephemeral key (via native bridge)
-        val sharedSecretData = NativeBridge.nativeX25519KeyAgreement(privateKey, serverKeyShare)
+        // Key agreement: pure X25519 or X25519MLKEM768 hybrid depending on group negotiated.
+        val sharedSecretData = if (serverKeyShare.size == 1120) {
+            // X25519MLKEM768: server key share = MLKEM_ciphertext(1088) + X25519_public_key(32)
+            val mlkemCt = serverKeyShare.copyOfRange(0, 1088)
+            val x25519Key = serverKeyShare.copyOfRange(1088, 1120)
+            val x25519Shared = NativeBridge.nativeX25519KeyAgreement(privateKey, x25519Key)
+            val mlkemShared = mlkemDecapsulate(mlkemCt)
+            if (mlkemShared != null) {
+                mlkemShared + x25519Shared  // 64 bytes: MLKEM_shared || X25519_shared
+            } else {
+                Log.w(TAG, "[Reality] ML-KEM decapsulation failed, using X25519 only")
+                x25519Shared
+            }
+        } else {
+            // Pure X25519
+            NativeBridge.nativeX25519KeyAgreement(privateKey, serverKeyShare)
+        }
 
         val serverHello = extractServerHelloMessage(buf)
 
@@ -327,6 +357,24 @@ class RealityClient(
      * @param data The raw TLS data containing the ServerHello record.
      * @return A pair of (keyShare, cipherSuite) or null if parsing fails.
      */
+    /**
+     * Checks whether the buffer contains a complete ServerHello by walking through
+     * all TLS records (matching iOS bufferContainsCompleteServerHello).
+     *
+     * Returns true when all records seen so far are complete — indicating
+     * enough data has been buffered for parseServerHello to proceed.
+     */
+    private fun bufferContainsCompleteTlsRecord(buffer: ByteArray): Boolean {
+        var offset = 0
+        while (offset + 5 <= buffer.size) {
+            val recordLen = ((buffer[offset + 3].toInt() and 0xFF) shl 8) or
+                    (buffer[offset + 4].toInt() and 0xFF)
+            if (offset + 5 + recordLen > buffer.size) return false
+            offset += 5 + recordLen
+        }
+        return offset > 0
+    }
+
     private fun parseServerHello(data: ByteArray): Pair<ByteArray, Int>? {
         // Try native parser first
         val nativeResult = NativeBridge.nativeParseServerHello(data)
@@ -401,6 +449,14 @@ class RealityClient(
                         if (shOffset + 32 > data.size) return null
                         return Pair(
                             data.copyOfRange(shOffset, shOffset + 32),
+                            cipherSuite
+                        )
+                    }
+                    // X25519MLKEM768 hybrid: MLKEM_ciphertext(1088) + X25519_public_key(32) = 1120 bytes
+                    if (group == 0x11EC && keyLen == 1120) {
+                        if (shOffset + 1120 > data.size) return null
+                        return Pair(
+                            data.copyOfRange(shOffset, shOffset + 1120),
                             cipherSuite
                         )
                     }
@@ -480,6 +536,14 @@ class RealityClient(
                         if (hsType == 0x0B) { // Certificate
                             val certBody = decrypted.copyOfRange(hsOffset + 4, hsOffset + 4 + hsLen)
                             serverCertVerified = verifyRealityCertificate(certBody)
+                        } else if (hsType == 0x19) { // CompressedCertificate (RFC 8879)
+                            val certBody = decrypted.copyOfRange(hsOffset + 4, hsOffset + 4 + hsLen)
+                            val decompressed = decompressCertificate(certBody)
+                            if (decompressed != null) {
+                                serverCertVerified = verifyRealityCertificate(decompressed)
+                            } else {
+                                Log.w(TAG, "[Reality] Failed to decompress CompressedCertificate")
+                            }
                         }
 
                         if (hsType == 0x14) { // Finished
@@ -623,6 +687,68 @@ class RealityClient(
     }
 
     // =========================================================================
+    // CompressedCertificate (RFC 8879)
+    // =========================================================================
+
+    /**
+     * Decompresses a CompressedCertificate message body.
+     *
+     * RFC 8879 layout: algorithm (2) + uncompressed_length (3) + compressed_length (3) + data
+     * Supports zlib (0x0001).
+     */
+    private fun decompressCertificate(body: ByteArray): ByteArray? {
+        if (body.size < 8) return null
+
+        val uncompressedLength = ((body[2].toInt() and 0xFF) shl 16) or
+                ((body[3].toInt() and 0xFF) shl 8) or (body[4].toInt() and 0xFF)
+        val compressedLength = ((body[5].toInt() and 0xFF) shl 16) or
+                ((body[6].toInt() and 0xFF) shl 8) or (body[7].toInt() and 0xFF)
+
+        if (8 + compressedLength > body.size) return null
+        if (uncompressedLength <= 0 || uncompressedLength > (1 shl 24)) return null
+
+        val algorithm = ((body[0].toInt() and 0xFF) shl 8) or (body[1].toInt() and 0xFF)
+        val compressed = body.copyOfRange(8, 8 + compressedLength)
+
+        return when (algorithm) {
+            0x0001 -> { // zlib
+                try {
+                    val inflater = java.util.zip.Inflater()
+                    inflater.setInput(compressed)
+                    val output = ByteArray(uncompressedLength)
+                    val decodedSize = inflater.inflate(output)
+                    inflater.end()
+                    if (decodedSize > 0) output.copyOfRange(0, decodedSize) else null
+                } catch (e: Exception) {
+                    Log.w(TAG, "[Reality] zlib decompression failed: ${e.message}")
+                    null
+                }
+            }
+            0x0002 -> { // brotli (RFC 8879)
+                try {
+                    val brotliInput = org.brotli.dec.BrotliInputStream(compressed.inputStream())
+                    val output = ByteArray(uncompressedLength)
+                    var totalRead = 0
+                    while (totalRead < uncompressedLength) {
+                        val n = brotliInput.read(output, totalRead, uncompressedLength - totalRead)
+                        if (n <= 0) break
+                        totalRead += n
+                    }
+                    brotliInput.close()
+                    if (totalRead > 0) output.copyOfRange(0, totalRead) else null
+                } catch (e: Exception) {
+                    Log.w(TAG, "[Reality] Brotli decompression failed: ${e.message}")
+                    null
+                }
+            }
+            else -> {
+                Log.w(TAG, "[Reality] Unknown cert compression algorithm: 0x${String.format("%04x", algorithm)}")
+                null
+            }
+        }
+    }
+
+    // =========================================================================
     // Reality Certificate Verification
     // =========================================================================
 
@@ -708,13 +834,16 @@ class RealityClient(
         val tbsContentLen = parseDERSequence(certDER, outerOffset) ?: return null
         val tbsEnd = outerOffset[0] + tbsContentLen
 
-        // Search for ed25519 OID [06 03 2b 65 70] within TBSCertificate
+        // Search for ed25519 OID [06 03 2b 65 70] within TBSCertificate.
+        // We search from the TBS SEQUENCE tag (tbsStart) up to tbsEnd minus the
+        // 8-byte SubjectPublicKeyInfo prefix we expect to follow the OID. Matches
+        // iOS extractEd25519Components which iterates from tbsHeaderStart..<tbsEnd.
         val ed25519OID = byteArrayOf(0x06, 0x03, 0x2b, 0x65, 0x70)
         var publicKey: ByteArray? = null
 
-        for (i in outerOffset[0] - tbsContentLen until tbsEnd - ed25519OID.size) {
-            if (i < 0 || i + ed25519OID.size > certDER.size) continue
-
+        val searchEnd = tbsEnd - (ed25519OID.size + 3 + 32)
+        var i = tbsStart
+        while (i <= searchEnd) {
             var match = true
             for (j in ed25519OID.indices) {
                 if (certDER[i + j] != ed25519OID[j]) {
@@ -722,19 +851,18 @@ class RealityClient(
                     break
                 }
             }
-            if (!match) continue
-
-            // Found OID, look for BIT STRING [03 21 00] + 32-byte key after it
-            val afterOID = i + ed25519OID.size
-            if (afterOID + 3 + 32 > certDER.size) continue
-
-            if (certDER[afterOID] == 0x03.toByte() &&
-                certDER[afterOID + 1] == 0x21.toByte() &&
-                certDER[afterOID + 2] == 0x00.toByte()
-            ) {
-                publicKey = certDER.copyOfRange(afterOID + 3, afterOID + 3 + 32)
-                break
+            if (match) {
+                // Found OID, look for BIT STRING [03 21 00] + 32-byte key after it
+                val afterOID = i + ed25519OID.size
+                if (certDER[afterOID] == 0x03.toByte() &&
+                    certDER[afterOID + 1] == 0x21.toByte() &&
+                    certDER[afterOID + 2] == 0x00.toByte()
+                ) {
+                    publicKey = certDER.copyOfRange(afterOID + 3, afterOID + 3 + 32)
+                    break
+                }
             }
+            i++
         }
 
         if (publicKey == null) return null
@@ -981,5 +1109,58 @@ class RealityClient(
         handshakeKeys = null
         handshakeTranscript = null
         serverCertVerified = false
+        mlkemEncapsulationKey = null
+        mlkemPrivateKey = null
+    }
+
+    // =========================================================================
+    // ML-KEM-768 (Post-Quantum Key Exchange, Android 15+ / API 35+)
+    // =========================================================================
+
+    /**
+     * Tries to generate an ML-KEM-768 keypair on Android 15+ (API 35).
+     * Returns the 1184-byte raw encapsulation key, or null on older Android.
+     * When non-null, sets [mlkemPrivateKey] for later decapsulation.
+     */
+    private fun tryGenerateMLKEMKeyPair(): ByteArray? {
+        if (Build.VERSION.SDK_INT < 35) return null
+        return generateMLKEMKeyPairImpl()
+    }
+
+    @RequiresApi(35)
+    private fun generateMLKEMKeyPairImpl(): ByteArray? {
+        return try {
+            val kpg = java.security.KeyPairGenerator.getInstance("ML-KEM-768")
+            val kp = kpg.generateKeyPair()
+            mlkemPrivateKey = kp.private
+            // Raw encapsulation key is the last 1184 bytes of the DER SubjectPublicKeyInfo
+            val encoded = kp.public.encoded
+            if (encoded.size >= 1184) encoded.copyOfRange(encoded.size - 1184, encoded.size) else null
+        } catch (e: Exception) {
+            Log.d(TAG, "[Reality] ML-KEM keypair unavailable: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Decapsulates an ML-KEM-768 ciphertext on Android 15+.
+     * Returns the 32-byte shared secret, or null if unavailable.
+     */
+    private fun mlkemDecapsulate(ciphertext: ByteArray): ByteArray? {
+        val privKey = mlkemPrivateKey ?: return null
+        if (Build.VERSION.SDK_INT < 35) return null
+        return mlkemDecapsulateImpl(ciphertext, privKey)
+    }
+
+    @RequiresApi(35)
+    private fun mlkemDecapsulateImpl(ciphertext: ByteArray, privKey: java.security.PrivateKey): ByteArray? {
+        return try {
+            val kem = javax.crypto.KEM.getInstance("ML-KEM-768")
+            val decapsulator = kem.newDecapsulator(privKey)
+            decapsulator.decapsulate(ciphertext).encoded
+        } catch (e: Exception) {
+            Log.w(TAG, "[Reality] ML-KEM decapsulation failed: ${e.message}")
+            null
+        }
     }
 }

@@ -60,6 +60,7 @@ object ClashProxyParser {
     private fun parseProxy(node: JSONObject): ProxyConfiguration? {
         val proxyType = node.optString("type")
         if (proxyType == "ss") return parseShadowsocksProxy(node)
+        if (proxyType == "socks5" || proxyType == "socks") return parseSocks5Proxy(node)
         if (proxyType != "vless") return null
 
         val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
@@ -128,15 +129,23 @@ object ClashProxyParser {
             )
         }
 
-        // Build WebSocket configuration
+        // Build WebSocket / HTTPUpgrade configuration
         var wsConfig: WebSocketConfiguration? = null
+        var httpUpgradeConfig: HttpUpgradeConfiguration? = null
         if (transport == "ws") {
             var wsPath = "/"
             var wsHost = server
             val wsHeaders = mutableMapOf<String, String>()
+            var maxEarlyData = 0
+            var earlyDataHeaderName = ""
+            var isHttpUpgrade = false
 
             node.optJSONObject("ws-opts")?.let { woNode ->
                 wsPath = woNode.optString("path", "/")
+                // v2ray-http-upgrade flag: treat as HTTPUpgrade instead of WebSocket
+                isHttpUpgrade = woNode.optBoolean("v2ray-http-upgrade", false)
+                maxEarlyData = woNode.optInt("max-early-data", 0)
+                earlyDataHeaderName = woNode.optString("early-data-header-name", "")
                 woNode.optJSONObject("headers")?.let { headers ->
                     for (key in headers.keys()) {
                         val value = headers.optString(key, "")
@@ -146,8 +155,20 @@ object ClashProxyParser {
                 }
             }
 
-            wsConfig = WebSocketConfiguration(host = wsHost, path = wsPath, headers = wsHeaders)
+            if (isHttpUpgrade) {
+                httpUpgradeConfig = HttpUpgradeConfiguration(host = wsHost, path = wsPath, headers = wsHeaders)
+            } else {
+                wsConfig = WebSocketConfiguration(
+                    host = wsHost,
+                    path = wsPath,
+                    headers = wsHeaders,
+                    maxEarlyData = maxEarlyData,
+                    earlyDataHeaderName = earlyDataHeaderName.ifEmpty { "Sec-WebSocket-Protocol" }
+                )
+            }
         }
+
+        val effectiveTransport = if (httpUpgradeConfig != null) "httpupgrade" else transport
 
         return ProxyConfiguration(
             name = name,
@@ -155,12 +176,13 @@ object ClashProxyParser {
             serverPort = port,
             uuid = uuid,
             encryption = encryption,
-            transport = transport,
+            transport = effectiveTransport,
             flow = flow,
             security = security,
             tls = tlsConfig,
             reality = realityConfig,
-            websocket = wsConfig
+            websocket = wsConfig,
+            httpUpgrade = httpUpgradeConfig
         )
     }
 
@@ -206,15 +228,22 @@ object ClashProxyParser {
             )
         }
 
-        // WebSocket
+        // WebSocket / HTTPUpgrade
         var wsConfig: WebSocketConfiguration? = null
+        var httpUpgradeConfig: HttpUpgradeConfiguration? = null
         if (transport == "ws") {
             var wsPath = "/"
             var wsHost = server
             val wsHeaders = mutableMapOf<String, String>()
+            var maxEarlyData = 0
+            var earlyDataHeaderName = ""
+            var isHttpUpgrade = false
 
             node.optJSONObject("ws-opts")?.let { woNode ->
                 wsPath = woNode.optString("path", "/")
+                isHttpUpgrade = woNode.optBoolean("v2ray-http-upgrade", false)
+                maxEarlyData = woNode.optInt("max-early-data", 0)
+                earlyDataHeaderName = woNode.optString("early-data-header-name", "")
                 woNode.optJSONObject("headers")?.let { headers ->
                     for (key in headers.keys()) {
                         val value = headers.optString(key, "")
@@ -224,8 +253,20 @@ object ClashProxyParser {
                 }
             }
 
-            wsConfig = WebSocketConfiguration(host = wsHost, path = wsPath, headers = wsHeaders)
+            if (isHttpUpgrade) {
+                httpUpgradeConfig = HttpUpgradeConfiguration(host = wsHost, path = wsPath, headers = wsHeaders)
+            } else {
+                wsConfig = WebSocketConfiguration(
+                    host = wsHost,
+                    path = wsPath,
+                    headers = wsHeaders,
+                    maxEarlyData = maxEarlyData,
+                    earlyDataHeaderName = earlyDataHeaderName.ifEmpty { "Sec-WebSocket-Protocol" }
+                )
+            }
         }
+
+        val ssEffectiveTransport = if (httpUpgradeConfig != null) "httpupgrade" else transport
 
         return ProxyConfiguration(
             name = name,
@@ -233,23 +274,53 @@ object ClashProxyParser {
             serverPort = port,
             uuid = UUID.randomUUID(),
             encryption = "none",
-            transport = transport,
+            transport = ssEffectiveTransport,
             security = security,
             tls = tlsConfig,
             websocket = wsConfig,
+            httpUpgrade = httpUpgradeConfig,
             outboundProtocol = OutboundProtocol.SHADOWSOCKS,
             ssPassword = password,
             ssMethod = cipher
         )
     }
 
+    private fun parseSocks5Proxy(node: JSONObject): ProxyConfiguration? {
+        val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
+        val server = node.optString("server").takeIf { it.isNotEmpty() } ?: return null
+
+        val portInt = node.optInt("port", -1)
+        if (portInt <= 0 || portInt > UShort.MAX_VALUE.toInt()) return null
+        val port = portInt.toUShort()
+
+        // Optional username/password (Clash uses snake_case in some forks)
+        val username = node.optString("username", "").takeIf { it.isNotEmpty() }
+            ?: node.optString("user", "").takeIf { it.isNotEmpty() }
+        val password = node.optString("password", "").takeIf { it.isNotEmpty() }
+            ?: node.optString("pass", "").takeIf { it.isNotEmpty() }
+
+        return ProxyConfiguration(
+            name = name,
+            serverAddress = server,
+            serverPort = port,
+            uuid = UUID.randomUUID(), // placeholder, not used for SOCKS5
+            encryption = "none",
+            outboundProtocol = OutboundProtocol.SOCKS5,
+            socks5Username = username,
+            socks5Password = password
+        )
+    }
+
     private fun mapFingerprint(fp: String?): String = when (fp?.lowercase()) {
-        "chrome" -> TlsFingerprint.CHROME_120.raw
-        "firefox" -> TlsFingerprint.FIREFOX_120.raw
-        "safari" -> TlsFingerprint.SAFARI_16.raw
+        "chrome" -> TlsFingerprint.CHROME_133.raw
+        "firefox" -> TlsFingerprint.FIREFOX_148.raw
+        "safari" -> TlsFingerprint.SAFARI_26.raw
         "ios" -> TlsFingerprint.IOS_14.raw
-        "edge" -> TlsFingerprint.EDGE_106.raw
+        "edge" -> TlsFingerprint.EDGE_85.raw
+        "android" -> TlsFingerprint.ANDROID_11.raw
+        "qq" -> TlsFingerprint.QQ_11.raw
+        "360" -> TlsFingerprint.BROWSER_360.raw
         "random" -> TlsFingerprint.RANDOM.raw
-        else -> fp ?: TlsFingerprint.CHROME_120.raw
+        else -> fp ?: TlsFingerprint.CHROME_133.raw
     }
 }

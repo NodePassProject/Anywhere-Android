@@ -4,6 +4,7 @@ import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.protocol.naive.NaiveClient
 import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksClient
+import com.argsment.anywhere.vpn.protocol.socks5.SocksClient
 import com.argsment.anywhere.vpn.protocol.vless.VlessClient
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 
@@ -35,6 +36,7 @@ object ProxyClientFactory {
         return when (config.outboundProtocol) {
             OutboundProtocol.VLESS -> VlessClient(config, tunnel).connect(host, port, initialData)
             OutboundProtocol.SHADOWSOCKS -> ShadowsocksClient(config, tunnel).connect(host, port, initialData)
+            OutboundProtocol.SOCKS5 -> SocksClient(config, tunnel).connect(host, port, initialData)
             OutboundProtocol.NAIVE_HTTP11, OutboundProtocol.NAIVE_HTTP2, OutboundProtocol.NAIVE_HTTP3 ->
                 NaiveClient(config, tunnel).connect(host, port, initialData)
         }
@@ -58,6 +60,7 @@ object ProxyClientFactory {
         return when (config.outboundProtocol) {
             OutboundProtocol.VLESS -> VlessClient(config, tunnel).connectUDP(host, port)
             OutboundProtocol.SHADOWSOCKS -> ShadowsocksClient(config, tunnel).connectUDP(host, port)
+            OutboundProtocol.SOCKS5 -> SocksClient(config, tunnel).connectUDP(host, port)
             else -> throw IllegalArgumentException("UDP not supported for ${config.outboundProtocol.displayName}")
         }
     }

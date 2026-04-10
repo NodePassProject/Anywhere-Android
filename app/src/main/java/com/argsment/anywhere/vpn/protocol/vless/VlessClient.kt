@@ -4,6 +4,7 @@ import android.util.Log
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
+import com.argsment.anywhere.data.model.TlsVersion
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.data.model.WebSocketConfiguration

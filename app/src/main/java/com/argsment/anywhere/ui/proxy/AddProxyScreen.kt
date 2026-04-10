@@ -91,7 +91,7 @@ fun AddProxyScreen(
         if (selectedMethod == ImportMethod.LINK && linkURL.isEmpty()) {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
-            if (clip != null && (clip.startsWith("vless://") || clip.startsWith("ss://") || clip.startsWith("naive+https://") || clip.startsWith("quic://") || clip.startsWith("http://") || clip.startsWith("https://"))) {
+            if (clip != null && (clip.startsWith("vless://") || clip.startsWith("ss://") || clip.startsWith("socks5://") || clip.startsWith("socks://") || clip.startsWith("naive+https://") || clip.startsWith("quic://") || clip.startsWith("http://") || clip.startsWith("https://"))) {
                 linkURL = clip
             }
         }
@@ -199,7 +199,7 @@ fun AddProxyScreen(
                         val trimmed = linkURL.trim()
                         val isHTTP = trimmed.startsWith("http://") || trimmed.startsWith("https://")
 
-                        if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://") ||
+                        if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("socks5://") || trimmed.startsWith("socks://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://") ||
                             (isHTTP && linkType != LinkType.SUBSCRIPTION)) {
                             // Single proxy link (VLESS, Shadowsocks, NaiveProxy, QUIC,
                             // or HTTPS/HTTP2 proxy selected via the link type picker)
@@ -276,7 +276,7 @@ fun AddProxyScreen(
             onResult = { code ->
                 showQrScanner = false
                 val trimmed = code.trim()
-                if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://")) {
+                if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("socks5://") || trimmed.startsWith("socks://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://")) {
                     try {
                         val config = ProxyConfiguration.fromUrl(trimmed)
                         onImport(config)

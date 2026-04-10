@@ -170,7 +170,7 @@ object NativeBridge {
     /**
      * Derive TLS 1.3 handshake keys.
      * @param cipherSuite 0x1301 (AES-128-GCM) or 0x1302 (AES-256-GCM)
-     * @return Flat byte array: hsSecret + clientKey + clientIV(12) + serverKey + serverIV(12) + clientTrafficSecret
+     * @return Flat byte array: hsSecret + clientKey + clientIV(12) + serverKey + serverIV(12) + clientTrafficSecret + serverTrafficSecret
      */
     @JvmStatic
     external fun nativeTls13DeriveHandshakeKeys(cipherSuite: Int, sharedSecret: ByteArray, transcript: ByteArray): ByteArray?

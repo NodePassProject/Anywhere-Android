@@ -199,7 +199,7 @@ object TlsClientHelloBuilder {
         return ext(0x0033, payload.toByteArray())
     }
 
-    /** 0x4469 (17513) -- Application settings (ALPS). */
+    /** 0x4469 (17513) -- Application settings (ALPS, legacy codepoint). */
     private fun applicationSettingsExt(protocols: List<String>): ByteArray {
         val list = mutableListOf<Byte>()
         for (proto in protocols) {
@@ -211,6 +211,20 @@ object TlsClientHelloBuilder {
         payload.appendU16(list.size)
         payload.addAll(list)
         return ext(0x4469, payload.toByteArray())
+    }
+
+    /** 0x44CD -- Application settings (ALPS, new codepoint for Chrome 133+). */
+    private fun applicationSettingsNewExt(protocols: List<String>): ByteArray {
+        val list = mutableListOf<Byte>()
+        for (proto in protocols) {
+            val bytes = proto.toByteArray(Charsets.UTF_8)
+            list.add(bytes.size.toByte())
+            for (b in bytes) list.add(b)
+        }
+        val payload = mutableListOf<Byte>()
+        payload.appendU16(list.size)
+        payload.addAll(list)
+        return ext(0x44CD, payload.toByteArray())
     }
 
     /**
@@ -235,6 +249,12 @@ object TlsClientHelloBuilder {
         return ext(0xFE0D, data.toByteArray())
     }
 
+    /** 0x3374 -- Next Protocol Negotiation (legacy, 360 Browser). */
+    private fun npnExt(): ByteArray = ext(0x3374)
+
+    /** 0x754F -- Fake Channel ID (old extension, 360 Browser). */
+    private fun fakeChannelIDOldExt(): ByteArray = ext(0x754F.toUShort().toInt())
+
     /** 0xFF01 -- Renegotiation info (empty, initial handshake). */
     private fun renegotiationInfoExt(): ByteArray {
         return ext(0xFF01.toUShort().toInt(), byteArrayOf(0x00))
@@ -242,6 +262,24 @@ object TlsClientHelloBuilder {
 
     /** GREASE extension (random type, empty data). */
     private fun greaseExt(value: Int): ByteArray = ext(value)
+
+    // -- X25519MLKEM768 Hybrid Key Share --
+
+    /**
+     * Builds an X25519MLKEM768 hybrid key share for group 0x11EC.
+     *
+     * The wire layout is `mlkemEncapsulationKey(1184) || x25519PublicKey(32)` =
+     * 1216 bytes total. Both halves must be real keys: the ML-KEM encapsulation
+     * key needs a matching private key so the server's ciphertext can be
+     * decapsulated, and the X25519 key is the same one used in the standalone
+     * 0x001D entry. Without a real ML-KEM keypair this extension cannot be
+     * sent — see the `mlkemEncapsulationKey == null` branch in each fingerprint
+     * builder, which mirrors iOS's pre-iOS-26 behaviour of simply omitting the
+     * PQ key share.
+     */
+    private fun mlkem768HybridKeyShare(mlkemEncapsulationKey: ByteArray, x25519PubKey: ByteArray): ByteArray {
+        return mlkemEncapsulationKey + x25519PubKey
+    }
 
     // -- Cipher Suite Serialization --
 
@@ -359,6 +397,12 @@ object TlsClientHelloBuilder {
      * @param serverName SNI hostname.
      * @param publicKey X25519 ephemeral public key for the key_share extension.
      * @param alpn Optional ALPN override. When null, uses browser default (["h2", "http/1.1"]).
+     * @param omitPQKeyShares When true, never offer X25519MLKEM768. Used for plain TLS
+     *   ClientHellos to keep the message small (matching iOS `TLSClient`).
+     * @param mlkemEncapsulationKey 1184-byte ML-KEM-768 encapsulation key. When provided
+     *   alongside `omitPQKeyShares = false`, an X25519MLKEM768 hybrid key share is added
+     *   to fingerprints that support it. When `null` (the current default on Android),
+     *   no PQ key share is sent — matching iOS pre-26 behaviour.
      */
     fun buildRawClientHello(
         fingerprint: TlsFingerprint,
@@ -366,7 +410,9 @@ object TlsClientHelloBuilder {
         sessionId: ByteArray,
         serverName: String,
         publicKey: ByteArray,
-        alpn: List<String>? = null
+        alpn: List<String>? = null,
+        omitPQKeyShares: Boolean = false,
+        mlkemEncapsulationKey: ByteArray? = null
     ): ByteArray {
         val resolved: TlsFingerprint = if (fingerprint == TlsFingerprint.RANDOM) {
             val options = TlsFingerprint.concreteFingerprints
@@ -380,7 +426,9 @@ object TlsClientHelloBuilder {
             random = random,
             serverName = serverName,
             publicKey = publicKey,
-            alpn = alpn
+            alpn = alpn,
+            omitPQKeyShares = omitPQKeyShares,
+            mlkemEncapsulationKey = mlkemEncapsulationKey
         )
 
         return assembleClientHello(
@@ -452,9 +500,18 @@ object TlsClientHelloBuilder {
         random: ByteArray,
         serverName: String,
         publicKey: ByteArray,
-        alpn: List<String>?
+        alpn: List<String>?,
+        omitPQKeyShares: Boolean = false,
+        mlkemEncapsulationKey: ByteArray? = null
     ): FingerprintParts {
         return when (fingerprint) {
+            TlsFingerprint.CHROME_133 -> buildChrome133(random, serverName, publicKey, alpn, omitPQKeyShares, mlkemEncapsulationKey)
+            TlsFingerprint.FIREFOX_148 -> buildFirefox148(random, serverName, publicKey, alpn, omitPQKeyShares, mlkemEncapsulationKey)
+            TlsFingerprint.SAFARI_26 -> buildSafari26(random, serverName, publicKey, alpn, omitPQKeyShares, mlkemEncapsulationKey)
+            TlsFingerprint.EDGE_85 -> buildEdge85(random, serverName, publicKey, alpn)
+            TlsFingerprint.ANDROID_11 -> buildAndroid11(random, serverName, publicKey, alpn)
+            TlsFingerprint.QQ_11 -> buildQQ11(random, serverName, publicKey, alpn)
+            TlsFingerprint.BROWSER_360 -> buildBrowser360(random, serverName, publicKey, alpn)
             TlsFingerprint.CHROME_120 -> buildChrome120(random, serverName, publicKey, alpn)
             TlsFingerprint.FIREFOX_120 -> buildFirefox120(random, serverName, publicKey, alpn)
             TlsFingerprint.SAFARI_16 -> buildSafari16(random, serverName, publicKey, alpn)
@@ -462,6 +519,416 @@ object TlsClientHelloBuilder {
             TlsFingerprint.EDGE_106 -> buildEdge106(random, serverName, publicKey, alpn)
             TlsFingerprint.RANDOM -> error("random fingerprint must be resolved before dispatch")
         }
+    }
+
+    // -- Chrome 133 --
+
+    private fun buildChrome133(
+        random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?,
+        omitPQKeyShares: Boolean = false,
+        mlkemEncapsulationKey: ByteArray? = null
+    ): FingerprintParts {
+        val gCipher  = grease(random[24])
+        val gExt1    = grease(random[25])
+        val gGroup   = grease(random[26])
+        val gVersion = grease(random[28])
+        var gExt2    = grease(random[29])
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
+
+        val suites = cipherSuitesData(intArrayOf(
+            gCipher,
+            0x1301, 0x1302, 0x1303,                         // TLS 1.3
+            0xC02B, 0xC02F, 0xC02C, 0xC030,                 // ECDHE AES-GCM
+            0xCCA9, 0xCCA8,                                   // ECDHE ChaCha20
+            0xC013, 0xC014,                                   // ECDHE AES-CBC
+            0x009C, 0x009D,                                   // RSA AES-GCM
+            0x002F, 0x0035                                    // RSA AES-CBC
+        ))
+
+        val protocols = alpn ?: listOf("h2", "http/1.1")
+
+        val echPayloadLens = intArrayOf(144, 176, 208, 240)
+        val echPayloadLen = echPayloadLens[(random[30].toInt() and 0xFF) % echPayloadLens.size]
+
+        // X25519MLKEM768 hybrid key share — only sent when a real ML-KEM
+        // encapsulation key is supplied. Without one we'd have to either
+        // forge the bytes (servers that pick MLKEM would then fail key
+        // agreement) or omit the entry; iOS pre-26 omits, so we do too.
+        val groups: IntArray
+        val keyShares: List<Pair<Int, ByteArray>>
+        if (!omitPQKeyShares && mlkemEncapsulationKey != null) {
+            val hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey, publicKey)
+            groups = intArrayOf(gGroup, 0x11EC, 0x001D, 0x0017, 0x0018)
+            keyShares = listOf(
+                Pair(gGroup, byteArrayOf(0x00)),
+                Pair(0x11EC, hybrid),
+                Pair(0x001D, publicKey)
+            )
+        } else {
+            groups = intArrayOf(gGroup, 0x001D, 0x0017, 0x0018)
+            keyShares = listOf(
+                Pair(gGroup, byteArrayOf(0x00)),
+                Pair(0x001D, publicKey)
+            )
+        }
+
+        val exts = mutableListOf(
+            greaseExt(gExt1),
+            buildSNIExtension(serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt(groups),
+            ecPointFormatsExt(),
+            sessionTicketExt(),
+            alpnExt(protocols),
+            statusRequestExt(),
+            signatureAlgorithmsExt(intArrayOf(
+                0x0403, 0x0804, 0x0401,
+                0x0503, 0x0805, 0x0501,
+                0x0806, 0x0601
+            )),
+            sctExt(),
+            keyShareExt(keyShares),
+            pskKeyExchangeModesExt(),
+            supportedVersionsExt(intArrayOf(gVersion, 0x0304, 0x0303)),
+            compressCertExt(intArrayOf(0x0002)),              // Brotli
+            applicationSettingsNewExt(listOf("h2")),          // New ALPS codepoint 0x44CD
+            greaseECHExt(random, kdfId = 0x0001, aeadId = 0x0001, payloadLen = echPayloadLen),
+            greaseExt(gExt2)
+        )
+
+        shuffleChromeExtensions(exts, random)
+
+        val extensionsData = concatenateArrays(exts)
+        return FingerprintParts(suites, extensionsData, true)
+    }
+
+    // -- Firefox 148 --
+
+    private fun buildFirefox148(
+        random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?,
+        omitPQKeyShares: Boolean = false,
+        mlkemEncapsulationKey: ByteArray? = null
+    ): FingerprintParts {
+        val suites = cipherSuitesData(intArrayOf(
+            0x1301, 0x1303, 0x1302,                           // TLS 1.3 (ChaCha20 before AES-256)
+            0xC02B, 0xC02F,                                   // ECDHE AES-128-GCM
+            0xCCA9, 0xCCA8,                                   // ECDHE ChaCha20
+            0xC02C, 0xC030,                                   // ECDHE AES-256-GCM
+            0xC00A, 0xC009,                                   // ECDHE ECDSA CBC
+            0xC013, 0xC014,                                   // ECDHE RSA CBC
+            0x009C, 0x009D,                                   // RSA AES-GCM
+            0x002F, 0x0035                                    // RSA AES-CBC
+        ))
+
+        val protocols = alpn ?: listOf("h2", "http/1.1")
+        val p256PublicKey = deriveP256PublicKey(random)
+
+        val echAead = if ((random[30].toInt() and 0xFF) % 2 == 0) 0x0001 else 0x0003
+
+        // X25519MLKEM768 hybrid key share for Firefox 148. Only sent when a
+        // real ML-KEM encapsulation key is provided (matches iOS pre-26).
+        val ffGroups: IntArray
+        val ffKeyShares: List<Pair<Int, ByteArray>>
+        if (!omitPQKeyShares && mlkemEncapsulationKey != null) {
+            val hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey, publicKey)
+            ffGroups = intArrayOf(0x11EC, 0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101)
+            ffKeyShares = listOf(
+                Pair(0x11EC, hybrid),
+                Pair(0x001D, publicKey),
+                Pair(0x0017, p256PublicKey)
+            )
+        } else {
+            ffGroups = intArrayOf(0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101)
+            ffKeyShares = listOf(
+                Pair(0x001D, publicKey),
+                Pair(0x0017, p256PublicKey)
+            )
+        }
+
+        val exts = listOf(
+            buildSNIExtension(serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt(ffGroups),
+            ecPointFormatsExt(),
+            alpnExt(protocols),
+            statusRequestExt(),
+            delegatedCredentialsExt(intArrayOf(0x0403, 0x0503, 0x0603, 0x0203)),
+            sctExt(),
+            keyShareExt(ffKeyShares),
+            supportedVersionsExt(intArrayOf(0x0304, 0x0303)),
+            signatureAlgorithmsExt(intArrayOf(
+                0x0403, 0x0503, 0x0603,                       // ECDSA P256/P384/P521
+                0x0804, 0x0805, 0x0806,                       // PSS SHA256/384/512
+                0x0401, 0x0501, 0x0601,                       // PKCS1 SHA256/384/512
+                0x0203, 0x0201                                // ECDSA-SHA1, PKCS1-SHA1
+            )),
+            pskKeyExchangeModesExt(),
+            recordSizeLimitExt(0x4001),
+            compressCertExt(intArrayOf(0x0001, 0x0002, 0x0003)), // Zlib, Brotli, Zstd
+            greaseECHExt(random, kdfId = 0x0001, aeadId = echAead, payloadLen = 239)
+        )
+
+        val extensionsData = concatenateArrays(exts)
+        return FingerprintParts(suites, extensionsData, false)
+    }
+
+    // -- Safari 26 --
+
+    private fun buildSafari26(
+        random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?,
+        omitPQKeyShares: Boolean = false,
+        mlkemEncapsulationKey: ByteArray? = null
+    ): FingerprintParts {
+        val gCipher  = grease(random[24])
+        val gExt1    = grease(random[25])
+        val gGroup   = grease(random[26])
+        val gVersion = grease(random[28])
+        var gExt2    = grease(random[29])
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
+
+        val suites = cipherSuitesData(intArrayOf(
+            gCipher,
+            0x1302, 0x1303, 0x1301,                         // TLS 1.3 (AES-256 first)
+            0xC02C, 0xC02B, 0xCCA9,                         // ECDHE ECDSA
+            0xC030, 0xC02F, 0xCCA8,                         // ECDHE RSA
+            0xC00A, 0xC009,                                   // ECDHE ECDSA CBC
+            0xC014, 0xC013,                                   // ECDHE RSA CBC
+            0x009D, 0x009C,                                   // RSA GCM
+            0x0035, 0x002F,                                   // RSA CBC
+            0xC008, 0xC012, 0x000A                           // 3DES (legacy)
+        ))
+
+        val protocols = alpn ?: listOf("h2", "http/1.1")
+
+        // X25519MLKEM768 hybrid key share. Only sent when a real ML-KEM
+        // encapsulation key is provided (matches iOS pre-26).
+        val safGroups: IntArray
+        val safKeyShares: List<Pair<Int, ByteArray>>
+        if (!omitPQKeyShares && mlkemEncapsulationKey != null) {
+            val hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey, publicKey)
+            safGroups = intArrayOf(gGroup, 0x11EC, 0x001D, 0x0017, 0x0018, 0x0019)
+            safKeyShares = listOf(
+                Pair(gGroup, byteArrayOf(0x00)),
+                Pair(0x11EC, hybrid),
+                Pair(0x001D, publicKey)
+            )
+        } else {
+            safGroups = intArrayOf(gGroup, 0x001D, 0x0017, 0x0018, 0x0019)
+            safKeyShares = listOf(
+                Pair(gGroup, byteArrayOf(0x00)),
+                Pair(0x001D, publicKey)
+            )
+        }
+
+        val exts = listOf(
+            greaseExt(gExt1),
+            buildSNIExtension(serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt(safGroups),
+            ecPointFormatsExt(),
+            alpnExt(protocols),
+            statusRequestExt(),
+            signatureAlgorithmsExt(intArrayOf(
+                0x0403, 0x0804, 0x0401,
+                0x0503, 0x0805, 0x0805,                       // Intentional duplicate (real Safari)
+                0x0501,
+                0x0806, 0x0601,
+                0x0201
+            )),
+            sctExt(),
+            keyShareExt(safKeyShares),
+            pskKeyExchangeModesExt(),
+            supportedVersionsExt(intArrayOf(gVersion, 0x0304, 0x0303)),
+            compressCertExt(intArrayOf(0x0001)),              // Zlib
+            greaseExt(gExt2)
+        )
+
+        val extensionsData = concatenateArrays(exts)
+        return FingerprintParts(suites, extensionsData, true)
+    }
+
+    // -- Edge 85 --
+
+    private fun buildEdge85(
+        random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
+    ): FingerprintParts {
+        val gCipher  = grease(random[24])
+        val gExt1    = grease(random[25])
+        val gGroup   = grease(random[26])
+        val gVersion = grease(random[28])
+        var gExt2    = grease(random[29])
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
+
+        val suites = cipherSuitesData(intArrayOf(
+            gCipher,
+            0x1301, 0x1302, 0x1303,                         // TLS 1.3
+            0xC02B, 0xC02F, 0xC02C, 0xC030,                 // ECDHE AES-GCM
+            0xCCA9, 0xCCA8,                                   // ECDHE ChaCha20
+            0xC013, 0xC014,                                   // ECDHE AES-CBC
+            0x009C, 0x009D,                                   // RSA AES-GCM
+            0x002F, 0x0035                                    // RSA AES-CBC
+        ))
+
+        val protocols = alpn ?: listOf("h2", "http/1.1")
+
+        val exts = listOf(
+            greaseExt(gExt1),
+            buildSNIExtension(serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt(intArrayOf(gGroup, 0x001D, 0x0017, 0x0018)),
+            ecPointFormatsExt(),
+            sessionTicketExt(),
+            alpnExt(protocols),
+            statusRequestExt(),
+            signatureAlgorithmsExt(intArrayOf(
+                0x0403, 0x0804, 0x0401,
+                0x0503, 0x0805, 0x0501,
+                0x0806, 0x0601
+            )),
+            sctExt(),
+            keyShareExt(listOf(
+                Pair(gGroup, byteArrayOf(0x00)),
+                Pair(0x001D, publicKey)
+            )),
+            pskKeyExchangeModesExt(),
+            supportedVersionsExt(intArrayOf(gVersion, 0x0304, 0x0303, 0x0302, 0x0301)),
+            compressCertExt(intArrayOf(0x0002)),              // Brotli
+            greaseExt(gExt2)
+        )
+
+        val extensionsData = concatenateArrays(exts)
+        return FingerprintParts(suites, extensionsData, true)
+    }
+
+    // -- Android 11 (OkHttp, TLS 1.2 only) --
+
+    private fun buildAndroid11(
+        random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
+    ): FingerprintParts {
+        // No GREASE, no TLS 1.3 cipher suites, no key share
+        val suites = cipherSuitesData(intArrayOf(
+            0xC02B, 0xC02C,                                   // ECDHE ECDSA AES-GCM
+            0xCCA9,                                            // ECDHE ECDSA ChaCha20
+            0xC02F, 0xC030,                                   // ECDHE RSA AES-GCM
+            0xCCA8,                                            // ECDHE RSA ChaCha20
+            0xC013, 0xC014,                                   // ECDHE RSA CBC
+            0x009C, 0x009D,                                   // RSA AES-GCM
+            0x002F, 0x0035                                    // RSA AES-CBC
+        ))
+
+        val exts = listOf(
+            buildSNIExtension(serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt(intArrayOf(0x001D, 0x0017, 0x0018)),
+            ecPointFormatsExt(),
+            statusRequestExt(),
+            signatureAlgorithmsExt(intArrayOf(
+                0x0403, 0x0804, 0x0401,
+                0x0503, 0x0805, 0x0501,
+                0x0806, 0x0601,
+                0x0201                                        // PKCS1-SHA1
+            ))
+        )
+
+        val extensionsData = concatenateArrays(exts)
+        return FingerprintParts(suites, extensionsData, false)
+    }
+
+    // -- QQ 11 --
+
+    private fun buildQQ11(
+        random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
+    ): FingerprintParts {
+        val gCipher  = grease(random[24])
+        val gExt1    = grease(random[25])
+        val gGroup   = grease(random[26])
+        val gVersion = grease(random[28])
+        var gExt2    = grease(random[29])
+        if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
+
+        val suites = cipherSuitesData(intArrayOf(
+            gCipher,
+            0x1301, 0x1302, 0x1303,                         // TLS 1.3
+            0xC02B, 0xC02F, 0xC02C, 0xC030,                 // ECDHE AES-GCM
+            0xCCA9, 0xCCA8,                                   // ECDHE ChaCha20
+            0xC013, 0xC014,                                   // ECDHE AES-CBC
+            0x009C, 0x009D,                                   // RSA AES-GCM
+            0x002F, 0x0035                                    // RSA AES-CBC
+        ))
+
+        val protocols = alpn ?: listOf("h2", "http/1.1")
+
+        val exts = listOf(
+            greaseExt(gExt1),
+            buildSNIExtension(serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt(intArrayOf(gGroup, 0x001D, 0x0017, 0x0018)),
+            ecPointFormatsExt(),
+            sessionTicketExt(),
+            alpnExt(protocols),
+            statusRequestExt(),
+            signatureAlgorithmsExt(intArrayOf(
+                0x0403, 0x0804, 0x0401,
+                0x0503, 0x0805, 0x0501,
+                0x0806, 0x0601
+            )),
+            sctExt(),
+            keyShareExt(listOf(
+                Pair(gGroup, byteArrayOf(0x00)),
+                Pair(0x001D, publicKey)
+            )),
+            pskKeyExchangeModesExt(),
+            supportedVersionsExt(intArrayOf(gVersion, 0x0304, 0x0303, 0x0302, 0x0301)),
+            compressCertExt(intArrayOf(0x0002)),              // Brotli
+            applicationSettingsExt(listOf("h2")),             // Old ALPS codepoint 0x4469
+            greaseExt(gExt2)
+        )
+
+        val extensionsData = concatenateArrays(exts)
+        return FingerprintParts(suites, extensionsData, true)
+    }
+
+    // -- 360 Browser 7.5 (Legacy TLS 1.2 only) --
+
+    private fun buildBrowser360(
+        random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
+    ): FingerprintParts {
+        // Legacy cipher suites, no TLS 1.3, no GREASE
+        val suites = cipherSuitesData(intArrayOf(
+            0xC00A, 0xC014, 0x0039, 0x006B, 0x0035, 0x003D,  // AES-256 variants
+            0xC007, 0xC009, 0xC023,                           // ECDHE ECDSA (RC4, AES-128)
+            0xC011, 0xC013, 0xC027,                           // ECDHE RSA
+            0x0033, 0x0067, 0x0032,                           // DHE RSA/DSS
+            0x0005, 0x0004,                                    // RSA RC4
+            0x002F, 0x003C,                                   // RSA AES-128 CBC
+            0x000A                                            // 3DES
+        ))
+
+        val exts = listOf(
+            buildSNIExtension(serverName),
+            renegotiationInfoExt(),
+            supportedGroupsExt(intArrayOf(0x0017, 0x0018, 0x0019)),  // P256, P384, P521
+            ecPointFormatsExt(),
+            sessionTicketExt(),
+            npnExt(),                                         // Next Protocol Negotiation (legacy)
+            alpnExt(listOf("spdy/2", "spdy/3", "spdy/3.1", "http/1.1")),
+            fakeChannelIDOldExt(),                            // Channel ID (old)
+            statusRequestExt(),
+            signatureAlgorithmsExt(intArrayOf(
+                0x0401, 0x0501, 0x0201,                       // PKCS1 SHA256/384/SHA1
+                0x0403, 0x0503, 0x0203,                       // ECDSA SHA256/384/SHA1
+                0x0402, 0x0202                                // SHA512/SHA1
+            ))
+        )
+
+        val extensionsData = concatenateArrays(exts)
+        return FingerprintParts(suites, extensionsData, false)
     }
 
     // -- Chrome 120 --

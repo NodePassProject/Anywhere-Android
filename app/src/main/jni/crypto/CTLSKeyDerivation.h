@@ -28,6 +28,7 @@
 /// @param out_server_key Output: server handshake key (keyLen bytes: 16 or 32)
 /// @param out_server_iv Output: server handshake IV (12 bytes)
 /// @param out_client_traffic_secret Output: client handshake traffic secret (hashLen bytes)
+/// @param out_server_traffic_secret Output: server handshake traffic secret (hashLen bytes)
 /// @return 0 on success, -1 on error
 int tls13_derive_handshake_keys(
     uint16_t cipher_suite,
@@ -38,7 +39,8 @@ int tls13_derive_handshake_keys(
     uint8_t *out_client_iv,
     uint8_t *out_server_key,
     uint8_t *out_server_iv,
-    uint8_t *out_client_traffic_secret);
+    uint8_t *out_client_traffic_secret,
+    uint8_t *out_server_traffic_secret);
 
 /// Derive TLS 1.3 application keys from handshake secret + full transcript.
 /// @param cipher_suite 0x1301 or 0x1302

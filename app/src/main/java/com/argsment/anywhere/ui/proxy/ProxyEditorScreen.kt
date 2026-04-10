@@ -45,6 +45,7 @@ import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.data.model.TlsFingerprint
+import com.argsment.anywhere.data.model.TlsVersion
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.WebSocketConfiguration
 import com.argsment.anywhere.data.model.XHttpConfiguration
@@ -84,11 +85,14 @@ fun ProxyEditorScreen(
     var xhttpHost by remember { mutableStateOf("") }
     var xhttpPath by remember { mutableStateOf("/") }
     var xhttpMode by remember { mutableStateOf("auto") }
+    var xhttpExtra by remember { mutableStateOf("") }
 
     // TLS fields
     var tlsSNI by remember { mutableStateOf("") }
     var tlsALPN by remember { mutableStateOf("") }
     var tlsAllowInsecure by remember { mutableStateOf(false) }
+    var tlsMinVersion by remember { mutableStateOf<TlsVersion?>(null) }
+    var tlsMaxVersion by remember { mutableStateOf<TlsVersion?>(null) }
 
     // Mux + XUDP
     var muxEnabled by remember { mutableStateOf(true) }
@@ -98,7 +102,7 @@ fun ProxyEditorScreen(
     var sni by remember { mutableStateOf("") }
     var publicKey by remember { mutableStateOf("") }
     var shortId by remember { mutableStateOf("") }
-    var fingerprint by remember { mutableStateOf(TlsFingerprint.CHROME_120) }
+    var fingerprint by remember { mutableStateOf(TlsFingerprint.CHROME_133) }
 
     // Shadowsocks fields
     var ssPassword by remember { mutableStateOf("") }
@@ -108,7 +112,12 @@ fun ProxyEditorScreen(
     var naiveUsername by remember { mutableStateOf("") }
     var naivePassword by remember { mutableStateOf("") }
 
+    // SOCKS5 fields
+    var socks5Username by remember { mutableStateOf("") }
+    var socks5Password by remember { mutableStateOf("") }
+
     val isShadowsocks = selectedProtocol == OutboundProtocol.SHADOWSOCKS
+    val isSocks5 = selectedProtocol == OutboundProtocol.SOCKS5
     val isNaive = selectedProtocol.isNaive
     val isReality = security == "reality"
     val isTLS = security == "tls"
@@ -119,6 +128,7 @@ fun ProxyEditorScreen(
             when {
                 isNaive -> naiveUsername.isNotEmpty() && naivePassword.isNotEmpty()
                 isShadowsocks -> ssPassword.isNotEmpty()
+                isSocks5 -> true  // SOCKS5 username/password are optional
                 else -> runCatching { UUID.fromString(uuid) }.isSuccess &&
                         (!isReality || (sni.isNotEmpty() && publicKey.isNotEmpty()))
             }
@@ -146,6 +156,7 @@ fun ProxyEditorScreen(
                 xhttpHost = it.host
                 xhttpPath = it.path
                 xhttpMode = it.mode.raw
+                xhttpExtra = it.toExtraJson()
             }
             muxEnabled = config.muxEnabled
             xudpEnabled = config.xudpEnabled
@@ -154,6 +165,8 @@ fun ProxyEditorScreen(
                 tlsALPN = it.alpn?.joinToString(",") ?: ""
                 tlsAllowInsecure = it.allowInsecure
                 fingerprint = it.fingerprint
+                tlsMinVersion = it.minVersion
+                tlsMaxVersion = it.maxVersion
             }
             config.reality?.let {
                 sni = it.serverName
@@ -165,6 +178,8 @@ fun ProxyEditorScreen(
             ssMethod = config.ssMethod ?: "aes-128-gcm"
             naiveUsername = config.naiveUsername ?: ""
             naivePassword = config.naivePassword ?: ""
+            socks5Username = config.socks5Username ?: ""
+            socks5Password = config.socks5Password ?: ""
         }
     }
 
@@ -185,7 +200,7 @@ fun ProxyEditorScreen(
                 actions = {
                     IconButton(onClick = {
                         val port = serverPort.toUShortOrNull() ?: return@IconButton
-                        val parsedUUID = if (isShadowsocks || isNaive) {
+                        val parsedUUID = if (isShadowsocks || isNaive || isSocks5) {
                             configuration?.uuid ?: UUID.randomUUID()
                         } else {
                             runCatching { UUID.fromString(uuid) }.getOrNull() ?: return@IconButton
@@ -199,12 +214,14 @@ fun ProxyEditorScreen(
                                 serverName = resolvedSNI,
                                 alpn = alpn,
                                 allowInsecure = tlsAllowInsecure,
-                                fingerprint = fingerprint
+                                fingerprint = fingerprint,
+                                minVersion = tlsMinVersion,
+                                maxVersion = tlsMaxVersion
                             )
                         }
 
                         var realityConfiguration: RealityConfiguration? = null
-                        if (isReality && !isNaive && !isShadowsocks) {
+                        if (isReality && !isNaive && !isShadowsocks && !isSocks5) {
                             val pk = publicKey.base64UrlToByteArrayOrNull() ?: return@IconButton
                             val sid = shortId.hexToByteArrayOrNull() ?: byteArrayOf()
                             realityConfiguration = RealityConfiguration(
@@ -216,22 +233,24 @@ fun ProxyEditorScreen(
                         }
 
                         var wsConfiguration: WebSocketConfiguration? = null
-                        if (transport == "ws" && !isNaive) {
+                        if (transport == "ws" && !isNaive && !isSocks5) {
                             val host = wsHost.ifEmpty { serverAddress }
                             wsConfiguration = WebSocketConfiguration(host = host, path = wsPath)
                         }
 
                         var httpUpgradeConfiguration: HttpUpgradeConfiguration? = null
-                        if (transport == "httpupgrade" && !isNaive) {
+                        if (transport == "httpupgrade" && !isNaive && !isSocks5) {
                             val host = httpUpgradeHost.ifEmpty { serverAddress }
                             httpUpgradeConfiguration = HttpUpgradeConfiguration(host = host, path = httpUpgradePath)
                         }
 
                         var xhttpConfiguration: XHttpConfiguration? = null
-                        if (transport == "xhttp" && !isNaive) {
+                        if (transport == "xhttp" && !isNaive && !isSocks5) {
                             val host = xhttpHost.ifEmpty { serverAddress }
                             val mode = XHttpMode.fromRaw(xhttpMode)
-                            xhttpConfiguration = XHttpConfiguration(host = host, path = xhttpPath, mode = mode)
+                            xhttpConfiguration = XHttpConfiguration.fromExtraJson(
+                                host = host, path = xhttpPath, mode = mode, extraJson = xhttpExtra
+                            )
                         }
 
                         val bareAddress = if (serverAddress.startsWith("[") && serverAddress.endsWith("]"))
@@ -250,24 +269,29 @@ fun ProxyEditorScreen(
                             serverAddress = bareAddress,
                             serverPort = port,
                             uuid = parsedUUID,
-                            encryption = if (isShadowsocks || isNaive) "none" else encryption,
-                            transport = if (isNaive) "tcp" else transport,
-                            flow = if (isShadowsocks || isNaive) null else flow.ifEmpty { null },
+                            encryption = if (isShadowsocks || isNaive || isSocks5) "none" else encryption,
+                            transport = if (isNaive || isSocks5) "tcp" else transport,
+                            flow = if (isShadowsocks || isNaive || isSocks5) null else flow.ifEmpty { null },
                             security = if (isNaive) "none" else security,
                             tls = tlsConfiguration,
                             reality = realityConfiguration,
                             websocket = wsConfiguration,
                             httpUpgrade = httpUpgradeConfiguration,
                             xhttp = xhttpConfiguration,
-                            muxEnabled = if (isShadowsocks || isNaive) false else muxEnabled,
-                            xudpEnabled = if (isShadowsocks || isNaive) false else xudpEnabled,
+                            muxEnabled = if (isShadowsocks || isNaive || isSocks5) false else muxEnabled,
+                            xudpEnabled = if (isShadowsocks || isNaive || isSocks5) false else xudpEnabled,
                             subscriptionId = configuration?.subscriptionId,
                             outboundProtocol = selectedProtocol,
                             ssPassword = if (isShadowsocks) ssPassword else null,
                             ssMethod = if (isShadowsocks) ssMethod else null,
+                            socks5Username = if (isSocks5) socks5Username.ifEmpty { null } else null,
+                            socks5Password = if (isSocks5) socks5Password.ifEmpty { null } else null,
                             naiveUsername = if (isNaive) naiveUsername else null,
                             naivePassword = if (isNaive) naivePassword else null,
-                            naiveProtocol = naiveProto
+                            naiveProtocol = naiveProto,
+                            // Preserve the original testseed — matches iOS which reads
+                            // self.configuration?.testseed rather than resetting to default.
+                            testseed = configuration?.testseed ?: listOf(900u, 500u, 900u, 256u)
                         )
                         onSave(config)
                     }, enabled = isValid) {
@@ -302,13 +326,14 @@ fun ProxyEditorScreen(
                 options = listOf(
                     OutboundProtocol.VLESS.name to "VLESS",
                     OutboundProtocol.SHADOWSOCKS.name to "Shadowsocks",
+                    OutboundProtocol.SOCKS5.name to "SOCKS5",
                     OutboundProtocol.NAIVE_HTTP11.name to "HTTPS (HTTP/1.1)",
                     OutboundProtocol.NAIVE_HTTP2.name to "HTTP2",
                     OutboundProtocol.NAIVE_HTTP3.name to "QUIC (${stringResource(R.string.not_yet_supported)})"
                 ),
                 onSelect = { value ->
                     selectedProtocol = OutboundProtocol.valueOf(value)
-                    if (isShadowsocks || selectedProtocol.isNaive) {
+                    if (isShadowsocks || isSocks5 || selectedProtocol.isNaive) {
                         flow = ""
                         if (security == "reality") security = "none"
                     }
@@ -346,6 +371,22 @@ fun ProxyEditorScreen(
                 OutlinedTextField(
                     value = naivePassword,
                     onValueChange = { naivePassword = it },
+                    label = { Text(stringResource(R.string.password)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation()
+                )
+            } else if (isSocks5) {
+                OutlinedTextField(
+                    value = socks5Username,
+                    onValueChange = { socks5Username = it },
+                    label = { Text(stringResource(R.string.username)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = socks5Password,
+                    onValueChange = { socks5Password = it },
                     label = { Text(stringResource(R.string.password)) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
@@ -391,8 +432,8 @@ fun ProxyEditorScreen(
                 )
             }
 
-            // Transport section (not for Naive)
-            if (!isNaive) {
+            // Transport section (not for Naive or SOCKS5)
+            if (!isNaive && !isSocks5) {
                 SectionHeader(stringResource(R.string.transport))
                 DropdownField(
                     label = stringResource(R.string.transport),
@@ -464,9 +505,18 @@ fun ProxyEditorScreen(
                         options = listOf(
                             "auto" to stringResource(R.string.auto),
                             "packet-up" to "Packet Up",
+                            "stream-up" to "Stream Up",
                             "stream-one" to "Stream One"
                         ),
                         onSelect = { xhttpMode = it }
+                    )
+                    OutlinedTextField(
+                        value = xhttpExtra,
+                        onValueChange = { xhttpExtra = it },
+                        label = { Text("Extra (JSON)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        maxLines = 6
                     )
                 }
 
@@ -544,6 +594,30 @@ fun ProxyEditorScreen(
                     FingerprintDropdown(
                         selected = fingerprint,
                         onSelect = { fingerprint = it }
+                    )
+                    DropdownField(
+                        label = "Min Version",
+                        selectedValue = tlsMinVersion?.name ?: "ANY",
+                        options = listOf(
+                            "ANY" to "Any",
+                            TlsVersion.TLS12.name to "TLS 1.2",
+                            TlsVersion.TLS13.name to "TLS 1.3"
+                        ),
+                        onSelect = { value ->
+                            tlsMinVersion = if (value == "ANY") null else TlsVersion.valueOf(value)
+                        }
+                    )
+                    DropdownField(
+                        label = "Max Version",
+                        selectedValue = tlsMaxVersion?.name ?: "ANY",
+                        options = listOf(
+                            "ANY" to "Any",
+                            TlsVersion.TLS12.name to "TLS 1.2",
+                            TlsVersion.TLS13.name to "TLS 1.3"
+                        ),
+                        onSelect = { value ->
+                            tlsMaxVersion = if (value == "ANY") null else TlsVersion.valueOf(value)
+                        }
                     )
                 }
 

@@ -7,7 +7,10 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
@@ -32,6 +35,15 @@ class AnywhereVpnService : VpnService() {
     private var tunFd: ParcelFileDescriptor? = null
     private var currentConfig: ProxyConfiguration? = null
     private val json = Json { ignoreUnknownKeys = true }
+
+    // Tracks the most recent underlying (non-VPN) network so we can detect
+    // path changes (e.g. Wi-Fi → Cellular) and restart the lwIP stack to
+    // replace stale connections bound to the old interface. Mirrors iOS
+    // PacketTunnelProvider's NWPathMonitor logic.
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastUnderlyingNetwork: Network? = null
+    private var lastUnderlyingTransports: Int = 0
+    private var lastNetworkAvailable: Boolean = false
 
     // Binder for activity communication
     private val binder = LocalBinder()
@@ -198,9 +210,14 @@ class AnywhereVpnService : VpnService() {
         }
 
         stack.start(fd, effectiveConfig, ipv6Connections, ipv6Dns)
+
+        // Begin observing the underlying physical network so we can restart
+        // the stack when the user roams between Wi-Fi and Cellular.
+        startNetworkMonitoring()
     }
 
     private fun stopVpn() {
+        stopNetworkMonitoring()
         SocketProtector.clearProtector()
         DnsCache.setUnderlyingNetwork(null)
 
@@ -292,8 +309,6 @@ class AnywhereVpnService : VpnService() {
         val builder = Builder()
             // TUN IP
             .addAddress("10.8.0.2", 24)
-            // Default route: all traffic
-            .addRoute("0.0.0.0", 0)
             // DNS servers
             .addDnsServer("1.1.1.1")
             .addDnsServer("1.0.0.1")
@@ -325,13 +340,18 @@ class AnywhereVpnService : VpnService() {
             builder.addDnsServer("2606:4700:4700::1001")
         }
 
-        // On Android, bypass is achieved by:
-        // 1. Route 0.0.0.0/0 captures all traffic into TUN
-        // 2. Protecting outbound proxy sockets via VpnService.protect()
-        // Private-range bypass routes are not needed because our protocol sockets
-        // are protected and lwIP + domain routing handles bypass decisions internally.
-        // The server IP does NOT need a special route — protect() on the proxy
-        // socket prevents the routing loop.
+        // Apply IPv4 bypass (exclude private/local ranges) via split routing.
+        // Android has no addExcludedRoute API, so we replace the catch-all 0.0.0.0/0
+        // with the complement routes that cover all public IP space. This allows
+        // LAN devices (printers, NAS, local servers) to be reachable without
+        // going through the VPN tunnel — matching iOS's excludedRoutes behaviour.
+        //
+        // The route list below covers 0.0.0.0/0 minus:
+        //   10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        // (standard private / CGNAT / loopback ranges from BYPASS_IPV4_ROUTES).
+        for (route in PUBLIC_IPV4_ROUTES) {
+            builder.addRoute(route.address, route.prefixLength)
+        }
 
         // Session name for system UI
         builder.setSession("Anywhere VPN")
@@ -388,7 +408,7 @@ class AnywhereVpnService : VpnService() {
      * always resolves through the physical network.
      */
     @Suppress("DEPRECATION")
-    private fun findUnderlyingNetwork(): android.net.Network? {
+    private fun findUnderlyingNetwork(): Network? {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return null
         for (network in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(network) ?: continue
@@ -396,6 +416,141 @@ class AnywhereVpnService : VpnService() {
             if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return network
         }
         return null
+    }
+
+    // =========================================================================
+    // Network Path Monitoring
+    // =========================================================================
+
+    /**
+     * Begins observing the system's underlying (non-VPN) network so we can
+     * detect interface switches (Wi-Fi ↔ Cellular) and trigger a stack restart.
+     * Mirrors iOS PacketTunnelProvider.startMonitoringPath().
+     */
+    private fun startNetworkMonitoring() {
+        if (networkCallback != null) return
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+
+        lastUnderlyingNetwork = null
+        lastUnderlyingTransports = 0
+        lastNetworkAvailable = false
+
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .removeTransportType(NetworkCapabilities.TRANSPORT_VPN)
+            .build()
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                handlePathUpdate(network, available = true)
+            }
+
+            override fun onLost(network: Network) {
+                if (network == lastUnderlyingNetwork) {
+                    handlePathUpdate(null, available = false)
+                }
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                handlePathUpdate(network, available = true, caps = caps)
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                // Underlying interface DNS / route may have changed; refresh DnsCache
+                // so subsequent resolutions go through the new interface.
+                if (network == lastUnderlyingNetwork) {
+                    DnsCache.setUnderlyingNetwork(network)
+                }
+            }
+        }
+
+        try {
+            cm.registerNetworkCallback(request, callback)
+            networkCallback = callback
+        } catch (e: SecurityException) {
+            Log.w(TAG, "[VPN] Failed to register network callback: ${e.message}")
+        }
+    }
+
+    private fun stopNetworkMonitoring() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        lastUnderlyingNetwork = null
+        lastUnderlyingTransports = 0
+        lastNetworkAvailable = false
+        try {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
+        } catch (_: IllegalArgumentException) {
+            // Already unregistered
+        }
+    }
+
+    /**
+     * Decides whether a network update represents a meaningful change that
+     * requires restarting the lwIP stack. Mirrors iOS handlePathUpdate(): we
+     * compare the current snapshot to the previous one and trigger a restart
+     * only when the underlying interface (or its transport set) actually
+     * changed, or when connectivity is restored after being lost.
+     */
+    private fun handlePathUpdate(network: Network?, available: Boolean, caps: NetworkCapabilities? = null) {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+
+        if (!available || network == null) {
+            if (lastNetworkAvailable) {
+                Log.w(TAG, "[VPN] Network path unavailable; active connections interrupted")
+                lastNetworkAvailable = false
+                lastUnderlyingNetwork = null
+                lastUnderlyingTransports = 0
+                lwipStack?.handleNetworkPathChange("network path unavailable")
+            }
+            return
+        }
+
+        val networkCaps = caps ?: cm.getNetworkCapabilities(network) ?: return
+        if (networkCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return
+        if (!networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) return
+
+        val transports = transportBitmask(networkCaps)
+        val previousNetwork = lastUnderlyingNetwork
+        val previousTransports = lastUnderlyingTransports
+        val wasAvailable = lastNetworkAvailable
+
+        lastUnderlyingNetwork = network
+        lastUnderlyingTransports = transports
+        lastNetworkAvailable = true
+
+        // Refresh DnsCache so domain resolution always goes through the new
+        // physical interface (matches iOS getaddrinfo behavior in NE).
+        DnsCache.setUnderlyingNetwork(network)
+
+        if (!wasAvailable) {
+            Log.i(TAG, "[VPN] Network path restored: ${transportSummary(transports)}; restarting connections")
+            lwipStack?.handleNetworkPathChange("network path restored")
+            return
+        }
+
+        if (previousNetwork != network || previousTransports != transports) {
+            Log.w(TAG, "[VPN] Network path changed to ${transportSummary(transports)}; restarting connections")
+            lwipStack?.handleNetworkPathChange("network interface change")
+        }
+    }
+
+    private fun transportBitmask(caps: NetworkCapabilities): Int {
+        var mask = 0
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) mask = mask or 0x1
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) mask = mask or 0x2
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) mask = mask or 0x4
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) mask = mask or 0x8
+        return mask
+    }
+
+    private fun transportSummary(mask: Int): String {
+        val parts = mutableListOf<String>()
+        if (mask and 0x1 != 0) parts.add("Wi-Fi")
+        if (mask and 0x2 != 0) parts.add("Cellular")
+        if (mask and 0x4 != 0) parts.add("Ethernet")
+        if (mask and 0x8 != 0) parts.add("Bluetooth")
+        return if (parts.isEmpty()) "unknown" else parts.joinToString("+")
     }
 
     // =========================================================================
@@ -475,6 +630,8 @@ class AnywhereVpnService : VpnService() {
         const val ACTION_SWITCH_CONFIG = "com.argsment.anywhere.SWITCH_CONFIG"
         const val EXTRA_CONFIG = "config"
 
+        // Private/local IPv4 ranges excluded from the VPN tunnel.
+        // Mirrors iOS PacketTunnelProvider excludedRoutes.
         private val BYPASS_IPV4_ROUTES = listOf(
             BypassRoute("127.0.0.0", 8),      // loopback
             BypassRoute("10.0.0.0", 8),        // private
@@ -491,6 +648,58 @@ class AnywhereVpnService : VpnService() {
         private val BYPASS_IPV6_ROUTES = listOf(
             BypassRoute("fc00::", 7),   // unique-local
             BypassRoute("fe80::", 10),  // link-local
+        )
+
+        // Pre-computed split routes covering 0.0.0.0/0 minus BYPASS_IPV4_ROUTES.
+        // Android has no addExcludedRoute API, so we use split routing to let
+        // private/CGNAT/loopback traffic bypass the tunnel. This matches the iOS
+        // approach of using excludedRoutes on the TUN interface.
+        //
+        // Excluded: 10.0.0.0/8, 100.64.0.0/10 (CGNAT), 127.0.0.0/8 (loopback),
+        //           172.16.0.0/12, 192.168.0.0/16
+        // Note: 240.0.0.0/4 (reserved) and 224.0.0.0/4 (multicast) intentionally
+        // not routed through VPN.
+        private val PUBLIC_IPV4_ROUTES = listOf(
+            BypassRoute("0.0.0.0", 5),         // 0.0.0.0   – 7.255.255.255
+            BypassRoute("8.0.0.0", 7),          // 8.0.0.0   – 9.255.255.255  (excl 10.0.0.0/8)
+            BypassRoute("11.0.0.0", 8),         // 11.0.0.0  – 11.255.255.255
+            BypassRoute("12.0.0.0", 6),         // 12.0.0.0  – 15.255.255.255
+            BypassRoute("16.0.0.0", 4),         // 16.0.0.0  – 31.255.255.255
+            BypassRoute("32.0.0.0", 3),         // 32.0.0.0  – 63.255.255.255
+            BypassRoute("64.0.0.0", 3),         // 64.0.0.0  – 95.255.255.255
+            BypassRoute("96.0.0.0", 6),         // 96.0.0.0  – 99.255.255.255
+            BypassRoute("100.0.0.0", 10),       // 100.0.0.0 – 100.63.255.255 (before CGNAT)
+            BypassRoute("100.128.0.0", 9),      // 100.128.0.0 – 100.255.255.255 (after CGNAT)
+            BypassRoute("101.0.0.0", 8),        // 101.x.x.x
+            BypassRoute("102.0.0.0", 7),        // 102.0.0.0 – 103.255.255.255
+            BypassRoute("104.0.0.0", 5),        // 104.0.0.0 – 111.255.255.255
+            BypassRoute("112.0.0.0", 5),        // 112.0.0.0 – 119.255.255.255
+            BypassRoute("120.0.0.0", 6),        // 120.0.0.0 – 123.255.255.255
+            BypassRoute("124.0.0.0", 7),        // 124.0.0.0 – 125.255.255.255
+            BypassRoute("126.0.0.0", 8),        // 126.x.x.x               (excl 127.0.0.0/8)
+            BypassRoute("128.0.0.0", 3),        // 128.0.0.0 – 159.255.255.255
+            BypassRoute("160.0.0.0", 5),        // 160.0.0.0 – 167.255.255.255
+            BypassRoute("168.0.0.0", 6),        // 168.0.0.0 – 171.255.255.255
+            BypassRoute("172.0.0.0", 12),       // 172.0.0.0 – 172.15.255.255 (before 172.16/12)
+            BypassRoute("172.32.0.0", 11),      // 172.32.0.0 – 172.63.255.255
+            BypassRoute("172.64.0.0", 10),      // 172.64.0.0 – 172.127.255.255
+            BypassRoute("172.128.0.0", 9),      // 172.128.0.0 – 172.255.255.255
+            BypassRoute("173.0.0.0", 8),        // 173.x.x.x
+            BypassRoute("174.0.0.0", 7),        // 174.0.0.0 – 175.255.255.255
+            BypassRoute("176.0.0.0", 4),        // 176.0.0.0 – 191.255.255.255
+            BypassRoute("192.0.0.0", 9),        // 192.0.0.0 – 192.127.255.255
+            BypassRoute("192.128.0.0", 11),     // 192.128.0.0 – 192.159.255.255
+            BypassRoute("192.160.0.0", 13),     // 192.160.0.0 – 192.167.255.255
+            BypassRoute("192.169.0.0", 16),     // 192.169.x.x             (after 192.168/16)
+            BypassRoute("192.170.0.0", 15),     // 192.170.0.0 – 192.171.255.255
+            BypassRoute("192.172.0.0", 14),     // 192.172.0.0 – 192.175.255.255
+            BypassRoute("192.176.0.0", 12),     // 192.176.0.0 – 192.191.255.255
+            BypassRoute("192.192.0.0", 10),     // 192.192.0.0 – 192.255.255.255
+            BypassRoute("193.0.0.0", 8),        // 193.x.x.x
+            BypassRoute("194.0.0.0", 7),        // 194.0.0.0 – 195.255.255.255
+            BypassRoute("196.0.0.0", 6),        // 196.0.0.0 – 199.255.255.255
+            BypassRoute("200.0.0.0", 5),        // 200.0.0.0 – 207.255.255.255
+            BypassRoute("208.0.0.0", 4),        // 208.0.0.0 – 223.255.255.255
         )
     }
 }

@@ -49,17 +49,11 @@ class WebSocketConnection private constructor(
 
         /**
          * Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
-         * Uses a fixed base version (Chrome 144, released 2026-01-13) and advances
-         * by one version every ~35 days (midpoint of Xray-core's 25-45 day range).
+         * Delegates to the shared [com.argsment.anywhere.vpn.protocol.ProxyUserAgent]
+         * so all transports send the same UA on a given day.
          */
-        val chromeUserAgent: String by lazy {
-            val baseVersion = 144
-            // Base date: 2026-01-13
-            val baseDateMs = 1768348800000L // 2026-01-13 00:00:00 UTC in milliseconds
-            val daysSinceBase = maxOf(0, ((System.currentTimeMillis() - baseDateMs) / 86400000L).toInt())
-            val version = baseVersion + daysSinceBase / 35
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version.0.0.0 Safari/537.36"
-        }
+        val chromeUserAgent: String
+            get() = com.argsment.anywhere.vpn.protocol.ProxyUserAgent.chrome
     }
 
     // =========================================================================

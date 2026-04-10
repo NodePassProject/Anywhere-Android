@@ -38,13 +38,20 @@ class MuxSession(
     suspend fun send(data: ByteArray) {
         if (closed) throw ProxyError.ConnectionFailed("Mux session closed")
 
-        val frame = if (!firstFrameSent) {
+        val isFirst = !firstFrameSent
+        val frame = if (isFirst) {
             firstFrameSent = true
             encodeNewFrameWithData(data)
         } else {
             encodeKeepFrame(data)
         }
-        client.writeFrame(frame)
+        try {
+            client.writeFrame(frame)
+        } catch (e: Exception) {
+            // Reset firstFrameSent on failure so retry sends New frame (matching iOS)
+            if (isFirst) firstFrameSent = false
+            throw e
+        }
     }
 
     /**
@@ -131,10 +138,23 @@ class MuxSession(
 
     /**
      * Delivers a close event to this session.
+     * Sends a best-effort End frame back to acknowledge the close, matching
+     * iOS MuxSession.deinit() which sends an End frame on deallocation.
      */
     fun deliverClose() {
         if (closed) return
         closed = true
+
+        // Best-effort End frame — mirrors iOS deinit best-effort send.
+        val metadata = MuxFrameMetadata(
+            sessionID = sessionID,
+            status = MuxSessionStatus.END,
+            option = 0
+        )
+        val frame = encodeMuxFrame(metadata = metadata, payload = null)
+        client.writeFrameAsync(frame)
+        client.removeSession(sessionID)
+
         closeHandler?.invoke()
     }
 }

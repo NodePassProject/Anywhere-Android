@@ -64,6 +64,9 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         private set
     var encryptedDnsServer: String = ""
         private set
+    /** Proxy mode: "global" sends all traffic through proxy, "rule" applies routing rules. */
+    var proxyMode: String = "rule"
+        private set
     private var running = false
     @Volatile
     private var tunFdSwapped = false
@@ -71,6 +74,11 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     // Timers
     private var timeoutTimer: ScheduledFuture<*>? = null
     private var udpCleanupTimer: ScheduledFuture<*>? = null
+
+    // Restart throttling for handleNetworkPathChange (matches iOS 1s cooldown)
+    private var lastRestartNanos: Long = 0
+    private var deferredRestart: ScheduledFuture<*>? = null
+    private val restartThrottleNanos: Long = 1_000_000_000L // 1 second
 
     /** GeoIP database for country-based bypass (loaded once, reused). */
     private var geoIpDatabase: GeoIpDatabase? = null
@@ -134,7 +142,8 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             "bypassCountryCode",
             "encryptedDnsEnabled",
             "encryptedDnsProtocol",
-            "encryptedDnsServer" -> handleSettingsChanged()
+            "encryptedDnsServer",
+            "proxyMode" -> handleSettingsChanged()
             "routingChanged" -> handleRoutingChanged()
         }
     }
@@ -146,6 +155,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
      *  then falls back to GeoIP country-based bypass. */
     fun shouldBypass(host: String): Boolean {
         if (isProxyServerAddress(host)) return true
+        if (proxyMode == "global") return false
         if (bypassCountry == 0) return false
         return geoIpDatabase?.lookup(host) == bypassCountry
     }
@@ -346,6 +356,44 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         lwipExecutor.shutdown()
     }
 
+    /**
+     * Tears down all active connections and re-creates them through the current
+     * configuration. Called when the network path changes significantly
+     * (interface switch, restored from unavailable, long sleep) so that stale
+     * connections bound to the old interface are replaced immediately.
+     *
+     * Mirrors iOS LWIPStack.handleNetworkPathChange(). Throttled to at most one
+     * restart per second; bursty path changes (e.g. flapping) collapse into a
+     * single deferred restart.
+     */
+    fun handleNetworkPathChange(summary: String) {
+        lwipExecutor.execute {
+            if (!running) return@execute
+            val config = configuration ?: return@execute
+
+            val now = System.nanoTime()
+            val elapsed = now - lastRestartNanos
+            if (elapsed < restartThrottleNanos) {
+                deferredRestart?.cancel(false)
+                val delayMs = (restartThrottleNanos - elapsed) / 1_000_000L
+                deferredRestart = lwipExecutor.schedule({
+                    deferredRestart = null
+                    if (!running) return@schedule
+                    val cfg = configuration ?: return@schedule
+                    Log.w(TAG, "[LwipStack] Restarting stack after $summary (deferred)")
+                    lastRestartNanos = System.nanoTime()
+                    restartStack(cfg, ipv6ConnectionsEnabled, ipv6DNSEnabled)
+                }, delayMs, TimeUnit.MILLISECONDS)
+                Log.d(TAG, "[LwipStack] Restart throttled, deferred by ${delayMs}ms")
+                return@execute
+            }
+
+            Log.w(TAG, "[LwipStack] Restarting stack after $summary")
+            lastRestartNanos = now
+            restartStack(config, ipv6ConnectionsEnabled, ipv6DNSEnabled)
+        }
+    }
+
     /** Switches to a new configuration, tearing down all active connections.
      *
      * Re-applies tunnel network settings before restarting the stack.
@@ -391,6 +439,12 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         timeoutTimer = null
         udpCleanupTimer?.cancel(false)
         udpCleanupTimer = null
+        deferredRestart?.cancel(false)
+        deferredRestart = null
+
+        // Clear stale output before shutdown (matching iOS).
+        outputPackets.clear()
+        outputFlushScheduled = false
 
         muxManager?.closeAll()
         muxManager = null
@@ -403,14 +457,30 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
         udpFlows.clear()
 
+        // Do NOT explicitly close TCP connections here.  nativeShutdown() calls
+        // lwip_bridge_shutdown() which tcp_abort()s every active PCB.  The abort
+        // fires tcp_err_cb → onTcpErr → handleError, which properly releases the
+        // proxy connection (NioSocket, VlessConnection, etc.) and removes the entry
+        // from tcpConnections.  This matches iOS behavior and ensures clean RSTs
+        // are sent to the TUN (apps see RST → close old connections → retry).
+        //
+        // The previous approach called conn.close() → tcp_close() (FIN) first,
+        // which cleared tcp_arg/callbacks to NULL.  The subsequent tcp_abort()
+        // inside lwip_bridge_shutdown() then fired tcp_err_cb with NULL arg,
+        // silently swallowing the error.  While proxy cleanup still happened via
+        // releaseProtocol(), the FIN packets were never flushed to TUN before
+        // the stack was torn down, leaving apps hanging on dead connections.
+        NativeBridge.nativeShutdown()
+
+        // Clean up any connections that weren't in tcp_active_pcbs (e.g. still
+        // connecting) and therefore didn't receive an error callback.
         for (conn in tcpConnections.values) {
             if (!conn.closed) {
-                conn.close()
+                conn.handleError(-1)
             }
         }
         tcpConnections.clear()
 
-        NativeBridge.nativeShutdown()
         Log.i(TAG, "[LwipStack] Shutdown complete, closed $flowCount UDP flows")
     }
 
@@ -421,6 +491,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         this.configuration = config
         this.ipv6ConnectionsEnabled = ipv6Connections
         this.ipv6DNSEnabled = ipv6Dns
+        this.proxyMode = prefs.getString("proxyMode", "rule") ?: "rule"
         loadBypassCountry()
         loadEncryptedDnsSettings()
 
@@ -444,7 +515,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             tunFdSwapped = false
             startReadingPackets()
         }
-        Log.i(TAG, "[LwipStack] Restarted, mux=${muxManager != null}, bypass=${bypassCountry != 0}, encryptedDns=$encryptedDnsEnabled, ipv6conn=$ipv6ConnectionsEnabled, ipv6dns=$ipv6DNSEnabled")
+        Log.i(TAG, "[LwipStack] Restarted, mode=$proxyMode, mux=${muxManager != null}, bypass=${bypassCountry != 0}, encryptedDns=$encryptedDnsEnabled, ipv6conn=$ipv6ConnectionsEnabled, ipv6dns=$ipv6DNSEnabled")
     }
 
     // -- Settings Observation --
@@ -469,6 +540,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             val newEncryptedDnsEnabled = prefs.getBoolean("encryptedDnsEnabled", false)
             val newEncryptedDnsProtocol = prefs.getString("encryptedDnsProtocol", "doh") ?: "doh"
             val newEncryptedDnsServer = prefs.getString("encryptedDnsServer", "") ?: ""
+            val newProxyMode = prefs.getString("proxyMode", "rule") ?: "rule"
 
             val ipv6ConnectionsChanged = newIpv6Connections != ipv6ConnectionsEnabled
             val ipv6DnsChanged = newIpv6Dns != ipv6DNSEnabled
@@ -476,13 +548,15 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             val encryptedDnsEnabledChanged = newEncryptedDnsEnabled != encryptedDnsEnabled
             val encryptedDnsProtocolChanged = newEncryptedDnsProtocol != encryptedDnsProtocol
             val encryptedDnsServerChanged = newEncryptedDnsServer != encryptedDnsServer
+            val proxyModeChanged = newProxyMode != proxyMode
 
             if (!ipv6ConnectionsChanged &&
                 !ipv6DnsChanged &&
                 !bypassChanged &&
                 !encryptedDnsEnabledChanged &&
                 !encryptedDnsProtocolChanged &&
-                !encryptedDnsServerChanged
+                !encryptedDnsServerChanged &&
+                !proxyModeChanged
             ) return@execute
 
             if (ipv6ConnectionsChanged ||
@@ -567,16 +641,19 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
         when (val resolution = resolveFakeIp(dstIpString, dstPort, "TCP")) {
             FakeIpResolution.Passthrough -> {
-                domainRouter.matchIP(dstIpString)?.let { action ->
-                    when (action) {
-                        RouteAction.Direct -> forceBypass = true
-                        RouteAction.Reject -> return 0L
-                        is RouteAction.Proxy -> {
-                            val resolved = domainRouter.resolveConfiguration(action)
-                            if (resolved != null) {
-                                connectionConfig = inheritChain(defaultConfig, resolved)
-                            } else {
-                                Log.w(TAG, "[LwipStack] TCP proxy config ${action.configId} not found for IP $dstIpString")
+                // In global mode, skip IP routing rules — all traffic goes through proxy
+                if (proxyMode != "global") {
+                    domainRouter.matchIP(dstIpString)?.let { action ->
+                        when (action) {
+                            RouteAction.Direct -> forceBypass = true
+                            RouteAction.Reject -> return 0L
+                            is RouteAction.Proxy -> {
+                                val resolved = domainRouter.resolveConfiguration(action)
+                                if (resolved != null) {
+                                    connectionConfig = inheritChain(defaultConfig, resolved)
+                                } else {
+                                    Log.w(TAG, "[LwipStack] TCP proxy config ${action.configId} not found for IP $dstIpString")
+                                }
                             }
                         }
                     }
@@ -659,19 +736,22 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
         when (val resolution = resolveFakeIp(dstIpString, dstPort, "UDP")) {
             FakeIpResolution.Passthrough -> {
-                domainRouter.matchIP(dstIpString)?.let { action ->
-                    when (action) {
-                        RouteAction.Direct -> forceBypass = true
-                        RouteAction.Reject -> {
-                            sendIcmpPortUnreachable(srcIp, srcPort, dstIp, dstPort, isIpv6, data.size)
-                            return
-                        }
-                        is RouteAction.Proxy -> {
-                            val resolved = domainRouter.resolveConfiguration(action)
-                            if (resolved != null) {
-                                flowConfig = inheritChain(defaultConfig, resolved)
-                            } else {
-                                Log.w(TAG, "[LwipStack] UDP proxy config ${action.configId} not found for IP $dstIpString")
+                // In global mode, skip IP routing rules — all traffic goes through proxy
+                if (proxyMode != "global") {
+                    domainRouter.matchIP(dstIpString)?.let { action ->
+                        when (action) {
+                            RouteAction.Direct -> forceBypass = true
+                            RouteAction.Reject -> {
+                                sendIcmpPortUnreachable(srcIp, srcPort, dstIp, dstPort, isIpv6, data.size)
+                                return
+                            }
+                            is RouteAction.Proxy -> {
+                                val resolved = domainRouter.resolveConfiguration(action)
+                                if (resolved != null) {
+                                    flowConfig = inheritChain(defaultConfig, resolved)
+                                } else {
+                                    Log.w(TAG, "[LwipStack] UDP proxy config ${action.configId} not found for IP $dstIpString")
+                                }
                             }
                         }
                     }
@@ -727,6 +807,11 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         if (!FakeIpPool.isFakeIp(ip)) return FakeIpResolution.Passthrough
 
         val entry = fakeIpPool.lookup(ip) ?: return FakeIpResolution.Unreachable
+        // In global mode, skip routing rules — all traffic goes through proxy
+        if (proxyMode == "global") {
+            return FakeIpResolution.Resolved(entry.domain, null, false)
+        }
+
         val match = domainRouter.matchDomain(entry.domain)
 
         return when (val action = match.userAction) {
@@ -1069,6 +1154,12 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
                             if (packetPool.size < MAX_PACKET_POOL_SIZE) {
                                 packetPool.offer(pkt)
                             }
+                        }
+                        // Inline flush: drain output packets accumulated during nativeInput
+                        // processing without waiting for a separate executor task.
+                        // Mirrors iOS LWIPStack.flushOutputInline() to reduce round-trip latency.
+                        if (outputPackets.isNotEmpty()) {
+                            flushOutputPackets()
                         }
                     }
                 } catch (e: Exception) {

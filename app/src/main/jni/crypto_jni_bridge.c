@@ -275,6 +275,7 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTls13DeriveHandshakeKeys(
     uint8_t server_key[32];
     uint8_t server_iv[12];
     uint8_t client_traffic_secret[48];
+    uint8_t server_traffic_secret[48];
 
     int rc = tls13_derive_handshake_keys(
         (uint16_t)cipherSuite,
@@ -285,7 +286,8 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTls13DeriveHandshakeKeys(
         client_iv,
         server_key,
         server_iv,
-        client_traffic_secret);
+        client_traffic_secret,
+        server_traffic_secret);
 
     (*env)->ReleaseByteArrayElements(env, sharedSecret, ss_bytes, JNI_ABORT);
     (*env)->ReleaseByteArrayElements(env, transcript, tr_bytes, JNI_ABORT);
@@ -295,8 +297,8 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTls13DeriveHandshakeKeys(
         return NULL;
     }
 
-    /* Total output: hashLen + keyLen + 12 + keyLen + 12 + hashLen */
-    jsize total = (jsize)(hashLen + keyLen + 12 + keyLen + 12 + hashLen);
+    /* Total output: hashLen + keyLen + 12 + keyLen + 12 + hashLen + hashLen */
+    jsize total = (jsize)(hashLen + keyLen + 12 + keyLen + 12 + hashLen + hashLen);
     jbyteArray result = (*env)->NewByteArray(env, total);
     if (!result) {
         return NULL;
@@ -319,6 +321,9 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTls13DeriveHandshakeKeys(
     offset += 12;
 
     (*env)->SetByteArrayRegion(env, result, offset, (jsize)hashLen, (const jbyte *)client_traffic_secret);
+    offset += (jsize)hashLen;
+
+    (*env)->SetByteArrayRegion(env, result, offset, (jsize)hashLen, (const jbyte *)server_traffic_secret);
 
     return result;
 }

@@ -31,7 +31,7 @@ object SubscriptionFetcher {
         class NetworkError(message: String) : FetchError("Network error: $message")
     }
 
-    suspend fun fetch(urlString: String): Result = withContext(Dispatchers.IO) {
+    suspend fun fetch(urlString: String, allowInsecure: Boolean = false): Result = withContext(Dispatchers.IO) {
         val url = runCatching { URL(urlString) }.getOrNull()
             ?: throw FetchError.InvalidUrl()
 
@@ -41,8 +41,10 @@ object SubscriptionFetcher {
             connection.connectTimeout = 30_000
             connection.readTimeout = 30_000
 
-            // Accept self-signed certificates (subscription servers often use them)
-            if (connection is HttpsURLConnection) {
+            // Accept self-signed certificates only when the caller has indicated
+            // allowInsecure (mirrors iOS SubscriptionFetcher which uses InsecureSessionDelegate
+            // only when the global allowInsecure preference is set).
+            if (connection is HttpsURLConnection && allowInsecure) {
                 val trustAllManager = object : X509TrustManager {
                     override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
                     override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
@@ -77,9 +79,12 @@ object SubscriptionFetcher {
             }.getOrNull()
             val decodedString = decoded?.let { String(it, Charsets.UTF_8) }
 
-            bodyString = if (decodedString != null && (decodedString.contains("vless://") ||
-                        decodedString.contains("ss://") || decodedString.contains("naive+https://") ||
-                        decodedString.contains("quic://"))) {
+            // Parsable URL prefixes — matches iOS ProxyConfiguration.parsableURLPrefixes.
+            val parsablePrefixes = listOf(
+                "vless://", "ss://", "socks5://", "socks://", "https://", "quic://", "naive+https://"
+            )
+
+            bodyString = if (decodedString != null && parsablePrefixes.any { decodedString.contains(it) }) {
                 decodedString
             } else {
                 String(data, Charsets.UTF_8)
@@ -99,11 +104,11 @@ object SubscriptionFetcher {
                 )
             }
 
-            // Parse proxy URL lines
+            // Parse proxy URL lines — matches iOS SubscriptionFetcher line-by-line parsing.
             val configurations = bodyString
                 .lines()
                 .map { it.trim() }
-                .filter { it.startsWith("vless://") || it.startsWith("ss://") || it.startsWith("naive+https://") || it.startsWith("quic://") }
+                .filter { line -> parsablePrefixes.any { line.startsWith(it) } }
                 .mapNotNull { runCatching { ProxyConfiguration.fromUrl(it) }.getOrNull() }
 
             if (configurations.isEmpty()) throw FetchError.NoConfigurations()

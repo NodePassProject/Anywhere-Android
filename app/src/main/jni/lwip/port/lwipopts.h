@@ -11,7 +11,7 @@
 #define LWIP_UDP                        1
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       1
-#define LWIP_ICMP                       0
+#define LWIP_ICMP                       1
 #define LWIP_ICMP6                      1
 #define LWIP_RAW                        0
 
@@ -41,16 +41,16 @@
 #define LWIP_CALLBACK_API               1
 
 /* --- Memory configuration --- */
-#define MEM_SIZE                        (8 * 1024 * 1024)
-#define MEM_ALIGNMENT                   4
+#define MEM_SIZE                        (16 * 1024 * 1024)
+#define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
 
 /* --- Pool sizes --- */
 #define MEMP_NUM_TCP_PCB                256
 #define MEMP_NUM_TCP_PCB_LISTEN         2
-#define MEMP_NUM_UDP_PCB                4
-#define MEMP_NUM_TCP_SEG                8192
+#define MEMP_NUM_UDP_PCB                8
+#define MEMP_NUM_TCP_SEG                16384
 #define MEMP_NUM_PBUF                   64
 #define MEMP_NUM_NETBUF                 0
 #define MEMP_NUM_NETCONN                0
@@ -59,18 +59,16 @@
 #define PBUF_POOL_SIZE                  512
 #define PBUF_POOL_BUFSIZE               1500
 
-/* --- TCP configuration ---
- * Window/buffer sizes are deliberately small: lwIP here drives a local TUN
- * interface with near-zero RTT to the app, so large windows don't improve
- * throughput but DO consume heap & TCP segment pool entries.  Smaller values
- * allow many more concurrent connections before MEMP_NUM_TCP_SEG / MEM_SIZE
- * exhaustion triggers cascading ERR_MEM failures. */
+/* --- TCP configuration --- */
 #define TCP_MSS                         1360
-#define TCP_WND                         (32 * TCP_MSS)
-#define TCP_SND_BUF                     (32 * TCP_MSS)
+#define TCP_WND                         (256 * TCP_MSS)
+#define TCP_SND_BUF                     (256 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_SNDLOWAT                    (TCP_SND_BUF / 4)
 #define TCP_QUEUE_OOSEQ                 1
+
+/* --- Initial congestion window (IW10, matching iOS) --- */
+#define LWIP_TCP_CALC_INITIAL_CWND(mss) (10 * (mss))
 #define TCP_OVERSIZE                    TCP_MSS
 #define LWIP_TCP_TIMESTAMPS             0
 #define LWIP_TCP_SACK_OUT               1
@@ -91,7 +89,7 @@
 #define CHECKSUM_GEN_IP                 1
 #define CHECKSUM_GEN_TCP                1
 #define CHECKSUM_GEN_UDP                1
-#define CHECKSUM_GEN_ICMP               0
+#define CHECKSUM_GEN_ICMP               1
 #define CHECKSUM_GEN_ICMP6              1
 
 /* --- IPv6 --- */

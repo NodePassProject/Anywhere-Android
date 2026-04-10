@@ -131,7 +131,8 @@ int tls13_derive_handshake_keys(
     uint8_t *out_client_iv,
     uint8_t *out_server_key,
     uint8_t *out_server_iv,
-    uint8_t *out_client_traffic_secret)
+    uint8_t *out_client_traffic_secret,
+    uint8_t *out_server_traffic_secret)
 {
     CCHmacAlgorithm alg;
     int hash_len, key_len;
@@ -164,15 +165,14 @@ int tls13_derive_handshake_keys(
                       "iv", NULL, 0, out_client_iv, 12);
 
     // server_handshake_traffic_secret
-    uint8_t server_hts[48];
     derive_secret(cipher_suite, alg, hash_len,
                   out_hs_secret, hash_len, "s hs traffic",
-                  transcript, transcript_len, server_hts);
+                  transcript, transcript_len, out_server_traffic_secret);
 
     // server key + IV
-    hkdf_expand_label(alg, hash_len, server_hts, hash_len,
+    hkdf_expand_label(alg, hash_len, out_server_traffic_secret, hash_len,
                       "key", NULL, 0, out_server_key, key_len);
-    hkdf_expand_label(alg, hash_len, server_hts, hash_len,
+    hkdf_expand_label(alg, hash_len, out_server_traffic_secret, hash_len,
                       "iv", NULL, 0, out_server_iv, 12);
 
     return 0;
