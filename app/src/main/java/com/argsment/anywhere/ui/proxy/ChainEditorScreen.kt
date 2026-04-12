@@ -14,6 +14,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -41,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.ProxyChain
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.data.model.Subscription
 import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -48,6 +51,7 @@ import java.util.UUID
 fun ChainEditorScreen(
     chain: ProxyChain?,
     configurations: List<ProxyConfiguration>,
+    subscriptions: List<Subscription> = emptyList(),
     onSave: (ProxyChain) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -144,7 +148,19 @@ fun ChainEditorScreen(
                     index = index,
                     proxy = proxy,
                     totalCount = selectedProxies.size,
-                    onRemove = { selectedProxyIds.removeAt(index) }
+                    onRemove = { selectedProxyIds.removeAt(index) },
+                    onMoveUp = if (index > 0) {
+                        {
+                            val id = selectedProxyIds.removeAt(index)
+                            selectedProxyIds.add(index - 1, id)
+                        }
+                    } else null,
+                    onMoveDown = if (index < selectedProxies.size - 1) {
+                        {
+                            val id = selectedProxyIds.removeAt(index)
+                            selectedProxyIds.add(index + 1, id)
+                        }
+                    } else null
                 )
             }
         }
@@ -173,8 +189,9 @@ fun ChainEditorScreen(
             onDismissRequest = { showingProxyPicker = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ) {
-            ProxyPickerScreen(
+            ProxyPickerScreenContent(
                 configurations = configurations,
+                subscriptions = subscriptions,
                 excludedIds = selectedProxyIds.toSet(),
                 onSelect = { proxy ->
                     selectedProxyIds.add(proxy.id)
@@ -191,7 +208,9 @@ private fun ProxyChainItem(
     index: Int,
     proxy: ProxyConfiguration,
     totalCount: Int,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    onMoveUp: (() -> Unit)? = null,
+    onMoveDown: (() -> Unit)? = null
 ) {
     val badgeColor = when {
         index == 0 -> Color(0xFF2196F3) // blue - entry
@@ -249,6 +268,28 @@ private fun ProxyChainItem(
             Spacer(modifier = Modifier.width(4.dp))
         }
 
+        IconButton(
+            onClick = { onMoveUp?.invoke() },
+            enabled = onMoveUp != null,
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.ArrowUpward,
+                contentDescription = stringResource(R.string.move_up),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        IconButton(
+            onClick = { onMoveDown?.invoke() },
+            enabled = onMoveDown != null,
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.ArrowDownward,
+                contentDescription = stringResource(R.string.move_down),
+                modifier = Modifier.size(18.dp)
+            )
+        }
         IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
             Icon(
                 imageVector = Icons.Default.Close,
@@ -260,14 +301,25 @@ private fun ProxyChainItem(
 }
 
 @Composable
-private fun ProxyPickerScreen(
+private fun ProxyPickerScreenContent(
     configurations: List<ProxyConfiguration>,
+    subscriptions: List<Subscription>,
     excludedIds: Set<UUID>,
     onSelect: (ProxyConfiguration) -> Unit,
     onDismiss: () -> Unit
 ) {
     val available = remember(configurations, excludedIds) {
         configurations.filter { it.id !in excludedIds }
+    }
+
+    // Group like iOS AssignmentPicker / RuleSetListView: a Standalone section
+    // (configs without a subscriptionId) followed by one section per subscription.
+    val standalone = remember(available) { available.filter { it.subscriptionId == null } }
+    val groups = remember(available, subscriptions) {
+        subscriptions.mapNotNull { sub ->
+            val members = available.filter { it.subscriptionId == sub.id }
+            if (members.isEmpty()) null else sub to members
+        }
     }
 
     Column(
@@ -315,34 +367,60 @@ private fun ProxyPickerScreen(
             }
         } else {
             LazyColumn {
-                items(available.size) { index ->
-                    val proxy = available[index]
-                    TextButton(
-                        onClick = { onSelect(proxy) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            horizontalAlignment = Alignment.Start
-                        ) {
-                            Text(
-                                text = proxy.name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "${proxy.serverAddress}:${proxy.serverPort}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                if (standalone.isNotEmpty() && groups.isNotEmpty()) {
+                    item { PickerSectionHeader(stringResource(R.string.standalone)) }
+                }
+                items(standalone.size, key = { standalone[it].id }) { index ->
+                    PickerRow(proxy = standalone[index], onSelect = onSelect)
+                }
+                groups.forEach { (subscription, members) ->
+                    item { PickerSectionHeader(subscription.name) }
+                    items(members.size, key = { members[it].id }) { index ->
+                        PickerRow(proxy = members[index], onSelect = onSelect)
                     }
                 }
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun PickerSectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 12.dp, top = 12.dp, bottom = 4.dp)
+    )
+}
+
+@Composable
+private fun PickerRow(
+    proxy: ProxyConfiguration,
+    onSelect: (ProxyConfiguration) -> Unit
+) {
+    TextButton(
+        onClick = { onSelect(proxy) },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            horizontalAlignment = Alignment.Start
+        ) {
+            Text(
+                text = proxy.name,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "${proxy.serverAddress}:${proxy.serverPort}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }

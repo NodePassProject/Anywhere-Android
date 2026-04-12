@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.naive
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.TunneledTransport
@@ -10,7 +10,7 @@ import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.NioSocket
 import java.io.IOException
 
-private const val TAG = "NaiveTls"
+private val logger = AnywhereLogger("NaiveTLS")
 
 // -- Error --
 
@@ -66,7 +66,7 @@ class NaiveTlsTransport(
             tlsConnection = connection
             isReady = true
         } catch (e: Exception) {
-            Log.e(TAG, "Connection failed: ${e.message}")
+            logger.error("Connection failed: ${e.message}")
             throw NaiveTlsError.ConnectionFailed(e.message ?: "Unknown error")
         }
     }

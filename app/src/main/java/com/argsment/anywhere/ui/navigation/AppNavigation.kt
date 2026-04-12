@@ -14,6 +14,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -50,6 +52,18 @@ data class TopLevelRoute(
 @Composable
 fun AppNavigation(viewModel: VpnViewModel) {
     val navController = rememberNavController()
+
+    // Switch to the Proxies tab when a deep link arrives so ProxyListScreen can consume it.
+    val pendingDeepLink by viewModel.pendingDeepLinkUrl.collectAsState()
+    LaunchedEffect(pendingDeepLink) {
+        if (pendingDeepLink != null) {
+            navController.navigate(ProxiesRoute) {
+                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+        }
+    }
 
     val topLevelRoutes = listOf(
         TopLevelRoute(

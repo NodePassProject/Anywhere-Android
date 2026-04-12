@@ -1,18 +1,21 @@
 package com.argsment.anywhere.vpn.protocol.naive
 
-import android.util.Log
 import com.argsment.anywhere.data.model.NaiveProtocol
+import com.argsment.anywhere.data.model.OutboundProtocol
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.protocol.naive.http11.Http11Connection
 import com.argsment.anywhere.vpn.protocol.naive.http2.Http2Connection
 import com.argsment.anywhere.vpn.protocol.naive.http2.Http2SessionPool
+import com.argsment.anywhere.vpn.protocol.naive.http3.Http3SessionPool
+import com.argsment.anywhere.vpn.protocol.naive.http3.Http3Tunnel
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlin.coroutines.coroutineContext
 
-private const val TAG = "NaiveClient"
+private val logger = AnywhereLogger("NaiveClient")
 
 /**
  * Client for establishing NaiveProxy connections.
@@ -45,6 +48,12 @@ class NaiveClient(
         destinationPort: Int,
         initialData: ByteArray? = null
     ): VlessConnection {
+        // HTTP/3 over QUIC has its own code path since it doesn't share the
+        // TCP+TLS transport used by HTTP/1.1 and HTTP/2.
+        if (configuration.outboundProtocol == OutboundProtocol.NAIVE_HTTP3) {
+            return connectHttp3(destinationHost, destinationPort, initialData)
+        }
+
         val naiveProtocol = configuration.naiveProtocol
             ?: throw ProxyError.ProtocolError("NaiveProxy protocol variant not configured")
 
@@ -66,7 +75,7 @@ class NaiveClient(
                 return connection
             } catch (e: Exception) {
                 lastError = e
-                Log.w(TAG, "Connect attempt $attempt failed: ${e.message}")
+                logger.debug("Connect attempt $attempt failed: ${e.message}")
             }
         }
 
@@ -114,5 +123,42 @@ class NaiveClient(
         naiveTunnel.openTunnel()
 
         return NaiveProxyConnection(naiveTunnel, naiveTunnel.negotiatedPaddingType)
+    }
+
+    /** HTTP/3 CONNECT tunnel over QUIC. Mirrors iOS NaiveClient's HTTP3 path. */
+    private suspend fun connectHttp3(
+        destinationHost: String,
+        destinationPort: Int,
+        initialData: ByteArray?
+    ): VlessConnection {
+        val destination = "$destinationHost:$destinationPort"
+        val naiveConfig = NaiveConfiguration(
+            proxyHost = configuration.serverAddress,
+            proxyPort = configuration.serverPort.toInt(),
+            username = configuration.naiveUsername,
+            password = configuration.naivePassword,
+            sni = configuration.tls?.serverName,
+            scheme = NaiveConfiguration.NaiveScheme.HTTP2 // HTTP/3 shares the basic-auth path with HTTP/2
+        )
+
+        var lastError: Exception? = null
+        for (attempt in 1..MAX_RETRY_ATTEMPTS) {
+            if (attempt > 1) delay(RETRY_BASE_DELAY_MS * (attempt - 1))
+            try {
+                val session = Http3SessionPool.acquire(
+                    host = naiveConfig.proxyHost,
+                    port = naiveConfig.proxyPort,
+                    sni = naiveConfig.effectiveSNI
+                )
+                val tunnel = Http3Tunnel(session, naiveConfig, destination)
+                tunnel.openTunnel()
+                if (initialData != null && initialData.isNotEmpty()) tunnel.sendData(initialData)
+                return NaiveProxyConnection(tunnel, tunnel.negotiatedPaddingType)
+            } catch (e: Exception) {
+                lastError = e
+                logger.debug("HTTP/3 connect attempt $attempt failed: ${e.message}")
+            }
+        }
+        throw lastError ?: ProxyError.ConnectionFailed("All HTTP/3 retry attempts exhausted")
     }
 }

@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.util
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.SocketProtector
 import com.argsment.anywhere.vpn.protocol.Transport
 import java.io.IOException
@@ -25,7 +25,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
-private const val TAG = "NioSocket"
+private val logger = AnywhereLogger("NioSocket")
 
 sealed class NioSocketError(message: String) : IOException(message) {
     class ResolutionFailed(msg: String) : NioSocketError("DNS resolution failed: $msg")
@@ -111,7 +111,7 @@ class NioSocket : Transport {
                     while (true) {
                         val op = pendingOps.poll() ?: break
                         try { op() } catch (e: Exception) {
-                            Log.w(TAG, "Pending op error: ${e.message}")
+                            logger.debug("Pending op error: ${e.message}")
                         }
                     }
 
@@ -129,11 +129,11 @@ class NioSocket : Transport {
                         } catch (_: CancelledKeyException) {
                             // Key cancelled concurrently, ignore
                         } catch (e: Exception) {
-                            Log.w(TAG, "Key handler error: ${e.message}")
+                            logger.debug("Key handler error: ${e.message}")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Selector loop error: ${e.message}")
+                    logger.debug("Selector loop error: ${e.message}")
                 }
             }
         }, "NioSocket-selector").apply { isDaemon = true }
@@ -472,7 +472,7 @@ class NioSocket : Transport {
         val ch = channel ?: return
         if (!ch.isOpen) return
         if (queuedSendBytes() + data.size > MAX_PENDING_SEND_BYTES) {
-            Log.w(TAG, "Send queue full, dropping ${data.size} bytes")
+            logger.debug("Send queue full, dropping ${data.size} bytes")
             return
         }
 

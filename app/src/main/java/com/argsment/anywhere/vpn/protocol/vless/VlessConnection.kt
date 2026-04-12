@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.vless
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.data.model.TlsVersion
 import com.argsment.anywhere.vpn.protocol.Transport
@@ -12,7 +12,7 @@ import com.argsment.anywhere.vpn.util.NioSocket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-private const val TAG = "VlessConnection"
+private val logger = AnywhereLogger("VlessConnection")
 
 /**
  * Interface for all VLESS connection types.
@@ -38,6 +38,7 @@ abstract class VlessConnection : VlessConnectionProtocol {
 
     override var responseHeaderReceived = false
     private val responseHeaderLock = Any()
+    private var pendingResponseHeaderBuffer: ByteArray = ByteArray(0)
 
     /** The negotiated TLS version of the outer transport, if applicable. */
     open val outerTlsVersion: TlsVersion? get() = null
@@ -103,27 +104,68 @@ abstract class VlessConnection : VlessConnectionProtocol {
     // Response header processing
     /**
      * Processes the VLESS response header on first receive.
-     * Strips the 2-byte response header and returns the remaining payload.
+     *
+     * Buffers partial header bytes across multiple reads to handle transports
+     * (WebSocket, XHTTP, HTTP/2) that may deliver the header fragmented.
+     * Matches iOS `ProxyConnection.processResponseHeader`.
+     *
+     * Returns the payload with any VLESS response header stripped. If the
+     * current read contained only header bytes (no payload yet), issues a
+     * recursive `receive()` to fetch the next chunk.
      */
     suspend fun processResponseHeader(data: ByteArray): ByteArray? {
-        val needsHeaderProcessing: Boolean
+        var output: ByteArray? = null
+        var shouldReceiveMore = false
+
         synchronized(responseHeaderLock) {
-            needsHeaderProcessing = !responseHeaderReceived
-            if (needsHeaderProcessing) {
-                responseHeaderReceived = true
+            if (responseHeaderReceived) {
+                output = data
+            } else {
+                // Accumulate partial header bytes
+                val combined = if (pendingResponseHeaderBuffer.isEmpty()) {
+                    data
+                } else {
+                    pendingResponseHeaderBuffer + data
+                }
+
+                when {
+                    combined.size < 2 -> {
+                        // Need more bytes to determine if header is present
+                        pendingResponseHeaderBuffer = combined
+                        shouldReceiveMore = true
+                    }
+                    combined[0] != VlessProtocol.VERSION -> {
+                        // No VLESS response header; deliver all buffered bytes as payload
+                        responseHeaderReceived = true
+                        output = combined
+                        pendingResponseHeaderBuffer = ByteArray(0)
+                    }
+                    else -> {
+                        val addonsLength = combined[1].toInt() and 0xFF
+                        val headerLength = 2 + addonsLength
+                        if (combined.size < headerLength) {
+                            // Partial header (version byte present but addons incomplete)
+                            pendingResponseHeaderBuffer = combined
+                            shouldReceiveMore = true
+                        } else {
+                            responseHeaderReceived = true
+                            if (combined.size > headerLength) {
+                                output = combined.copyOfRange(headerLength, combined.size)
+                            } else {
+                                shouldReceiveMore = true
+                            }
+                            pendingResponseHeaderBuffer = ByteArray(0)
+                        }
+                    }
+                }
             }
         }
 
-        if (needsHeaderProcessing) {
-            val headerLength = VlessProtocol.decodeResponseHeader(data)
-            if (headerLength > 0 && data.size > headerLength) {
-                return data.copyOfRange(headerLength, data.size)
-            } else if (headerLength > 0) {
-                return receive()
-            }
+        return when {
+            output != null -> output
+            shouldReceiveMore -> receive()
+            else -> data
         }
-
-        return data
     }
 }
 

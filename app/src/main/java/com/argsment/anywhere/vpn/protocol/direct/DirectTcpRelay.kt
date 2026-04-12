@@ -1,10 +1,10 @@
 package com.argsment.anywhere.vpn.protocol.direct
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.NioSocket
 import com.argsment.anywhere.vpn.util.NioSocketError
 
-private const val TAG = "DirectTCP"
+private val logger = AnywhereLogger("DirectTCP")
 
 /**
  * Direct TCP relay over NioSocket.

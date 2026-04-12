@@ -52,12 +52,14 @@ import com.argsment.anywhere.viewmodel.VpnViewModel
 fun ChainListScreen(viewModel: VpnViewModel) {
     val chains by viewModel.chainRepository.chains.collectAsState()
     val configurations by viewModel.configRepository.configurations.collectAsState()
+    val subscriptions by viewModel.subscriptionRepository.subscriptions.collectAsState()
     val selectedChainId by viewModel.selectedChainId.collectAsState()
     val chainLatencyResults by viewModel.chainLatencyResults.collectAsState()
 
     var showingAddSheet by remember { mutableStateOf(false) }
     var showingNotEnoughProxiesAlert by remember { mutableStateOf(false) }
     var chainToEdit by remember { mutableStateOf<ProxyChain?>(null) }
+    var chainToDelete by remember { mutableStateOf<ProxyChain?>(null) }
 
     Scaffold(
         topBar = {
@@ -122,7 +124,7 @@ fun ChainListScreen(viewModel: VpnViewModel) {
                         latency = chainLatencyResults[chain.id],
                         onSelect = { viewModel.selectChain(chain) },
                         onEdit = { chainToEdit = chain },
-                        onDelete = { viewModel.deleteChain(chain) },
+                        onDelete = { chainToDelete = chain },
                         onTestLatency = { viewModel.testChainLatency(chain) }
                     )
                 }
@@ -139,6 +141,7 @@ fun ChainListScreen(viewModel: VpnViewModel) {
             ChainEditorScreen(
                 chain = null,
                 configurations = configurations,
+                subscriptions = subscriptions,
                 onSave = { chain ->
                     viewModel.addChain(chain)
                     showingAddSheet = false
@@ -157,6 +160,7 @@ fun ChainListScreen(viewModel: VpnViewModel) {
             ChainEditorScreen(
                 chain = chain,
                 configurations = configurations,
+                subscriptions = subscriptions,
                 onSave = { updated ->
                     viewModel.updateChain(updated)
                     chainToEdit = null
@@ -164,6 +168,26 @@ fun ChainListScreen(viewModel: VpnViewModel) {
                 onDismiss = { chainToEdit = null }
             )
         }
+    }
+
+    // Delete confirmation dialog (matching iOS intent that destructive actions
+    // require explicit confirmation — iOS's swipe actions + destructive styling
+    // serves the same purpose on that platform).
+    chainToDelete?.let { chain ->
+        AlertDialog(
+            onDismissRequest = { chainToDelete = null },
+            title = { Text(stringResource(R.string.delete)) },
+            text = { Text(chain.name) },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteChain(chain)
+                    chainToDelete = null
+                }) { Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { chainToDelete = null }) { Text(stringResource(R.string.cancel)) }
+            }
+        )
     }
 
     // Not enough proxies alert

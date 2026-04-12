@@ -33,6 +33,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -97,6 +100,10 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
     var showingAddSheet by remember { mutableStateOf(false) }
     var showingManualAddSheet by remember { mutableStateOf(false) }
     var showingConfigPicker by remember { mutableStateOf(false) }
+    // Mirrors iOS HomeView: a Rule/Global segmented picker at the top. This
+    // shadows the SettingsScreen "Global Mode" toggle — both write to the same
+    // `proxyMode` pref, and LwipStack observes the key to reload routing live.
+    var isGlobalMode by remember { mutableStateOf(viewModel.proxyMode == "global") }
 
     // Background gradient colors
     val isDark = isSystemInDarkTheme()
@@ -139,6 +146,30 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
+            // Proxy mode picker (matches iOS HomeView Rule/Global segmented picker).
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(top = 10.dp)) {
+                SegmentedButton(
+                    selected = !isGlobalMode,
+                    onClick = {
+                        if (isGlobalMode) {
+                            isGlobalMode = false
+                            viewModel.proxyMode = "rule"
+                        }
+                    },
+                    shape = SegmentedButtonDefaults.itemShape(0, 2)
+                ) { Text(stringResource(R.string.proxy_mode_rule)) }
+                SegmentedButton(
+                    selected = isGlobalMode,
+                    onClick = {
+                        if (!isGlobalMode) {
+                            isGlobalMode = true
+                            viewModel.proxyMode = "global"
+                        }
+                    },
+                    shape = SegmentedButtonDefaults.itemShape(1, 2)
+                ) { Text(stringResource(R.string.proxy_mode_global)) }
+            }
+
             Spacer(modifier = Modifier.weight(1f))
 
             // Power button

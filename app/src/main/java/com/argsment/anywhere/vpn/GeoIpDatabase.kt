@@ -1,7 +1,7 @@
 package com.argsment.anywhere.vpn
 
 import android.content.Context
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 
 /**
  * Loads and queries a custom binary GeoIP database for IPv4 country lookups.
@@ -12,22 +12,70 @@ import android.util.Log
  *   Offset 4-7:  Entry count (big-endian uint32)
  *   Offset 8+:   Entries, each 10 bytes: [startIP(4)] [endIP(4)] [countryCode(2)]
  */
-class GeoIpDatabase private constructor(private val data: ByteArray) {
+class GeoIpDatabase private constructor(
+    private val data: ByteArray,
+    private val entryCount: Int
+) {
 
     /**
      * Looks up the country for an IPv4 address string.
      * Returns the packed country code (e.g. "CN" → 0x434E), or 0 if not found.
+     *
+     * Binary search over the sorted [startIP, endIP, countryCode] entries,
+     * mirroring iOS/`CGeoIP.c::geoip_lookup`.
      */
     fun lookup(ipString: String): Int {
-        val result = NativeBridge.nativeGeoipLookup(data, ipString)
-        if (result.length == 2) {
-            return ((result[0].code and 0xFF) shl 8) or (result[1].code and 0xFF)
+        val ip = parseIPv4(ipString) ?: return 0
+
+        var lo = 0
+        var hi = entryCount - 1
+        var best = -1
+
+        while (lo <= hi) {
+            val mid = lo + (hi - lo) / 2
+            val off = HEADER_SIZE + mid * ENTRY_SIZE
+            val startIP = readUInt32(off)
+            if (java.lang.Integer.compareUnsigned(startIP, ip) <= 0) {
+                best = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
         }
-        return 0
+
+        if (best < 0) return 0
+
+        val off = HEADER_SIZE + best * ENTRY_SIZE
+        val endIP = readUInt32(off + 4)
+        if (java.lang.Integer.compareUnsigned(ip, endIP) > 0) return 0
+
+        val c1 = data[off + 8].toInt() and 0xFF
+        val c2 = data[off + 9].toInt() and 0xFF
+        return (c1 shl 8) or c2
+    }
+
+    private fun readUInt32(offset: Int): Int {
+        return ((data[offset].toInt() and 0xFF) shl 24) or
+                ((data[offset + 1].toInt() and 0xFF) shl 16) or
+                ((data[offset + 2].toInt() and 0xFF) shl 8) or
+                (data[offset + 3].toInt() and 0xFF)
+    }
+
+    /** Parse "a.b.c.d" to a big-endian host-order Int (unsigned). Returns null on bad input. */
+    private fun parseIPv4(s: String): Int? {
+        val parts = s.split('.')
+        if (parts.size != 4) return null
+        var result = 0
+        for (p in parts) {
+            val v = p.toIntOrNull() ?: return null
+            if (v < 0 || v > 255) return null
+            result = (result shl 8) or v
+        }
+        return result
     }
 
     companion object {
-        private const val TAG = "GeoIP"
+        private val logger = AnywhereLogger("GeoIP")
         private const val HEADER_SIZE = 8
         private const val ENTRY_SIZE = 10  // 4 + 4 + 2
 
@@ -40,12 +88,12 @@ class GeoIpDatabase private constructor(private val data: ByteArray) {
             try {
                 data = context.assets.open(assetName).use { it.readBytes() }
             } catch (e: Exception) {
-                Log.e(TAG, "[GeoIP] Failed to load $assetName from assets: $e")
+                logger.error("[GeoIP] Failed to load $assetName from assets: $e")
                 return null
             }
 
             if (data.size < HEADER_SIZE) {
-                Log.e(TAG, "[GeoIP] File too small: ${data.size} bytes")
+                logger.error("[GeoIP] File too small: ${data.size} bytes")
                 return null
             }
 
@@ -53,7 +101,7 @@ class GeoIpDatabase private constructor(private val data: ByteArray) {
             if (data[0] != 0x47.toByte() || data[1] != 0x45.toByte() ||
                 data[2] != 0x4F.toByte() || data[3] != 0x31.toByte()
             ) {
-                Log.e(TAG, "[GeoIP] Invalid magic header")
+                logger.error("[GeoIP] Invalid magic header")
                 return null
             }
 
@@ -63,12 +111,12 @@ class GeoIpDatabase private constructor(private val data: ByteArray) {
                     (data[7].toInt() and 0xFF)
 
             if (data.size < HEADER_SIZE + count * ENTRY_SIZE) {
-                Log.e(TAG, "[GeoIP] File truncated: expected ${HEADER_SIZE + count * ENTRY_SIZE} bytes, got ${data.size}")
+                logger.error("[GeoIP] File truncated: expected ${HEADER_SIZE + count * ENTRY_SIZE} bytes, got ${data.size}")
                 return null
             }
 
-            Log.i(TAG, "[GeoIP] Loaded $count entries")
-            return GeoIpDatabase(data)
+            logger.debug("[GeoIP] Loaded $count entries")
+            return GeoIpDatabase(data, count)
         }
 
         /**

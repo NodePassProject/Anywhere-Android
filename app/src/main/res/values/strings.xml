@@ -54,6 +54,11 @@
     <string name="select_configuration">Proxies</string>
     <string name="routing">Routing</string>
     <string name="routing_rules">Routing Rules</string>
+    <string name="global_mode">Global Mode</string>
+    <string name="proxy_mode_rule">Rule</string>
+    <string name="proxy_mode_global">Global</string>
+    <string name="rename">Rename</string>
+    <string name="rename_subscription">Rename Subscription</string>
     <string name="routing_rules_updated">Routing Rules Updated</string>
     <string name="save">Save</string>
     <string name="scan_your_qr_code">Scan your QR code</string>
@@ -124,6 +129,51 @@
     <string name="invalid_fingerprint">Invalid Fingerprint</string>
     <string name="invalid_fingerprint_message">Invalid fingerprint. Must be a 64-character hex string, or it already exists.</string>
     <string name="copy">Copy</string>
+
+    <!-- Advanced Settings -->
+    <string name="advanced_settings">Advanced Settings</string>
+    <string name="diagnostics">Diagnostics</string>
+    <string name="experimental">Experimental</string>
+    <string name="experimental_features">Experimental Features</string>
+    <string name="experimental_footer">Enables in-development features such as creating custom routing rule sets.</string>
+
+    <!-- Custom Rule Set -->
+    <string name="custom">Custom</string>
+    <string name="new_rule_set">New Rule Set</string>
+    <string name="rule_set">Rule Set</string>
+    <string name="rules">Rules</string>
+    <string name="rules_count">%1$d rule(s)</string>
+    <string name="rename_rule_set">Rename Rule Set</string>
+    <string name="add_rule">Add Rule</string>
+    <string name="import_rules">Import Rules</string>
+    <string name="route_to">Route To</string>
+    <string name="domain_suffix">Domain Suffix</string>
+    <string name="ipv4_cidr">IPv4 CIDR</string>
+    <string name="ipv6_cidr">IPv6 CIDR</string>
+    <string name="type_label">Type</string>
+    <string name="name_label">Name</string>
+    <string name="value_label">Value</string>
+    <string name="more">More</string>
+    <string name="reset">Reset</string>
+    <string name="download_from_internet">Download From Internet</string>
+    <string name="rule_list_url">Anywhere Rule List URL</string>
+    <string name="unknown_content">Unknown content.</string>
+    <string name="import_action">Import</string>
+    <string name="parsed_rules">%1$d rule(s)</string>
+    <string name="example_domain">example.com</string>
+    <string name="example_ipv4">10.0.0.0/8</string>
+    <string name="example_ipv6">2001:db8::/32</string>
+
+    <!-- Chain editor -->
+    <string name="move_up">Move Up</string>
+    <string name="move_down">Move Down</string>
+    <string name="standalone">Standalone</string>
+
+    <!-- Logs -->
+    <string name="logs">Logs</string>
+    <string name="select">Select</string>
+    <string name="copy_count">Copy (%1$d)</string>
+    <string name="no_recent_logs">No Recent Logs</string>
 
     <!-- Phase 9: Security -->
     <string name="allow_insecure_warning">This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.</string>

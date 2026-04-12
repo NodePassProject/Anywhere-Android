@@ -67,13 +67,15 @@ fun AddProxyScreen(
     onDismiss: () -> Unit,
     onShowManualAdd: () -> Unit,
     onImport: (ProxyConfiguration) -> Unit,
-    onSubscriptionImport: (List<ProxyConfiguration>, Subscription) -> Unit
+    onSubscriptionImport: (List<ProxyConfiguration>, Subscription) -> Unit,
+    initialLink: String? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var selectedMethod by remember { mutableStateOf<ImportMethod?>(null) }
-    var linkURL by remember { mutableStateOf("") }
+    // When opened via a deep link, start directly on the Link method with the URL pre-filled.
+    var selectedMethod by remember { mutableStateOf<ImportMethod?>(if (initialLink != null) ImportMethod.LINK else null) }
+    var linkURL by remember { mutableStateOf(initialLink ?: "") }
     var linkType by remember { mutableStateOf(LinkType.SUBSCRIPTION) }
     var isLoading by remember { mutableStateOf(false) }
     var showLinkError by remember { mutableStateOf(false) }

@@ -45,16 +45,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import com.argsment.anywhere.R
+import com.argsment.anywhere.data.rules.CountryBypassCatalog
 import java.util.Locale
-
-private val countryCodes = listOf("AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN")
-
-private val languageToCountry = mapOf(
-    "ar" to "SA", "fa" to "IR", "my" to "MM", "ru" to "RU",
-    "tk" to "TM", "vi" to "VN", "zh" to "CN", "be" to "BY",
-    "es" to "CU"
-)
 
 private fun flagForCountryCode(code: String): String {
     val firstChar = Character.toChars(0x1F1E6 - 'A'.code + code[0].uppercaseChar().code)
@@ -67,10 +61,9 @@ fun OnboardingScreen(
     onComplete: (bypassCountryCode: String, adBlockEnabled: Boolean) -> Unit
 ) {
     var currentPage by remember { mutableIntStateOf(0) }
-    val defaultCountry = remember {
-        val lang = Locale.getDefault().language
-        languageToCountry[lang] ?: ""
-    }
+    val context = LocalContext.current
+    val catalog = remember { CountryBypassCatalog.get(context) }
+    val defaultCountry = remember { catalog.suggestedCountryCode() ?: "" }
     var selectedCountry by remember { mutableStateOf(defaultCountry) }
     var adBlockEnabled by remember { mutableStateOf(false) }
 
@@ -103,6 +96,7 @@ fun OnboardingScreen(
             ) { page ->
                 when (page) {
                     0 -> CountryBypassPage(
+                        countryCodes = catalog.supportedCountryCodes,
                         selectedCountry = selectedCountry,
                         onSelect = { selectedCountry = it }
                     )
@@ -160,6 +154,7 @@ fun OnboardingScreen(
 
 @Composable
 private fun CountryBypassPage(
+    countryCodes: List<String>,
     selectedCountry: String,
     onSelect: (String) -> Unit
 ) {

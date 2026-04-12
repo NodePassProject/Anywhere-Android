@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -35,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -74,7 +76,18 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
 
     var showingAddSheet by remember { mutableStateOf(false) }
     var showingManualAddSheet by remember { mutableStateOf(false) }
+    var deepLinkPrefill by remember { mutableStateOf<String?>(null) }
+
+    // Auto-open the Add sheet when a deep link arrives (vless://, ss://, socks5://, quic://, or anywhere://add-proxy?link=…).
+    val pendingDeepLink by viewModel.pendingDeepLinkUrl.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(pendingDeepLink) {
+        val url = pendingDeepLink ?: return@LaunchedEffect
+        deepLinkPrefill = url
+        showingAddSheet = true
+        viewModel.consumePendingDeepLink()
+    }
     var configurationToEdit by remember { mutableStateOf<ProxyConfiguration?>(null) }
+    var subscriptionToRename by remember { mutableStateOf<Subscription?>(null) }
     var updatingSubscriptionId by remember { mutableStateOf<java.util.UUID?>(null) }
     var showSubscriptionError by remember { mutableStateOf(false) }
     var subscriptionErrorMessage by remember { mutableStateOf("") }
@@ -188,7 +201,8 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                                     }
                                 }
                             },
-                            onDelete = { viewModel.deleteSubscription(subscription) }
+                            onDelete = { viewModel.deleteSubscription(subscription) },
+                            onRename = { subscriptionToRename = subscription }
                         )
                     }
                     if (!isCollapsed) {
@@ -212,22 +226,32 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
     // Add proxy bottom sheet
     if (showingAddSheet) {
         ModalBottomSheet(
-            onDismissRequest = { showingAddSheet = false },
+            onDismissRequest = {
+                showingAddSheet = false
+                deepLinkPrefill = null
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ) {
             AddProxyScreen(
-                onDismiss = { showingAddSheet = false },
+                initialLink = deepLinkPrefill,
+                onDismiss = {
+                    showingAddSheet = false
+                    deepLinkPrefill = null
+                },
                 onShowManualAdd = {
                     showingAddSheet = false
+                    deepLinkPrefill = null
                     showingManualAddSheet = true
                 },
                 onImport = { config ->
                     viewModel.addConfiguration(config)
                     showingAddSheet = false
+                    deepLinkPrefill = null
                 },
                 onSubscriptionImport = { configs, subscription ->
                     viewModel.addSubscription(configs, subscription)
                     showingAddSheet = false
+                    deepLinkPrefill = null
                 }
             )
         }
@@ -267,6 +291,39 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
         }
     }
 
+    // Subscription rename dialog
+    subscriptionToRename?.let { sub ->
+        var newName by remember(sub.id) { mutableStateOf(sub.name) }
+        AlertDialog(
+            onDismissRequest = { subscriptionToRename = null },
+            title = { Text(stringResource(R.string.rename_subscription)) },
+            text = {
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    label = { Text(stringResource(R.string.name)) },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmed = newName.trim()
+                        if (trimmed.isNotEmpty() && trimmed != sub.name) {
+                            viewModel.renameSubscription(sub, trimmed)
+                        }
+                        subscriptionToRename = null
+                    }
+                ) { Text(stringResource(R.string.save)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { subscriptionToRename = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            }
+        )
+    }
+
     // Subscription error dialog
     if (showSubscriptionError) {
         AlertDialog(
@@ -289,7 +346,8 @@ private fun SubscriptionHeader(
     isUpdating: Boolean,
     onToggleCollapse: () -> Unit,
     onUpdate: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onRename: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val chevronRotation by animateFloatAsState(
@@ -348,6 +406,14 @@ private fun SubscriptionHeader(
                         onUpdate()
                     },
                     leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) }
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.rename)) },
+                    onClick = {
+                        showMenu = false
+                        onRename()
+                    },
+                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) }
                 )
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error) },

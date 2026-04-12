@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.mux
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.protocol.vless.VlessClient
@@ -13,7 +13,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.CoroutineContext
 
-private const val TAG = "MuxClient"
+private val logger = AnywhereLogger("MuxClient")
 
 /**
  * Single mux connection over VLESS with session management.
@@ -213,7 +213,7 @@ class MuxClient(
                 deferred.complete(Unit)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Mux connection failed: ${e.message}")
+            logger.error("Mux connection failed: ${e.message}")
             connecting = false
             closeAll()
             throw e
@@ -236,7 +236,7 @@ class MuxClient(
                     ?: throw ProxyError.ConnectionFailed("Mux client not connected")
                 connection.sendRaw(data)
             } catch (e: Exception) {
-                Log.e(TAG, "Mux write error: ${e.message}")
+                logger.error("Mux write error: ${e.message}")
                 closeAll()
                 throw e
             }
@@ -270,13 +270,13 @@ class MuxClient(
                     },
                     errorHandler = { error ->
                         if (error != null) {
-                            Log.e(TAG, "Mux receive error: ${error.message}")
+                            logger.error("Mux receive error: ${error.message}")
                         }
                         closeAll()
                     }
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "Mux receive loop error: ${e.message}")
+                logger.error("Mux receive loop error: ${e.message}")
                 closeAll()
             }
         }

@@ -1,9 +1,11 @@
 package com.argsment.anywhere.vpn
 
 /**
- * JNI bridge to all native C libraries (lwIP, BLAKE3, TLS KDF, CPacket, GeoIP, CVLESS, libyaml).
+ * JNI bridge to native C libraries (lwIP, BLAKE3, TLS KDF, libyaml).
  *
  * All native functions are declared here and loaded from a single shared library.
+ * Packet / DNS / GeoIP / VLESS utilities are pure Kotlin — see
+ * [com.argsment.anywhere.vpn.util.PacketUtil] and [GeoIpDatabase].
  */
 object NativeBridge {
 
@@ -195,85 +197,6 @@ object NativeBridge {
      */
     @JvmStatic
     external fun nativeTls13TranscriptHash(cipherSuite: Int, messages: ByteArray): ByteArray?
-
-    // =========================================================================
-    // TLS Packet Utilities
-    // =========================================================================
-
-    /** XOR nonce with sequence number for TLS 1.3. Returns modified nonce. */
-    @JvmStatic
-    external fun nativeXorNonce(nonce: ByteArray, seqNum: Long): ByteArray
-
-    /**
-     * Parse TLS record header.
-     * @return [success, contentType, recordLen] or null on failure
-     */
-    @JvmStatic
-    external fun nativeParseTlsHeader(buffer: ByteArray): IntArray?
-
-    /**
-     * Unwrap TLS 1.3 content (strip padding and content type).
-     * @return First byte is content type, remaining bytes are content. Null on failure.
-     */
-    @JvmStatic
-    external fun nativeTls13UnwrapContent(data: ByteArray): ByteArray?
-
-    /** Frame UDP payload with 2-byte big-endian length prefix. */
-    @JvmStatic
-    external fun nativeFrameUdpPayload(payload: ByteArray): ByteArray
-
-    // =========================================================================
-    // DNS Utilities
-    // =========================================================================
-
-    /** Parse DNS query to extract domain name. Returns null on failure. */
-    @JvmStatic
-    external fun nativeParseDnsQuery(data: ByteArray): String?
-
-    /**
-     * Parse DNS query with query type.
-     * @return [domain: String, qtype: Int] or null on failure
-     */
-    @JvmStatic
-    external fun nativeParseDnsQueryExt(data: ByteArray): Array<Any>?
-
-    /** Generate a DNS response with a fake IP. Returns response bytes or null. */
-    @JvmStatic
-    external fun nativeGenerateDnsResponse(queryData: ByteArray, fakeIp: ByteArray?, qtype: Int): ByteArray?
-
-    // =========================================================================
-    // TLS ServerHello Parsing
-    // =========================================================================
-
-    /**
-     * Parse TLS ServerHello to extract X25519 key share and cipher suite.
-     * @return 34 bytes: keyShare(32) + cipherSuite(2 big-endian), or null on failure
-     */
-    @JvmStatic
-    external fun nativeParseServerHello(data: ByteArray): ByteArray?
-
-    // =========================================================================
-    // GeoIP
-    // =========================================================================
-
-    /** Look up country code for an IPv4 address. Returns 2-char code or empty string. */
-    @JvmStatic
-    external fun nativeGeoipLookup(database: ByteArray, ipStr: String): String
-
-    // =========================================================================
-    // VLESS
-    // =========================================================================
-
-    /** Build VLESS request header. Returns complete header bytes. */
-    @JvmStatic
-    external fun nativeBuildVlessHeader(uuid: ByteArray, command: Int, port: Int, addressType: Int, address: ByteArray): ByteArray
-
-    /**
-     * Parse address string to determine type and bytes.
-     * @return [addressType, ...addressBytes] or null on failure
-     */
-    @JvmStatic
-    external fun nativeParseVlessAddress(address: String): ByteArray?
 
     // =========================================================================
     // YAML Parsing (libyaml)

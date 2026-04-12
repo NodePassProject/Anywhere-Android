@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.shadowsocks
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.protocol.Transport
@@ -11,7 +11,7 @@ import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.NioSocket
 import kotlinx.coroutines.delay
 
-private const val TAG = "ShadowsocksClient"
+private val logger = AnywhereLogger("ShadowsocksClient")
 
 /**
  * Client for establishing Shadowsocks proxy connections.
@@ -78,7 +78,7 @@ class ShadowsocksClient(
             } catch (e: Exception) {
                 if (e is com.argsment.anywhere.vpn.protocol.tls.TlsError.CertificateValidationFailed) throw e
                 lastError = e
-                Log.w(TAG, "Connect attempt $attempt failed: ${e.message}")
+                logger.debug("Connect attempt $attempt failed: ${e.message}")
             }
         }
 

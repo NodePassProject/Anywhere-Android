@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.tls
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.NativeBridge
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.vless.RealityError
@@ -15,7 +15,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.withLock
 
-private const val TAG = "TlsRecordConn"
+private val logger = AnywhereLogger("TLS")
 
 /**
  * TLS record encryption/decryption wrapper supporting both TLS 1.3 and TLS 1.2.
@@ -137,7 +137,7 @@ class TlsRecordConnection private constructor(
                     val record = buildTLSRecords(data)
                     conn.sendAsync(record)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Encryption error: ${e.message}")
+                    logger.error("Encryption error: ${e.message}")
                 }
             }
         }
@@ -245,7 +245,7 @@ class TlsRecordConnection private constructor(
                         // TLS 1.3: encrypt alert with inner content type
                         val innerPlaintext = byteArrayOf(0x01, 0x00, 0x15)
                         val encryptedLen = innerPlaintext.size + 16
-                        val nonce = NativeBridge.nativeXorNonce(clientIV, seqNum)
+                        val nonce = com.argsment.anywhere.vpn.util.PacketUtil.xorNonce(clientIV, seqNum)
                         val aad = byteArrayOf(
                             0x17, 0x03, 0x03,
                             ((encryptedLen shr 8) and 0xFF).toByte(),
@@ -524,7 +524,7 @@ class TlsRecordConnection private constructor(
             throw RealityError.HandshakeFailed("Ciphertext too short")
         }
 
-        val nonce = NativeBridge.nativeXorNonce(serverIV, seqNum)
+        val nonce = com.argsment.anywhere.vpn.util.PacketUtil.xorNonce(serverIV, seqNum)
         val paramSpec = if (isChaCha) IvParameterSpec(nonce) else GCMParameterSpec(128, nonce)
         decryptCipher.init(Cipher.DECRYPT_MODE, serverKeySpec, paramSpec)
         decryptCipher.updateAAD(header)
@@ -534,7 +534,7 @@ class TlsRecordConnection private constructor(
             throw RealityError.HandshakeFailed("Empty decrypted data")
         }
 
-        val unwrapped = NativeBridge.nativeTls13UnwrapContent(decrypted)
+        val unwrapped = com.argsment.anywhere.vpn.util.PacketUtil.tls13UnwrapContent(decrypted)
             ?: throw RealityError.HandshakeFailed("No content type found")
         if (unwrapped.isEmpty()) {
             throw RealityError.HandshakeFailed("No content type found")
@@ -551,7 +551,7 @@ class TlsRecordConnection private constructor(
         val innerLen = plaintext.size + 1
         val encryptedLen = innerLen + 16
 
-        val nonce = NativeBridge.nativeXorNonce(clientIV, seqNum)
+        val nonce = com.argsment.anywhere.vpn.util.PacketUtil.xorNonce(clientIV, seqNum)
 
         val innerPlaintext = ByteArray(innerLen)
         System.arraycopy(plaintext, 0, innerPlaintext, 0, plaintext.size)

@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.direct
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.SocketProtector
 import com.argsment.anywhere.vpn.util.DnsCache
 import com.argsment.anywhere.vpn.util.NioSocketError
@@ -16,7 +16,7 @@ import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
 import java.util.concurrent.ConcurrentLinkedQueue
 
-private const val TAG = "DirectUDP"
+private val logger = AnywhereLogger("DirectUDP")
 
 /**
  * Direct UDP relay with DNS resolution.
@@ -47,7 +47,7 @@ class DirectUdpRelay {
                     while (true) {
                         val op = pendingOps.poll() ?: break
                         try { op() } catch (e: Exception) {
-                            Log.w(TAG, "Pending op error: ${e.message}")
+                            logger.warning("Pending op error: ${e.message}")
                         }
                     }
 
@@ -64,11 +64,11 @@ class DirectUdpRelay {
                             }
                         } catch (_: CancelledKeyException) {
                         } catch (e: Exception) {
-                            Log.w(TAG, "Key handler error: ${e.message}")
+                            logger.warning("Key handler error: ${e.message}")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Selector loop error: ${e.message}")
+                    logger.warning("Selector loop error: ${e.message}")
                 }
             }
         }, "DirectUDP-selector").apply { isDaemon = true }
@@ -174,7 +174,7 @@ class DirectUdpRelay {
                 val key = ch.register(sharedSelector, SelectionKey.OP_READ, this)
                 selectionKey = key
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to register UDP channel: ${e.message}")
+                logger.warning("Failed to register UDP channel: ${e.message}")
             }
         }
     }
@@ -195,7 +195,7 @@ class DirectUdpRelay {
             }
         } catch (e: Exception) {
             if (!cancelled) {
-                Log.w(TAG, "UDP read error: ${e.message}")
+                logger.warning("UDP read error: ${e.message}")
             }
         }
     }

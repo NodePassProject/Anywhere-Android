@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.shadowsocks
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -12,7 +12,7 @@ import java.net.InetSocketAddress
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 
-private const val TAG = "SS-UDP-Relay"
+private val logger = AnywhereLogger("SS-UDP-Relay")
 private const val RECV_BUFFER_SIZE = 65536
 
 // =============================================================================
@@ -80,14 +80,19 @@ class ShadowsocksUdpRelay(
         val sock = socket ?: return
         if (cancelled.get()) return
 
-        try {
-            val encrypted = encryptPacket(data)
-            val packet = DatagramPacket(encrypted, encrypted.size)
-            sock.send(packet)
+        val encrypted = try {
+            encryptPacket(data)
         } catch (e: Exception) {
             if (!cancelled.get()) {
-                Log.e(TAG, "Send error: ${e.message}")
+                logger.error("[SS-UDP] Encrypt error: ${e.message}")
             }
+            return
+        }
+        try {
+            val packet = DatagramPacket(encrypted, encrypted.size)
+            sock.send(packet)
+        } catch (_: Exception) {
+            // Socket send errors are not logged on iOS; suppress here for parity.
         }
     }
 
@@ -102,12 +107,16 @@ class ShadowsocksUdpRelay(
 
         try {
             sock.receive(packet) // blocking
-            if (cancelled.get()) return@withContext null
-            val data = buf.copyOf(packet.length)
+        } catch (_: Exception) {
+            return@withContext null
+        }
+        if (cancelled.get()) return@withContext null
+        val data = buf.copyOf(packet.length)
+        try {
             decryptPacket(data)
         } catch (e: Exception) {
             if (!cancelled.get()) {
-                Log.e(TAG, "Receive error: ${e.message}")
+                logger.error("[SS-UDP] Decrypt error: ${e.message}")
             }
             null
         }

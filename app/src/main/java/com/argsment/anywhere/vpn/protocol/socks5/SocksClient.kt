@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.socks5
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.SocketProtector
@@ -15,7 +15,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 
-private const val TAG = "SocksClient"
+private val logger = AnywhereLogger("SOCKS5")
 
 // =============================================================================
 // SOCKS5 Protocol Constants
@@ -96,14 +96,24 @@ private object Socks5Handshake {
         username: String?,
         password: String?
     ) {
-        performAuth(buffer, transport, username, password)
-        sendCommand(
-            buffer = buffer,
-            transport = transport,
-            command = Socks5.CMD_CONNECT,
-            host = destinationHost,
-            port = destinationPort
-        )
+        try {
+            performAuth(buffer, transport, username, password)
+        } catch (e: Exception) {
+            logger.error("[SOCKS5] auth failed for $destinationHost:$destinationPort: ${e.message}")
+            throw e
+        }
+        try {
+            sendCommand(
+                buffer = buffer,
+                transport = transport,
+                command = Socks5.CMD_CONNECT,
+                host = destinationHost,
+                port = destinationPort
+            )
+        } catch (e: Exception) {
+            logger.error("[SOCKS5] CONNECT failed for $destinationHost:$destinationPort: ${e.message}")
+            throw e
+        }
     }
 
     /**
@@ -505,7 +515,7 @@ class SocksClient(
                 }
                 return conn
             } catch (e: Exception) {
-                Log.w(TAG, "SOCKS5 connect attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("SOCKS5 connect attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 lastError = e
             }
         }
@@ -555,7 +565,7 @@ class SocksClient(
                     destinationPort = destinationPort
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "SOCKS5 UDP attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("SOCKS5 UDP attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 lastError = e
             }
         }

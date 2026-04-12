@@ -1,6 +1,5 @@
 package com.argsment.anywhere.vpn.protocol.vless
 
-import com.argsment.anywhere.vpn.NativeBridge
 import java.util.UUID
 
 /**
@@ -58,9 +57,6 @@ object VlessProtocol {
     /**
      * Encode a VLESS request header.
      *
-     * Uses the C implementation via JNI for simple TCP/UDP headers (no flow, no mux).
-     * Falls back to pure Kotlin otherwise.
-     *
      * Format:
      * - 1 byte: Version (0x00)
      * - 16 bytes: UUID
@@ -76,36 +72,8 @@ object VlessProtocol {
         destinationAddress: String,
         destinationPort: Int,
         flow: String? = null
-    ): ByteArray {
-        // If flow is specified or command is mux, use Kotlin implementation
-        // (C doesn't support addons, and mux omits address/port)
-        if ((!flow.isNullOrEmpty()) || command == VlessCommand.MUX) {
-            return encodeRequestHeaderKotlin(uuid, command, destinationAddress, destinationPort, flow)
-        }
+    ): ByteArray = encodeRequestHeaderKotlin(uuid, command, destinationAddress, destinationPort, flow)
 
-        // Try JNI C implementation
-        try {
-            val uuidBytes = uuidToBytes(uuid)
-            val parsed = NativeBridge.nativeParseVlessAddress(destinationAddress)
-            if (parsed != null && parsed.size >= 2) {
-                val addressType = parsed[0].toInt()
-                val addressBytes = parsed.copyOfRange(1, parsed.size)
-                return NativeBridge.nativeBuildVlessHeader(
-                    uuidBytes,
-                    command.value.toInt(),
-                    destinationPort,
-                    addressType,
-                    addressBytes
-                )
-            }
-        } catch (_: Exception) {
-            // Fall through to Kotlin implementation
-        }
-
-        return encodeRequestHeaderKotlin(uuid, command, destinationAddress, destinationPort, null)
-    }
-
-    /** Kotlin fallback implementation. */
     private fun encodeRequestHeaderKotlin(
         uuid: UUID,
         command: VlessCommand,

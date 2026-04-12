@@ -1,7 +1,6 @@
 package com.argsment.anywhere.ui.components
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -16,7 +15,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
@@ -33,11 +31,6 @@ fun PowerButton(
         animationSpec = tween(600),
         label = "shadowColor"
     )
-    val shadowElevation by animateDpAsState(
-        targetValue = if (isConnected) 24.dp else 8.dp,
-        animationSpec = tween(600),
-        label = "shadowElevation"
-    )
 
     Box(
         contentAlignment = Alignment.Center,
@@ -47,8 +40,7 @@ fun PowerButton(
             shape = CircleShape,
             color = if (isConnected) Color.White.copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh,
             modifier = Modifier
-                .size(140.dp)
-                .shadow(shadowElevation, CircleShape, ambientColor = shadowColor, spotColor = shadowColor),
+                .size(140.dp),
             onClick = onClick,
             enabled = enabled
         ) {

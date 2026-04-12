@@ -329,7 +329,7 @@ fun ProxyEditorScreen(
                     OutboundProtocol.SOCKS5.name to "SOCKS5",
                     OutboundProtocol.NAIVE_HTTP11.name to "HTTPS (HTTP/1.1)",
                     OutboundProtocol.NAIVE_HTTP2.name to "HTTP2",
-                    OutboundProtocol.NAIVE_HTTP3.name to "QUIC (${stringResource(R.string.not_yet_supported)})"
+                    OutboundProtocol.NAIVE_HTTP3.name to "QUIC"
                 ),
                 onSelect = { value ->
                     selectedProtocol = OutboundProtocol.valueOf(value)

@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.tls
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.vpn.NativeBridge
 import com.argsment.anywhere.vpn.protocol.Transport
@@ -14,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-private const val TAG = "TlsClient"
+private val logger = AnywhereLogger("TLS")
 
 // -- TLS Errors --
 
@@ -41,11 +41,12 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
     companion object {
         /**
-         * User-trusted certificate SHA-256 fingerprints.
-         * Set by CertificateRepository on app startup; checked when system trust fails.
+         * Legacy pass-through to [CertificatePolicy.trustedFingerprints]. Kept for
+         * source compatibility with earlier code paths that set the list directly.
          */
-        @Volatile
-        var trustedFingerprints: List<String> = emptyList()
+        var trustedFingerprints: List<String>
+            get() = CertificatePolicy.trustedFingerprints
+            set(value) = CertificatePolicy.setTrustedFingerprints(value)
     }
 
     private var connection: Transport? = null
@@ -95,7 +96,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         try {
             socket.connect(host, port)
         } catch (e: Exception) {
-            Log.e(TAG, "TCP connection failed: ${e.message}")
+            logger.error("TCP connection failed: ${e.message}")
             throw TlsError.ConnectionFailed(e.message ?: "Unknown error")
         }
 
@@ -190,11 +191,11 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 0x15 -> {
                     val alertLevel = if (existingBuffer.size > 5) existingBuffer[5].toInt() and 0xFF else 0
                     val alertDesc = if (existingBuffer.size > 6) existingBuffer[6].toInt() and 0xFF else 0
-                    Log.e(TAG, "TLS Alert: level=$alertLevel, desc=$alertDesc")
+                    logger.error("TLS Alert: level=$alertLevel, desc=$alertDesc")
                     throw TlsError.HandshakeFailed("TLS Alert: level=$alertLevel, desc=$alertDesc")
                 }
                 else -> {
-                    Log.e(TAG, "Unexpected content type: 0x${String.format("%02x", contentType)}")
+                    logger.error("Unexpected content type: 0x${String.format("%02x", contentType)}")
                     throw TlsError.HandshakeFailed("Unexpected content type: $contentType")
                 }
             }
@@ -204,7 +205,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         val data = conn.receive()
 
         if (data == null || data.isEmpty()) {
-            Log.e(TAG, "No server response (connection closed)")
+            logger.error("No server response (connection closed)")
             throw TlsError.HandshakeFailed("No server response")
         }
 
@@ -229,7 +230,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
 
         // Try TLS 1.3 parsing first (looks for key_share extension)
-        val parsed = NativeBridge.nativeParseServerHello(buf)
+        val parsed = com.argsment.anywhere.vpn.util.PacketUtil.parseServerHello(buf)
 
         if (parsed != null && parsed.size >= 34) {
             // TLS 1.3 path
@@ -417,7 +418,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                                 if (decompressed != null) {
                                     parseCertificateMessage(decompressed)
                                 } else {
-                                    Log.w(TAG, "Failed to decompress CompressedCertificate")
+                                    logger.warning("Failed to decompress CompressedCertificate")
                                 }
                             }
                             0x0F -> { // CertificateVerify
@@ -455,7 +456,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                         hsOffset += 4 + hsLen
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to decrypt handshake record: ${e.message}")
+                    logger.error("Failed to decrypt handshake record: ${e.message}")
                 }
             }
 
@@ -472,7 +473,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
         if (foundServerFinished) {
             // Validate server certificate (unless allowInsecure)
-            if (!configuration.allowInsecure) {
+            if (!configuration.allowInsecure && !CertificatePolicy.allowInsecure) {
                 if (serverCertificates.isEmpty()) {
                     throw TlsError.CertificateValidationFailed("No server certificates received")
                 }
@@ -526,7 +527,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
             throw TlsError.HandshakeFailed("Ciphertext too short")
         }
 
-        val nonce = NativeBridge.nativeXorNonce(iv, seqNum)
+        val nonce = com.argsment.anywhere.vpn.util.PacketUtil.xorNonce(iv, seqNum)
 
         val isChaCha = keyDerivation?.cipherSuite == TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256
         val cipherTransform = if (isChaCha) "ChaCha20-Poly1305" else "AES/GCM/NoPadding"
@@ -613,7 +614,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 ) as X509Certificate
                 serverCertificates.add(cert)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse certificate: ${e.message}")
+                logger.warning("Failed to parse certificate: ${e.message}")
             }
 
             // Skip certificate extensions
@@ -656,7 +657,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                     inflater.end()
                     if (decodedSize > 0) output.copyOfRange(0, decodedSize) else null
                 } catch (e: Exception) {
-                    Log.w(TAG, "zlib decompression failed: ${e.message}")
+                    logger.warning("zlib decompression failed: ${e.message}")
                     null
                 }
             }
@@ -673,12 +674,12 @@ class TlsClient(private val configuration: TlsConfiguration) {
                     brotliInput.close()
                     if (totalRead > 0) output.copyOfRange(0, totalRead) else null
                 } catch (e: Exception) {
-                    Log.w(TAG, "Brotli decompression failed: ${e.message}")
+                    logger.warning("Brotli decompression failed: ${e.message}")
                     null
                 }
             }
             else -> {
-                Log.w(TAG, "Unknown certificate compression algorithm: 0x${String.format("%04x", algorithm)}")
+                logger.warning("Unknown certificate compression algorithm: 0x${String.format("%04x", algorithm)}")
                 null
             }
         }
@@ -724,7 +725,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 x509tm.checkServerTrusted(serverCertificates.toTypedArray(), authType)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Chain trust validation failed: ${e.message}")
+            logger.warning("Chain trust validation failed: ${e.message}")
             // System trust failed — check user-trusted certificate fingerprints (matching iOS)
             if (!isUserTrusted(leafCert)) {
                 throw TlsError.CertificateValidationFailed(
@@ -951,7 +952,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         iv: ByteArray,
         seqNum: Long
     ): ByteArray {
-        val nonce = NativeBridge.nativeXorNonce(iv, seqNum)
+        val nonce = com.argsment.anywhere.vpn.util.PacketUtil.xorNonce(iv, seqNum)
 
         // Inner plaintext: handshake data + content type (0x16 = handshake)
         val innerPlaintext = ByteArray(plaintext.size + 1)
@@ -1070,13 +1071,15 @@ class TlsClient(private val configuration: TlsConfiguration) {
             }
         }
 
+        val skipValidation = configuration.allowInsecure || CertificatePolicy.allowInsecure
+
         // Validate certificate
-        if (!configuration.allowInsecure && serverCertificates.isNotEmpty()) {
+        if (!skipValidation && serverCertificates.isNotEmpty()) {
             validateCertificate()
         }
 
         // Verify ServerKeyExchange signature
-        if (!configuration.allowInsecure && serverKeyExchangeBody != null) {
+        if (!skipValidation && serverKeyExchangeBody != null) {
             verifyTls12ServerKeyExchange(serverKeyExchangeBody)
         }
 
@@ -1203,7 +1206,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 ) as X509Certificate
                 serverCertificates.add(cert)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse TLS 1.2 certificate: ${e.message}")
+                logger.warning("Failed to parse TLS 1.2 certificate: ${e.message}")
             }
             offset += certLen
         }

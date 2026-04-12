@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.xhttp
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.XHttpConfiguration
 import com.argsment.anywhere.data.model.XHttpMode
 import com.argsment.anywhere.data.model.XHttpPlacement
@@ -25,7 +25,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 
-private const val TAG = "XHttpConnection"
+private val logger = AnywhereLogger("XHTTP")
 
 /**
  * Default User-Agent matching Xray-core's `utils.ChromeUA` (config.go:51-53).

@@ -17,10 +17,12 @@ import android.os.IBinder
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.util.Log
 import com.argsment.anywhere.MainActivity
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.vpn.protocol.tls.CertificatePolicy
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.DnsCache
+import com.argsment.anywhere.vpn.util.LogBuffer
 import kotlinx.serialization.json.Json
 
 /**
@@ -29,6 +31,8 @@ import kotlinx.serialization.json.Json
  *
  * Equivalent of a platform packet tunnel provider.
  */
+private val logger = AnywhereLogger("PacketTunnel")
+
 class AnywhereVpnService : VpnService() {
 
     private var lwipStack: LwipStack? = null
@@ -71,7 +75,7 @@ class AnywhereVpnService : VpnService() {
             ACTION_START -> {
                 val configJson = intent.getStringExtra(EXTRA_CONFIG)
                 if (configJson == null) {
-                    Log.e(TAG, "[VPN] Missing configuration in start intent")
+                    logger.error("[VPN] Invalid or missing configuration")
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -81,7 +85,7 @@ class AnywhereVpnService : VpnService() {
                 }.getOrNull()
 
                 if (config == null) {
-                    Log.e(TAG, "[VPN] Invalid configuration JSON")
+                    logger.error("[VPN] Invalid or missing configuration")
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -122,7 +126,7 @@ class AnywhereVpnService : VpnService() {
 
     override fun onRevoke() {
         // VPN permission revoked by user or system
-        Log.i(TAG, "[VPN] Permission revoked, stopping")
+        logger.debug("[VPN] Permission revoked, stopping")
         stopVpn()
     }
 
@@ -158,8 +162,13 @@ class AnywhereVpnService : VpnService() {
             tunFd = null
         }
 
+        // Prime the cert-policy cache so the first TLS handshake uses the latest
+        // prefs even if the service starts without VpnViewModel being alive
+        // (e.g. Always-On VPN bring-up).
+        CertificatePolicy.reload(this)
+
         val effectiveConfig = applyGlobalAllowInsecure(config)
-        Log.i(TAG, "[VPN] Starting tunnel to ${effectiveConfig.serverAddress}:${effectiveConfig.serverPort} " +
+        logger.debug("[VPN] Starting tunnel to ${effectiveConfig.serverAddress}:${effectiveConfig.serverPort} " +
                 "(connect: ${effectiveConfig.connectAddress}), security: ${effectiveConfig.security}, transport: ${effectiveConfig.transport}")
 
         currentConfig = effectiveConfig
@@ -179,7 +188,7 @@ class AnywhereVpnService : VpnService() {
 
         // Build and establish TUN interface
         val fd = buildTunInterface(effectiveConfig) ?: run {
-            Log.e(TAG, "[VPN] Failed to establish TUN interface")
+            logger.error("[VPN] Failed to set tunnel settings: Failed to establish TUN interface")
             stopSelf()
             return
         }
@@ -204,6 +213,12 @@ class AnywhereVpnService : VpnService() {
 
         val stack = LwipStack(this)
         lwipStack = stack
+
+        // Wire logger sink so logger.info/.warning/.error forward to the
+        // user-facing log buffer (matches iOS LWIPStack+Lifecycle.swift).
+        AnywhereLogger.logSink = { message, level ->
+            LogBuffer.append(message, level)
+        }
 
         stack.onTunnelSettingsNeedReapply = {
             reapplyTunnelSettings(effectiveConfig)
@@ -238,6 +253,8 @@ class AnywhereVpnService : VpnService() {
         tunFd?.close()
         tunFd = null
 
+        AnywhereLogger.logSink = null
+
         currentConfig = null
         DnsCache.setActiveProxyDomain(null)
 
@@ -266,7 +283,7 @@ class AnywhereVpnService : VpnService() {
         // Fallback for older installs that do not yet have a saved last configuration.
         val configId = prefs.getString("selectedConfigurationId", null)
         if (configId == null) {
-            Log.w(TAG, "[VPN] Always On: no saved configuration")
+            logger.warning("[VPN] Always On: no saved configuration")
             stopSelf()
             return
         }
@@ -274,7 +291,7 @@ class AnywhereVpnService : VpnService() {
         // Try to load saved config from file
         val configFile = filesDir.resolve("configurations.json")
         if (!configFile.exists()) {
-            Log.w(TAG, "[VPN] Always On: no configurations file")
+            logger.warning("[VPN] Always On: no configurations file")
             stopSelf()
             return
         }
@@ -286,7 +303,7 @@ class AnywhereVpnService : VpnService() {
 
         val config = configs?.find { it.id.toString() == configId }
         if (config == null) {
-            Log.w(TAG, "[VPN] Always On: selected config not found")
+            logger.warning("[VPN] Always On: selected config not found")
             stopSelf()
             return
         }
@@ -359,7 +376,7 @@ class AnywhereVpnService : VpnService() {
         return try {
             builder.establish()
         } catch (e: Exception) {
-            Log.e(TAG, "[VPN] Failed to establish: $e")
+            logger.error("[VPN] Failed to set tunnel settings: ${e.message ?: e}")
             null
         }
     }
@@ -382,9 +399,9 @@ class AnywhereVpnService : VpnService() {
             // Swap the TUN fd in the stack — restartStack will handle the lwIP restart
             lwipStack?.swapTunFd(newFd)
             oldFd?.close()
-            Log.i(TAG, "[VPN] Tunnel settings reapplied (fd swapped)")
+            logger.info("[VPN] Tunnel settings reapplied")
         } else {
-            Log.e(TAG, "[VPN] Failed to reapply tunnel settings")
+            logger.error("[VPN] Failed to reapply tunnel settings")
         }
     }
 
@@ -468,7 +485,7 @@ class AnywhereVpnService : VpnService() {
             cm.registerNetworkCallback(request, callback)
             networkCallback = callback
         } catch (e: SecurityException) {
-            Log.w(TAG, "[VPN] Failed to register network callback: ${e.message}")
+            logger.debug("[VPN] Failed to register network callback: ${e.message}")
         }
     }
 
@@ -497,7 +514,7 @@ class AnywhereVpnService : VpnService() {
 
         if (!available || network == null) {
             if (lastNetworkAvailable) {
-                Log.w(TAG, "[VPN] Network path unavailable; active connections interrupted")
+                logger.warning("[VPN] Network path unavailable; active connections interrupted")
                 lastNetworkAvailable = false
                 lastUnderlyingNetwork = null
                 lastUnderlyingTransports = 0
@@ -524,13 +541,13 @@ class AnywhereVpnService : VpnService() {
         DnsCache.setUnderlyingNetwork(network)
 
         if (!wasAvailable) {
-            Log.i(TAG, "[VPN] Network path restored: ${transportSummary(transports)}; restarting connections")
+            logger.info("[VPN] Network path restored: ${transportSummary(transports)}; restarting connections")
             lwipStack?.handleNetworkPathChange("network path restored")
             return
         }
 
         if (previousNetwork != network || previousTransports != transports) {
-            Log.w(TAG, "[VPN] Network path changed to ${transportSummary(transports)}; restarting connections")
+            logger.warning("[VPN] Network path changed to ${transportSummary(transports)}; restarting connections on new interface")
             lwipStack?.handleNetworkPathChange("network interface change")
         }
     }

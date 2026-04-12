@@ -1,10 +1,11 @@
 package com.argsment.anywhere.vpn.protocol.shadowsocks
 
-import android.util.Log
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 
-private const val TAG = "ShadowsocksConn"
+private val logger = AnywhereLogger("Shadowsocks")
+private val udpLogger = AnywhereLogger("SS-UDP")
 
 // =============================================================================
 // ShadowsocksConnection (TCP)
@@ -66,7 +67,7 @@ class ShadowsocksConnection(
             val encrypted = writer.seal(plaintext)
             transport.sendAsync(encrypted)
         } catch (e: Exception) {
-            Log.e(TAG, "Send error: ${e.message}")
+            logger.error("[SS] Send error: ${e.message}")
         }
     }
 
@@ -119,7 +120,7 @@ class ShadowsocksUDPConnection(
             val encrypted = ShadowsocksUDPCrypto.encrypt(cipher, masterKey, packet)
             transport.sendAsync(encrypted)
         } catch (e: Exception) {
-            Log.e(TAG, "UDP send error: ${e.message}")
+            udpLogger.error("[SS-UDP] Send error: ${e.message}")
         }
     }
 

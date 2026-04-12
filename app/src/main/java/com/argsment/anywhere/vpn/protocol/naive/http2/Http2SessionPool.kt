@@ -1,11 +1,11 @@
 package com.argsment.anywhere.vpn.protocol.naive.http2
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.naive.NaiveConfiguration
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import kotlinx.coroutines.CoroutineScope
 
-private const val TAG = "Http2SessionPool"
+private val logger = AnywhereLogger("HTTP2Pool")
 
 /**
  * Singleton pool for HTTP/2 session reuse.
@@ -82,7 +82,7 @@ object Http2SessionPool {
                 session.onClose = null // Prevent re-entrant eviction
                 session.close()
             } catch (e: Exception) {
-                Log.w(TAG, "Error closing session: ${e.message}")
+                logger.warning("Error closing session: ${e.message}")
             }
         }
     }

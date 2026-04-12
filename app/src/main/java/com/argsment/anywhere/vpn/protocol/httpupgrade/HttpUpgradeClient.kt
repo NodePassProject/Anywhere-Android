@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.httpupgrade
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
@@ -9,7 +9,7 @@ import com.argsment.anywhere.vpn.util.NioSocket
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-private const val TAG = "HttpUpgradeConnection"
+private val logger = AnywhereLogger("HttpUpgrade")
 
 /**
  * HTTP upgrade connection that performs an HTTP upgrade handshake and then

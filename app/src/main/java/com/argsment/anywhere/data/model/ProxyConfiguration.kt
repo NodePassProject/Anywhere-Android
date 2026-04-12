@@ -81,6 +81,13 @@ enum class TlsVersion(val value: Int) {
             TLS12 -> "TLS 1.2"
             TLS13 -> "TLS 1.3"
         }
+
+    /** Wire-compatible version string for URL query params (e.g. "1.2", "1.3"). Matches iOS. */
+    val urlValue: String
+        get() = when (this) {
+            TLS12 -> "1.2"
+            TLS13 -> "1.3"
+        }
 }
 
 // =============================================================================
@@ -117,9 +124,10 @@ data class TlsConfiguration(
             )
         }
 
-        /** Parses a TLS version string ("1.2" or "1.3") into a [TlsVersion]. Matches iOS TLSConfiguration.parseTLSVersion. */
+        /** Parses a TLS version string ("1.0"–"1.3") into a [TlsVersion]. Matches iOS TLSConfiguration.parseTLSVersion.
+         *  "1.0" and "1.1" are legacy; treated as TLS 1.2 since Android does not implement deprecated versions. */
         private fun parseTlsVersion(version: String?): TlsVersion? = when (version) {
-            "1.2" -> TlsVersion.TLS12
+            "1.0", "1.1", "1.2" -> TlsVersion.TLS12
             "1.3" -> TlsVersion.TLS13
             else -> null
         }
@@ -655,11 +663,7 @@ data class ProxyConfiguration(
 
         // TLS parameters
         if (security == "tls" && tls != null) {
-            if (tls.serverName != serverAddress) params.add("sni=${tls.serverName}")
-            tls.alpn?.takeIf { it.isNotEmpty() }?.let {
-                params.add("alpn=${urlEncode(it.joinToString(","))}")
-            }
-            if (tls.fingerprint != TlsFingerprint.CHROME_120) params.add("fp=${tls.fingerprint.raw}")
+            appendTlsParams(params, tls)
         }
 
         // Reality parameters
@@ -694,11 +698,7 @@ data class ProxyConfiguration(
         if (security != "none") params.add("security=$security")
 
         if (security == "tls" && tls != null) {
-            if (tls.serverName != serverAddress) params.add("sni=${tls.serverName}")
-            tls.alpn?.takeIf { it.isNotEmpty() }?.let {
-                params.add("alpn=${urlEncode(it.joinToString(","))}")
-            }
-            if (tls.fingerprint != TlsFingerprint.CHROME_120) params.add("fp=${tls.fingerprint.raw}")
+            appendTlsParams(params, tls)
         }
 
         appendTransportParams(params)
@@ -706,6 +706,24 @@ data class ProxyConfiguration(
         val query = if (params.isEmpty()) "" else "?${params.joinToString("&")}"
         val fragment = urlEncode(name)
         return "ss://$encoded@$bracketedServerAddress:$serverPort/$query#$fragment"
+    }
+
+    /**
+     * Emits TLS query params (sni, alpn, fp, allowInsecure, minVersion, maxVersion).
+     * `allowInsecure` and `min/maxVersion` are Android extensions — iOS does not parse
+     * `allowInsecure` at the URL level, but does parse `min/maxVersion`. Keeping the
+     * extra parameters preserves user settings across Android→Android sharing without
+     * breaking iOS consumers (unknown params are ignored by iOS URL parsing).
+     */
+    private fun appendTlsParams(params: MutableList<String>, tls: TlsConfiguration) {
+        if (tls.serverName != serverAddress) params.add("sni=${tls.serverName}")
+        tls.alpn?.takeIf { it.isNotEmpty() }?.let {
+            params.add("alpn=${urlEncode(it.joinToString(","))}")
+        }
+        if (tls.fingerprint != TlsFingerprint.CHROME_120) params.add("fp=${tls.fingerprint.raw}")
+        if (tls.allowInsecure) params.add("allowInsecure=1")
+        tls.minVersion?.let { params.add("minVersion=${it.urlValue}") }
+        tls.maxVersion?.let { params.add("maxVersion=${it.urlValue}") }
     }
 
     private fun toNaiveUrl(): String {

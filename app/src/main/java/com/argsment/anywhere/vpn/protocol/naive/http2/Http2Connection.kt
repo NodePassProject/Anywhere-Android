@@ -1,12 +1,12 @@
 package com.argsment.anywhere.vpn.protocol.naive.http2
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.naive.NaiveConfiguration
 import com.argsment.anywhere.vpn.protocol.naive.NaivePaddingNegotiator
 import com.argsment.anywhere.vpn.protocol.naive.NaiveTlsTransport
 import java.io.IOException
 
-private const val TAG = "Http2"
+private val logger = AnywhereLogger("HTTP2")
 
 // -- Error --
 
@@ -217,7 +217,7 @@ class Http2Connection(
                     state = State.CLOSED
                     val parsed = Http2Framer.parseGoaway(frame.payload)
                     if (parsed != null) {
-                        Log.w(TAG, "GOAWAY: lastStreamID=${parsed.lastStreamID}, errorCode=${parsed.errorCode}")
+                        logger.warning("GOAWAY: lastStreamID=${parsed.lastStreamID}, errorCode=${parsed.errorCode}")
                     }
                     throw Http2Error.Goaway()
                 }
@@ -227,7 +227,7 @@ class Http2Connection(
                         state = State.CLOSED
                         val errorCode = Http2Framer.parseRstStream(frame.payload)
                         if (errorCode != null) {
-                            Log.e(TAG, "Stream 1 reset during CONNECT: errorCode=$errorCode")
+                            logger.error("Stream 1 reset during CONNECT: errorCode=$errorCode")
                         }
                         throw Http2Error.StreamReset(frame.streamID)
                     }
@@ -293,12 +293,12 @@ class Http2Connection(
             }
             "407" -> {
                 state = State.CLOSED
-                Log.e(TAG, "Proxy authentication required (407)")
+                logger.error("Proxy authentication required (407)")
                 throw Http2Error.AuthenticationRequired()
             }
             else -> {
                 state = State.CLOSED
-                Log.e(TAG, "CONNECT failed with status $status")
+                logger.error("CONNECT failed with status $status")
                 throw Http2Error.TunnelFailed(status)
             }
         }
@@ -344,7 +344,7 @@ class Http2Connection(
         }
 
         if (framesBuf.size() == 0) {
-            Log.w(TAG, "Send blocked by flow control")
+            logger.warning("Send blocked by flow control")
             throw Http2Error.ProtocolError("Flow control blocked")
         }
 
@@ -421,7 +421,7 @@ class Http2Connection(
                     state = State.CLOSED
                     val parsed = Http2Framer.parseGoaway(frame.payload)
                     if (parsed != null) {
-                        Log.w(TAG, "GOAWAY: lastStreamID=${parsed.lastStreamID}, errorCode=${parsed.errorCode}")
+                        logger.warning("GOAWAY: lastStreamID=${parsed.lastStreamID}, errorCode=${parsed.errorCode}")
                     }
                     throw Http2Error.Goaway()
                 }
@@ -460,7 +460,7 @@ class Http2Connection(
         try {
             transport.send(Http2Framer.serialize(frame))
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to send frame: ${e.message}")
+            logger.warning("Failed to send frame: ${e.message}")
         }
     }
 }

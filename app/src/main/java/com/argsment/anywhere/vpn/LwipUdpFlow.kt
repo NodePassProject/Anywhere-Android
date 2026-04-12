@@ -1,7 +1,7 @@
 package com.argsment.anywhere.vpn
 
-import android.util.Log
 import com.argsment.anywhere.data.model.OutboundProtocol
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.protocol.direct.DirectUdpRelay
 import com.argsment.anywhere.vpn.protocol.mux.MuxNetwork
@@ -116,13 +116,13 @@ class LwipUdpFlow(
     private fun sendUdpThroughVless(payload: ByteArray) {
         val connection = vlessConnection ?: return
         // Frame with 2-byte big-endian length prefix via JNI
-        val framed = NativeBridge.nativeFrameUdpPayload(payload)
+        val framed = com.argsment.anywhere.vpn.util.PacketUtil.frameUdpPayload(payload)
         scope.launch {
             try {
                 connection.sendRaw(framed)
             } catch (_: CancellationException) {
             } catch (e: Exception) {
-                if (!closed) Log.e(TAG, "[UDP] VLESS send error for $flowKey: ${e.message}")
+                if (!closed) logger.debug("[UDP] VLESS send error for $flowKey: ${e.message}")
             }
         }
     }
@@ -227,7 +227,7 @@ class LwipUdpFlow(
                     lwipExecutor.execute {
                         vlessConnecting = false
                         if (closed) return@execute
-                        Log.e(TAG, "[UDP] Mux dispatch failed: $flowKey: ${e.message}")
+                        logger.error("[UDP] Mux dispatch failed: $flowKey: ${e.message}")
                         releaseProtocol()
                         LwipStack.instance?.udpFlows?.remove(flowKey)
                     }
@@ -293,7 +293,7 @@ class LwipUdpFlow(
                                 connection.sendRaw(batched)
                             } catch (_: CancellationException) {
                             } catch (e: Exception) {
-                                if (!closed) Log.e(TAG, "[UDP] Chained initial send error for $flowKey: ${e.message}")
+                                if (!closed) logger.debug("[UDP] Chained initial send error for $flowKey: ${e.message}")
                             }
                         }
                     }
@@ -305,7 +305,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    Log.e(TAG, "[UDP] Chain connect failed: $flowKey: ${e.message}")
+                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
                     releaseProtocol()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -350,7 +350,7 @@ class LwipUdpFlow(
                                 connection.sendRaw(batched)
                             } catch (_: CancellationException) {
                             } catch (e: Exception) {
-                                if (!closed) Log.e(TAG, "[UDP] VLESS initial send error for $flowKey: ${e.message}")
+                                if (!closed) logger.debug("[UDP] VLESS initial send error for $flowKey: ${e.message}")
                             }
                         }
                     }
@@ -363,7 +363,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    Log.e(TAG, "[UDP] connect failed: $flowKey: ${e.message}")
+                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
                     releaseProtocol()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -410,7 +410,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    Log.e(TAG, "[UDP] SS connect failed: $flowKey: ${e.message}")
+                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
                     close()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -450,7 +450,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    Log.e(TAG, "[UDP] Direct connect failed: $flowKey: ${e.message}")
+                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
                     close()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -466,7 +466,7 @@ class LwipUdpFlow(
                 },
                 errorHandler = { error ->
                     if (error != null) {
-                        Log.e(TAG, "[UDP] VLESS recv error: $flowKey: ${error.message}")
+                        logger.debug("[UDP] VLESS recv error: $flowKey: ${error.message}")
                     }
                     lwipExecutor.execute {
                         close()
@@ -525,7 +525,7 @@ class LwipUdpFlow(
     }
 
     companion object {
-        private const val TAG = "LWIP-UDP"
+        private val logger = AnywhereLogger("LWIP-UDP")
         /** Maximum buffer for queued datagrams (matches Xray-core DiscardOverflow 16KB). */
         private const val MAX_UDP_BUFFER_SIZE = 16 * 1024  // 16 KB
     }

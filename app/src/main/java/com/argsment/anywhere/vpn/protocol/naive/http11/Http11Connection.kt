@@ -1,12 +1,12 @@
 package com.argsment.anywhere.vpn.protocol.naive.http11
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.naive.NaiveConfiguration
 import com.argsment.anywhere.vpn.protocol.naive.NaivePaddingNegotiator
 import com.argsment.anywhere.vpn.protocol.naive.NaiveTlsTransport
 import com.argsment.anywhere.vpn.protocol.naive.NaiveTlsError
 
-private const val TAG = "Http11"
+private val logger = AnywhereLogger("HTTP11")
 
 /**
  * HTTP/1.1 CONNECT tunnel through a TLS proxy.
@@ -132,7 +132,7 @@ class Http11Connection(
 
             val statusCode = parts[1]
             if (statusCode != "200") {
-                Log.e(TAG, "CONNECT rejected: $statusLine")
+                logger.error("CONNECT rejected: $statusLine")
                 if (statusCode == "407") {
                     throw NaiveTlsError.ConnectionFailed("Proxy authentication required (407)")
                 } else {

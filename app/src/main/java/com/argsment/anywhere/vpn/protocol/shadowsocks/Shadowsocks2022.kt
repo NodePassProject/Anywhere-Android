@@ -1,12 +1,14 @@
 package com.argsment.anywhere.vpn.protocol.shadowsocks
 
-import android.util.Log
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import java.io.ByteArrayOutputStream
 import java.security.SecureRandom
 
-private const val TAG = "SS2022"
+private val logger = AnywhereLogger("SS2022")
+private val udpLogger = AnywhereLogger("SS2022-UDP")
+private val chachaUdpLogger = AnywhereLogger("SS2022-ChaCha-UDP")
 
 private const val HEADER_TYPE_CLIENT: Byte = 0
 private const val HEADER_TYPE_SERVER: Byte = 1
@@ -107,7 +109,7 @@ class Shadowsocks2022Connection(
                 transport.sendAsync(encrypted)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Send error: ${e.message}")
+            logger.error("[SS2022] Send error: ${e.message}")
         }
     }
 
@@ -424,7 +426,7 @@ class Shadowsocks2022AESUDPConnection(
         try {
             transport.sendAsync(encryptPacket(data))
         } catch (e: Exception) {
-            Log.e(TAG, "UDP send error: ${e.message}")
+            udpLogger.error("[SS2022-UDP] Send error: ${e.message}")
         }
     }
 
@@ -562,7 +564,7 @@ class Shadowsocks2022ChaChaUDPConnection(
         try {
             transport.sendAsync(encryptPacket(data))
         } catch (e: Exception) {
-            Log.e(TAG, "ChaCha UDP send error: ${e.message}")
+            chachaUdpLogger.error("[SS2022-ChaCha-UDP] Send error: ${e.message}")
         }
     }
 

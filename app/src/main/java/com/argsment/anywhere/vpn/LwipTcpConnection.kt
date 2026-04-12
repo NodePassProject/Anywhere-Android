@@ -1,7 +1,7 @@
 package com.argsment.anywhere.vpn
 
-import android.util.Log
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.direct.DirectTcpRelay
 import com.argsment.anywhere.vpn.protocol.vless.VlessClient
@@ -75,7 +75,7 @@ class LwipTcpConnection(
         // Start handshake timeout (60s)
         handshakeTimer = lwipExecutor.schedule({
             if (!closed && (vlessConnecting || directConnecting)) {
-                Log.e(TAG, "[TCP] Handshake timeout for $dstHost:$dstPort")
+                logger.error("[TCP] Handshake timeout for $dstHost:$dstPort")
                 abort()
             }
         }, HANDSHAKE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -171,7 +171,7 @@ class LwipTcpConnection(
                 lwipExecutor.execute {
                     directConnecting = false
                     if (!closed) {
-                        Log.e(TAG, "[TCP] Direct connect failed: $dstHost:$dstPort: ${e.message}")
+                        logger.error("[TCP] connect failed: $dstHost:$dstPort: ${e.message}")
                         abort()
                     }
                 }
@@ -199,7 +199,7 @@ class LwipTcpConnection(
                             }
                         } catch (_: CancellationException) {
                         } catch (e: Exception) {
-                            if (!closed) Log.e(TAG, "[TCP] Direct initial send error for $dstHost: ${e.message}")
+                            if (!closed) logger.debug("[TCP] Direct initial send error for $dstHost: ${e.message}")
                             lwipExecutor.execute { abort() }
                         }
                     }
@@ -218,7 +218,7 @@ class LwipTcpConnection(
                             }
                         } catch (_: CancellationException) {
                         } catch (e: Exception) {
-                            if (!closed) Log.e(TAG, "[TCP] Direct pending send error for $dstHost: ${e.message}")
+                            if (!closed) logger.debug("[TCP] Direct pending send error for $dstHost: ${e.message}")
                             lwipExecutor.execute { abort() }
                         }
                     }
@@ -261,7 +261,7 @@ class LwipTcpConnection(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (!closed) {
-                        Log.e(TAG, "[TCP] connect failed: $dstHost:$dstPort: ${e.message}")
+                        logger.error("[TCP] connect failed: $dstHost:$dstPort: ${e.message}")
                         abort()
                     }
                 }
@@ -301,7 +301,7 @@ class LwipTcpConnection(
                         }
                     } catch (_: CancellationException) {
                     } catch (e: Exception) {
-                        if (!closed) Log.e(TAG, "[TCP] pending send error for $dstHost: ${e.message}")
+                        if (!closed) logger.debug("[TCP] pending send error for $dstHost: ${e.message}")
                         lwipExecutor.execute { abort() }
                     }
                 }
@@ -351,7 +351,7 @@ class LwipTcpConnection(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (!closed) {
-                        Log.e(TAG, "[TCP] Chain connect failed: $dstHost:$dstPort: ${e.message}")
+                        logger.error("[TCP] connect failed: $dstHost:$dstPort: ${e.message}")
                         abort()
                     }
                 }
@@ -382,7 +382,7 @@ class LwipTcpConnection(
                 }
             } catch (_: CancellationException) {
             } catch (e: Exception) {
-                if (!closed) Log.e(TAG, "[TCP] segment send error for $dstHost:$dstPort: ${e.message}")
+                if (!closed) logger.debug("[TCP] segment send error for $dstHost:$dstPort: ${e.message}")
                 lwipExecutor.execute { abort() }
             }
         }
@@ -427,7 +427,7 @@ class LwipTcpConnection(
             } catch (_: CancellationException) {
                 lwipExecutor.execute { coalesceFlushInFlight = false }
             } catch (e: Exception) {
-                if (!closed) Log.e(TAG, "[TCP] send error for $dstHost:$dstPort: ${e.message}")
+                if (!closed) logger.debug("[TCP] send error for $dstHost:$dstPort: ${e.message}")
                 lwipExecutor.execute {
                     coalesceFlushInFlight = false
                     abort()
@@ -494,7 +494,7 @@ class LwipTcpConnection(
 
         val written = feedLwip(data, 0, data.size, retryOnEmpty = true)
         if (written == -1) {
-            Log.e(TAG, "[TCP] tcp_write error for $dstHost:$dstPort")
+            logger.error("[TCP] Write failed: $dstHost:$dstPort")
             abort()
             return
         }
@@ -522,7 +522,7 @@ class LwipTcpConnection(
         val dataSize = overflowBuffer.size()
         val written = feedLwip(data, 0, dataSize)
         if (written == -1) {
-            Log.e(TAG, "[TCP] tcp_write error for $dstHost:$dstPort")
+            logger.error("[TCP] Write failed: $dstHost:$dstPort")
             abort()
             return
         }
@@ -576,7 +576,7 @@ class LwipTcpConnection(
                 } catch (_: CancellationException) {
                     // Scope cancelled during teardown — silently ignore
                 } catch (e: Exception) {
-                    if (!closed) Log.e(TAG, "[TCP] Direct recv error: $dstHost:$dstPort: ${e.message}")
+                    if (!closed) logger.debug("[TCP] Direct recv error: $dstHost:$dstPort: ${e.message}")
                     lwipExecutor.execute { abort() }
                 }
             }
@@ -605,7 +605,7 @@ class LwipTcpConnection(
             } catch (_: CancellationException) {
                 // Scope cancelled during teardown — silently ignore
             } catch (e: Exception) {
-                if (!closed) Log.e(TAG, "[TCP] VLESS recv error: $dstHost:$dstPort: ${e.message}")
+                if (!closed) logger.debug("[TCP] VLESS recv error: $dstHost:$dstPort: ${e.message}")
                 lwipExecutor.execute { abort() }
             }
         }
@@ -663,7 +663,7 @@ class LwipTcpConnection(
     }
 
     companion object {
-        private const val TAG = "LWIP-TCP"
+        private val logger = AnywhereLogger("LWIP-TCP")
         private const val CONNECTION_IDLE_TIMEOUT_MS = 300_000L  // 300s (Xray-core connIdle)
         private const val DOWNLINK_ONLY_TIMEOUT_MS = 1_000L      // 1s (Xray-core downlinkOnly)
         private const val UPLINK_ONLY_TIMEOUT_MS = 1_000L        // 1s (Xray-core uplinkOnly)

@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.naive.http2
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.naive.NaiveConfiguration
 import com.argsment.anywhere.vpn.protocol.naive.NaivePaddingNegotiator
 import com.argsment.anywhere.vpn.protocol.naive.NaiveTlsTransport
@@ -12,7 +12,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
 
-private const val TAG = "Http2Session"
+private val logger = AnywhereLogger("HTTP2Session")
 
 /**
  * Manages one TLS connection with multiple concurrent CONNECT streams.
@@ -230,7 +230,7 @@ class Http2Session(
 
                 Http2FrameType.GOAWAY -> {
                     val parsed = Http2Framer.parseGoaway(frame.payload)
-                    Log.w(TAG, "GOAWAY during handshake: ${parsed?.lastStreamID}, ${parsed?.errorCode}")
+                    logger.warning("GOAWAY during handshake: ${parsed?.lastStreamID}, ${parsed?.errorCode}")
                     throw Http2Error.Goaway()
                 }
 
@@ -256,7 +256,7 @@ class Http2Session(
             }
         } catch (e: Exception) {
             if (state != State.CLOSED) {
-                Log.e(TAG, "Read loop error: ${e.message}")
+                logger.error("Read loop error: ${e.message}")
                 closeWithError(e)
             }
         }
@@ -339,7 +339,7 @@ class Http2Session(
                 goawayReceived = true
                 if (parsed != null) {
                     goawayLastStreamID = parsed.lastStreamID
-                    Log.w(TAG, "GOAWAY: lastStreamID=${parsed.lastStreamID}, errorCode=${parsed.errorCode}")
+                    logger.warning("GOAWAY: lastStreamID=${parsed.lastStreamID}, errorCode=${parsed.errorCode}")
 
                     // Error streams with ID > lastStreamID
                     val affected = streams.filter { it.key > parsed.lastStreamID }
@@ -442,7 +442,7 @@ class Http2Session(
         try {
             sendFrameRaw(Http2Framer.windowUpdateFrame(streamID = streamID, increment = increment))
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to send WINDOW_UPDATE: ${e.message}")
+            logger.warning("Failed to send WINDOW_UPDATE: ${e.message}")
         }
     }
 
@@ -451,7 +451,7 @@ class Http2Session(
             try {
                 transport?.send(Http2Framer.serialize(frame))
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to send frame: ${e.message}")
+                logger.warning("Failed to send frame: ${e.message}")
             }
         }
     }

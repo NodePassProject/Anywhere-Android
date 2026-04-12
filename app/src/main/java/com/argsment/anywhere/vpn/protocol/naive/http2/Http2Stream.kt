@@ -1,12 +1,12 @@
 package com.argsment.anywhere.vpn.protocol.naive.http2
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.naive.NaivePaddingNegotiator
 import com.argsment.anywhere.vpn.protocol.naive.NaiveTunnel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 
-private const val TAG = "Http2Stream"
+private val logger = AnywhereLogger("HTTP2Stream")
 
 /**
  * A single HTTP/2 CONNECT tunnel stream, multiplexed on an [Http2Session].

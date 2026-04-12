@@ -58,27 +58,6 @@ set(CRYPTO_SOURCES
 )
 
 # --------------------------------------------------------------------------
-# Packet utilities
-# --------------------------------------------------------------------------
-set(PACKET_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/packet/CPacket.c
-)
-
-# --------------------------------------------------------------------------
-# GeoIP
-# --------------------------------------------------------------------------
-set(GEOIP_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/geoip/CGeoIP.c
-)
-
-# --------------------------------------------------------------------------
-# VLESS
-# --------------------------------------------------------------------------
-set(VLESS_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/vless/CVLESS.c
-)
-
-# --------------------------------------------------------------------------
 # libyaml
 # --------------------------------------------------------------------------
 set(LIBYAML_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libyaml)
@@ -95,15 +74,28 @@ set(LIBYAML_SOURCES
 )
 
 # --------------------------------------------------------------------------
+# ngtcp2 source files
+# --------------------------------------------------------------------------
+set(NGTCP2_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ngtcp2)
+
+file(GLOB NGTCP2_CORE_SOURCES "${NGTCP2_DIR}/ngtcp2_*.c")
+
+# Exclude any lingering platform-specific backends.
+list(FILTER NGTCP2_CORE_SOURCES EXCLUDE REGEX ".*ngtcp2_crypto_apple\\.c$")
+
+set(NGTCP2_SOURCES
+    ${NGTCP2_CORE_SOURCES}
+    ${NGTCP2_DIR}/shared.c
+)
+
+# --------------------------------------------------------------------------
 # JNI bridge files
 # --------------------------------------------------------------------------
 set(JNI_BRIDGE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/lwip_jni_bridge.c
     ${CMAKE_CURRENT_SOURCE_DIR}/crypto_jni_bridge.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/packet_jni_bridge.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/geoip_jni_bridge.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/vless_jni_bridge.c
     ${CMAKE_CURRENT_SOURCE_DIR}/yaml_jni_bridge.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/quic_jni_bridge.c
 )
 
 # --------------------------------------------------------------------------
@@ -113,10 +105,9 @@ add_library(anywhere_native SHARED
     ${LWIP_SOURCES}
     ${BLAKE3_SOURCES}
     ${CRYPTO_SOURCES}
-    ${PACKET_SOURCES}
-    ${GEOIP_SOURCES}
-    ${VLESS_SOURCES}
     ${LIBYAML_SOURCES}
+    ${NGTCP2_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/ngtcp2/ngtcp2_crypto_android.c
     ${JNI_BRIDGE_SOURCES}
 )
 
@@ -126,11 +117,9 @@ add_library(anywhere_native SHARED
 target_include_directories(anywhere_native PRIVATE
     ${LWIP_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/crypto
-    ${CMAKE_CURRENT_SOURCE_DIR}/packet
-    ${CMAKE_CURRENT_SOURCE_DIR}/geoip
-    ${CMAKE_CURRENT_SOURCE_DIR}/vless
     ${LIBYAML_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/compat
+    ${NGTCP2_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -140,6 +129,8 @@ target_include_directories(anywhere_native PRIVATE
 target_compile_definitions(anywhere_native PRIVATE
     YAML_DECLARE_STATIC
     HAVE_CONFIG_H
+    # ngtcp2 build-time flag for symbol visibility on shared libs.
+    NGTCP2_STATICLIB
 )
 
 # --------------------------------------------------------------------------

@@ -20,12 +20,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.CallMerge
 import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -58,6 +59,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
+import com.argsment.anywhere.data.rules.CountryBypassCatalog
 import com.argsment.anywhere.viewmodel.VpnViewModel
 import java.util.Locale
 
@@ -67,12 +69,12 @@ fun SettingsScreen(viewModel: VpnViewModel) {
     val context = LocalContext.current
     var showRoutingRules by remember { mutableStateOf(false) }
     var showAcknowledgements by remember { mutableStateOf(false) }
-    var showIpv6Settings by remember { mutableStateOf(false) }
-    var showEncryptedDns by remember { mutableStateOf(false) }
     var showTrustedCertificates by remember { mutableStateOf(false) }
+    var showAdvancedSettings by remember { mutableStateOf(false) }
     var showInsecureAlert by remember { mutableStateOf(false) }
 
     var alwaysOn by remember { mutableStateOf(viewModel.alwaysOnEnabled) }
+    var globalMode by remember { mutableStateOf(viewModel.proxyMode == "global") }
     var bypassCountryCode by remember { mutableStateOf(viewModel.bypassCountryCode) }
     var allowInsecure by remember { mutableStateOf(viewModel.allowInsecure) }
 
@@ -86,175 +88,78 @@ fun SettingsScreen(viewModel: VpnViewModel) {
     // Without this, the NavHost handles back press by popping the SettingsRoute,
     // sending the user to Home instead of back to the Settings list.
     val activeSubScreen = showRoutingRules || showAcknowledgements ||
-            showIpv6Settings || showEncryptedDns || showTrustedCertificates
+            showTrustedCertificates || showAdvancedSettings
     BackHandler(enabled = activeSubScreen) {
         showRoutingRules = false
         showAcknowledgements = false
-        showIpv6Settings = false
-        showEncryptedDns = false
         showTrustedCertificates = false
+        showAdvancedSettings = false
     }
 
-    if (showRoutingRules) {
-        RuleSetListScreen(
-            viewModel = viewModel,
-            onBack = { showRoutingRules = false }
-        )
-        return
+    val currentRoute = when {
+        showRoutingRules -> "routing"
+        showAcknowledgements -> "acks"
+        showTrustedCertificates -> "certs"
+        showAdvancedSettings -> "advanced"
+        else -> "root"
     }
 
-    if (showAcknowledgements) {
-        AcknowledgementsScreen(onBack = { showAcknowledgements = false })
-        return
-    }
-
-    if (showIpv6Settings) {
-        Ipv6SettingsScreen(
-            viewModel = viewModel,
-            onBack = { showIpv6Settings = false }
-        )
-        return
-    }
-
-    if (showEncryptedDns) {
-        EncryptedDnsSettingsScreen(
-            viewModel = viewModel,
-            onBack = { showEncryptedDns = false }
-        )
-        return
-    }
-
-    if (showTrustedCertificates) {
-        TrustedCertificatesScreen(
-            viewModel = viewModel,
-            onBack = { showTrustedCertificates = false }
-        )
-        return
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.settings)) })
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            // VPN section
-            SectionHeader(stringResource(R.string.vpn))
-            SettingsSwitch(
-                icon = Icons.Filled.Lock,
-                iconTint = Color(0xFF2196F3),
-                label = stringResource(R.string.always_on),
-                checked = alwaysOn,
-                onCheckedChange = {
-                    alwaysOn = it
-                    viewModel.alwaysOnEnabled = it
-                }
+    SubScreenHost(state = currentRoute, rootKey = "root") { route ->
+        when (route) {
+            "routing" -> RuleSetListScreen(
+                viewModel = viewModel,
+                onBack = { showRoutingRules = false }
             )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Network section
-            SectionHeader(stringResource(R.string.network))
-            SettingsNavRow(
-                icon = Icons.Filled.Language,
-                iconTint = Color(0xFF2196F3),
-                label = stringResource(R.string.ipv6),
-                onClick = { showIpv6Settings = true }
+            "acks" -> AcknowledgementsScreen(onBack = { showAcknowledgements = false })
+            "certs" -> TrustedCertificatesScreen(
+                viewModel = viewModel,
+                onBack = { showTrustedCertificates = false }
             )
-            SettingsNavRow(
-                icon = Icons.Filled.Shield,
-                iconTint = Color(0xFF009688),
-                label = stringResource(R.string.encrypted_dns),
-                onClick = { showEncryptedDns = true }
+            "advanced" -> AdvancedSettingsScreen(
+                viewModel = viewModel,
+                onBack = { showAdvancedSettings = false }
             )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Routing section
-            SectionHeader(stringResource(R.string.routing))
-            CountryBypassPicker(
-                icon = Icons.Filled.Public,
-                iconTint = Color(0xFFFF9800),
-                selectedCode = bypassCountryCode,
-                onSelect = {
+            else -> SettingsRoot(
+                alwaysOn = alwaysOn,
+                onAlwaysOnChange = { alwaysOn = it; viewModel.alwaysOnEnabled = it },
+                globalMode = globalMode,
+                onGlobalModeChange = { globalMode = it; viewModel.proxyMode = if (it) "global" else "rule" },
+                bypassCountryCode = bypassCountryCode,
+                onBypassCountryChange = {
                     bypassCountryCode = it
                     viewModel.bypassCountryCode = it
-                }
-            )
-            if (adBlockRuleSet != null) {
-                SettingsSwitch(
-                    icon = Icons.Filled.Shield,
-                    iconTint = Color(0xFFE91E63),
-                    label = stringResource(R.string.ad_blocking_title),
-                    checked = adBlockEnabled,
-                    onCheckedChange = { enabled ->
-                        adBlockEnabled = enabled
+                    viewModel.syncRoutingConfigurationToNE()
+                },
+                adBlockVisible = adBlockRuleSet != null,
+                adBlockEnabled = adBlockEnabled,
+                onAdBlockChange = { enabled ->
+                    adBlockEnabled = enabled
+                    if (adBlockRuleSet != null) {
                         viewModel.ruleSetRepository.updateAssignment(
                             adBlockRuleSet,
                             if (enabled) "REJECT" else null
                         )
                         viewModel.syncRoutingConfigurationToNE()
                     }
-                )
-            }
-            SettingsNavRow(
-                icon = Icons.Filled.AltRoute,
-                iconTint = Color(0xFF9C27B0),
-                label = stringResource(R.string.routing_rules),
-                onClick = { showRoutingRules = true }
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Security section
-            SectionHeader(stringResource(R.string.security))
-            SettingsSwitch(
-                icon = Icons.Filled.Warning,
-                iconTint = Color(0xFFF44336),
-                label = stringResource(R.string.allow_insecure),
-                checked = allowInsecure,
-                onCheckedChange = { newValue ->
+                },
+                allowInsecure = allowInsecure,
+                onAllowInsecureChange = { newValue ->
                     if (newValue) {
                         showInsecureAlert = true
                     } else {
                         allowInsecure = false
                         viewModel.allowInsecure = false
                     }
-                }
-            )
-            SettingsNavRow(
-                icon = Icons.Filled.VerifiedUser,
-                iconTint = Color(0xFF4CAF50),
-                label = stringResource(R.string.trusted_certificates),
-                onClick = { showTrustedCertificates = true }
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // About section
-            SectionHeader(stringResource(R.string.about))
-            SettingsNavRow(
-                painter = painterResource(R.drawable.ic_telegram_symbol),
-                iconTint = Color(0xFF039BE5),
-                label = stringResource(R.string.join_telegram_group),
-                onClick = {
+                },
+                onOpenTelegram = {
                     context.startActivity(
                         Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/anywhere_official_group"))
                     )
-                }
-            )
-            SettingsNavRow(
-                icon = Icons.Filled.Info,
-                iconTint = Color(0xFF9E9E9E),
-                label = stringResource(R.string.acknowledgements),
-                onClick = { showAcknowledgements = true }
+                },
+                onOpenRoutingRules = { showRoutingRules = true },
+                onOpenTrustedCertificates = { showTrustedCertificates = true },
+                onOpenAcknowledgements = { showAcknowledgements = true },
+                onOpenAdvancedSettings = { showAdvancedSettings = true }
             )
         }
     }
@@ -283,8 +188,133 @@ fun SettingsScreen(viewModel: VpnViewModel) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SectionHeader(title: String) {
+private fun SettingsRoot(
+    alwaysOn: Boolean,
+    onAlwaysOnChange: (Boolean) -> Unit,
+    globalMode: Boolean,
+    onGlobalModeChange: (Boolean) -> Unit,
+    bypassCountryCode: String,
+    onBypassCountryChange: (String) -> Unit,
+    adBlockVisible: Boolean,
+    adBlockEnabled: Boolean,
+    onAdBlockChange: (Boolean) -> Unit,
+    allowInsecure: Boolean,
+    onAllowInsecureChange: (Boolean) -> Unit,
+    onOpenTelegram: () -> Unit,
+    onOpenRoutingRules: () -> Unit,
+    onOpenTrustedCertificates: () -> Unit,
+    onOpenAcknowledgements: () -> Unit,
+    onOpenAdvancedSettings: () -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(title = { Text(stringResource(R.string.settings)) })
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            // VPN section
+            SectionHeader(stringResource(R.string.vpn))
+            SettingsSwitch(
+                icon = Icons.Filled.Lock,
+                iconTint = Color(0xFF2196F3),
+                label = stringResource(R.string.always_on),
+                checked = alwaysOn,
+                onCheckedChange = onAlwaysOnChange
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Routing section
+            SectionHeader(stringResource(R.string.routing))
+            SettingsSwitch(
+                icon = Icons.AutoMirrored.Filled.CallMerge,
+                iconTint = Color(0xFFFF9800),
+                label = stringResource(R.string.global_mode),
+                checked = globalMode,
+                onCheckedChange = onGlobalModeChange
+            )
+            if (!globalMode) {
+                CountryBypassPicker(
+                    icon = Icons.Filled.Public,
+                    iconTint = Color(0xFFFF9800),
+                    selectedCode = bypassCountryCode,
+                    onSelect = onBypassCountryChange
+                )
+                if (adBlockVisible) {
+                    SettingsSwitch(
+                        icon = Icons.Filled.Shield,
+                        iconTint = Color(0xFFE91E63),
+                        label = stringResource(R.string.ad_blocking_title),
+                        checked = adBlockEnabled,
+                        onCheckedChange = onAdBlockChange
+                    )
+                }
+                SettingsNavRow(
+                    icon = Icons.Filled.AltRoute,
+                    iconTint = Color(0xFF9C27B0),
+                    label = stringResource(R.string.routing_rules),
+                    onClick = onOpenRoutingRules
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Security section
+            SectionHeader(stringResource(R.string.security))
+            SettingsSwitch(
+                icon = Icons.Filled.Warning,
+                iconTint = Color(0xFFF44336),
+                label = stringResource(R.string.allow_insecure),
+                checked = allowInsecure,
+                onCheckedChange = onAllowInsecureChange
+            )
+            SettingsNavRow(
+                icon = Icons.Filled.VerifiedUser,
+                iconTint = Color(0xFF4CAF50),
+                label = stringResource(R.string.trusted_certificates),
+                onClick = onOpenTrustedCertificates
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // About section
+            SectionHeader(stringResource(R.string.about))
+            SettingsNavRow(
+                painter = painterResource(R.drawable.ic_telegram_symbol),
+                iconTint = Color(0xFF039BE5),
+                label = stringResource(R.string.join_telegram_group),
+                onClick = onOpenTelegram
+            )
+            SettingsNavRow(
+                icon = Icons.Filled.Info,
+                iconTint = Color(0xFF9E9E9E),
+                label = stringResource(R.string.acknowledgements),
+                onClick = onOpenAcknowledgements
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            SettingsNavRow(
+                icon = Icons.Filled.Tune,
+                iconTint = Color(0xFF546E7A),
+                label = stringResource(R.string.advanced_settings),
+                onClick = onOpenAdvancedSettings
+            )
+        }
+    }
+}
+
+@Composable
+internal fun SectionHeader(title: String) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleSmall,
@@ -343,7 +373,7 @@ private fun SettingsIconContainer(
 }
 
 @Composable
-private fun SettingsSwitch(
+internal fun SettingsSwitch(
     icon: ImageVector,
     iconTint: Color,
     label: String,
@@ -368,7 +398,7 @@ private fun SettingsSwitch(
 }
 
 @Composable
-private fun SettingsNavRow(
+internal fun SettingsNavRow(
     icon: ImageVector,
     iconTint: Color,
     label: String,
@@ -397,7 +427,7 @@ private fun SettingsNavRow(
 }
 
 @Composable
-private fun SettingsNavRow(
+internal fun SettingsNavRow(
     painter: Painter,
     iconTint: Color,
     label: String,
@@ -425,8 +455,6 @@ private fun SettingsNavRow(
     }
 }
 
-private val countryCodes = listOf("AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN")
-
 private fun flagForCountryCode(code: String): String {
     val firstChar = Character.toChars(0x1F1E6 - 'A'.code + code[0].uppercaseChar().code)
     val secondChar = Character.toChars(0x1F1E6 - 'A'.code + code[1].uppercaseChar().code)
@@ -442,6 +470,8 @@ private fun CountryBypassPicker(
     onSelect: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val countryCodes = remember { CountryBypassCatalog.get(context).supportedCountryCodes }
 
     val displayText = if (selectedCode.isEmpty()) {
         stringResource(R.string.disable)

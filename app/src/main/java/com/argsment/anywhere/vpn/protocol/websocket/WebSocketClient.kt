@@ -1,7 +1,7 @@
 package com.argsment.anywhere.vpn.protocol.websocket
 
 import android.util.Base64
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.WebSocketConfiguration
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
@@ -18,7 +18,7 @@ import java.security.SecureRandom
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-private const val TAG = "WebSocketConnection"
+private val logger = AnywhereLogger("WebSocket")
 
 /**
  * WebSocket connection implementing RFC 6455 framing over an arbitrary transport.

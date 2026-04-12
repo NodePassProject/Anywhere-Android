@@ -1,13 +1,13 @@
 package com.argsment.anywhere.vpn.protocol.naive
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.naive.http11.Http11Connection
 import com.argsment.anywhere.vpn.protocol.naive.http2.Http2Connection
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import java.io.ByteArrayOutputStream
 import kotlin.random.Random
 
-private const val TAG = "NaiveProxy"
+private val logger = AnywhereLogger("NaiveProxy")
 
 /**
  * Abstraction over the underlying HTTP connection used for a CONNECT tunnel.
@@ -88,7 +88,7 @@ class NaiveProxyConnection(
     override fun sendRawAsync(data: ByteArray) {
         // NaiveProxy is fully suspend-based; fire-and-forget not supported.
         // This path should not be reached in normal operation.
-        Log.w(TAG, "sendRawAsync called on NaiveProxyConnection, dropping ${data.size} bytes")
+        logger.warning("sendRawAsync called on NaiveProxyConnection, dropping ${data.size} bytes")
     }
 
     /** Fragments medium payloads into 200–300 byte chunks, each padded separately. */

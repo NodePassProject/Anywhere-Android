@@ -1,9 +1,9 @@
 package com.argsment.anywhere.vpn.protocol.mux
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyError
 
-private const val TAG = "MuxSession"
+private val logger = AnywhereLogger("MuxSession")
 
 /**
  * Individual mux session with send (Keep frame) and close (End frame).

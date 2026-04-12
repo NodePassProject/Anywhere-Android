@@ -1,6 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.vless
 
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
@@ -25,7 +25,7 @@ import com.argsment.anywhere.vpn.util.NioSocket
 import kotlinx.coroutines.delay
 import java.util.UUID
 
-private const val TAG = "VlessClient"
+private val logger = AnywhereLogger("VlessClient")
 
 /**
  * Client for establishing VLESS proxy connections over TCP or UDP.
@@ -320,7 +320,7 @@ class VlessClient(
                     wsConnection, command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "WS connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("WS connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -379,7 +379,7 @@ class VlessClient(
                     wsConnection, command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "WSS connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("WSS connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -480,7 +480,7 @@ class VlessClient(
                     huConnection, command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "HTTP upgrade attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("HTTP upgrade attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -529,7 +529,7 @@ class VlessClient(
                     huConnection, command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "HTTPS upgrade attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("HTTPS upgrade attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -766,7 +766,7 @@ class VlessClient(
                     xhttpConn, command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "XHTTP attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("XHTTP attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -853,7 +853,7 @@ class VlessClient(
                     xhttpConn, command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "XHTTPS attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("XHTTPS attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -911,7 +911,7 @@ class VlessClient(
                     xhttpConn, command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "XHTTP Reality attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("XHTTP Reality attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -994,7 +994,7 @@ class VlessClient(
                     command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "Connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("Connection attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -1044,7 +1044,7 @@ class VlessClient(
                     command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "Reality attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("Reality attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }
@@ -1099,7 +1099,7 @@ class VlessClient(
                     command, destinationHost, destinationPort, initialData
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "TLS attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                logger.debug("TLS attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
                 if (e is TlsError.CertificateValidationFailed) throw e
                 lastError = e
             }

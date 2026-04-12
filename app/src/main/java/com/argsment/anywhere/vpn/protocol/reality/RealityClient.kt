@@ -1,8 +1,8 @@
 package com.argsment.anywhere.vpn.protocol.reality
 
 import android.os.Build
-import android.util.Log
 import androidx.annotation.RequiresApi
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.vpn.NativeBridge
 import com.argsment.anywhere.vpn.protocol.Transport
@@ -20,7 +20,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-private const val TAG = "RealityClient"
+private val logger = AnywhereLogger("Reality")
 
 /**
  * Client for establishing authenticated Reality connections over TLS 1.3.
@@ -81,7 +81,7 @@ class RealityClient(
         try {
             socket.connect(host, port)
         } catch (e: Exception) {
-            Log.e(TAG, "[Reality] TCP connection failed: ${e.message}")
+            logger.error("[Reality] TCP connection failed: ${e.message}")
             throw RealityError.HandshakeFailed("TCP connection failed: ${e.message}")
         }
 
@@ -239,11 +239,11 @@ class RealityClient(
                 0x15 -> {
                     val alertLevel = if (existingBuffer.size > 5) existingBuffer[5].toInt() and 0xFF else 0
                     val alertDesc = if (existingBuffer.size > 6) existingBuffer[6].toInt() and 0xFF else 0
-                    Log.e(TAG, "[Reality] TLS Alert: level=$alertLevel, desc=$alertDesc")
+                    logger.error("[Reality] TLS Alert: level=$alertLevel, desc=$alertDesc")
                     throw RealityError.HandshakeFailed("TLS Alert: level=$alertLevel, desc=$alertDesc")
                 }
                 else -> {
-                    Log.e(TAG, "[Reality] Unexpected content type: 0x${String.format("%02x", contentType)}")
+                    logger.error("[Reality] Unexpected content type: 0x${String.format("%02x", contentType)}")
                     throw RealityError.HandshakeFailed("Unexpected content type: $contentType")
                 }
             }
@@ -276,7 +276,7 @@ class RealityClient(
         }
 
         if (!verifyServerResponse(buf)) {
-            Log.e(TAG, "[Reality] Server verification failed")
+            logger.error("[Reality] Server verification failed")
             throw RealityError.HandshakeFailed("Server verification failed")
         }
 
@@ -301,7 +301,7 @@ class RealityClient(
             if (mlkemShared != null) {
                 mlkemShared + x25519Shared  // 64 bytes: MLKEM_shared || X25519_shared
             } else {
-                Log.w(TAG, "[Reality] ML-KEM decapsulation failed, using X25519 only")
+                logger.warning("[Reality] ML-KEM decapsulation failed, using X25519 only")
                 x25519Shared
             }
         } else {
@@ -377,7 +377,7 @@ class RealityClient(
 
     private fun parseServerHello(data: ByteArray): Pair<ByteArray, Int>? {
         // Try native parser first
-        val nativeResult = NativeBridge.nativeParseServerHello(data)
+        val nativeResult = com.argsment.anywhere.vpn.util.PacketUtil.parseServerHello(data)
         if (nativeResult != null && nativeResult.size == 34) {
             val keyShare = nativeResult.copyOfRange(0, 32)
             val cipherSuite = ((nativeResult[32].toInt() and 0xFF) shl 8) or
@@ -542,7 +542,7 @@ class RealityClient(
                             if (decompressed != null) {
                                 serverCertVerified = verifyRealityCertificate(decompressed)
                             } else {
-                                Log.w(TAG, "[Reality] Failed to decompress CompressedCertificate")
+                                logger.warning("[Reality] Failed to decompress CompressedCertificate")
                             }
                         }
 
@@ -553,7 +553,7 @@ class RealityClient(
                         hsOffset += 4 + hsLen
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "[Reality] Failed to decrypt handshake record: ${e.message}")
+                    logger.error("[Reality] Failed to decrypt handshake record: ${e.message}")
                 }
             }
 
@@ -720,7 +720,7 @@ class RealityClient(
                     inflater.end()
                     if (decodedSize > 0) output.copyOfRange(0, decodedSize) else null
                 } catch (e: Exception) {
-                    Log.w(TAG, "[Reality] zlib decompression failed: ${e.message}")
+                    logger.warning("[Reality] zlib decompression failed: ${e.message}")
                     null
                 }
             }
@@ -737,12 +737,12 @@ class RealityClient(
                     brotliInput.close()
                     if (totalRead > 0) output.copyOfRange(0, totalRead) else null
                 } catch (e: Exception) {
-                    Log.w(TAG, "[Reality] Brotli decompression failed: ${e.message}")
+                    logger.warning("[Reality] Brotli decompression failed: ${e.message}")
                     null
                 }
             }
             else -> {
-                Log.w(TAG, "[Reality] Unknown cert compression algorithm: 0x${String.format("%04x", algorithm)}")
+                logger.warning("[Reality] Unknown cert compression algorithm: 0x${String.format("%04x", algorithm)}")
                 null
             }
         }
@@ -1123,7 +1123,7 @@ class RealityClient(
      * When non-null, sets [mlkemPrivateKey] for later decapsulation.
      */
     private fun tryGenerateMLKEMKeyPair(): ByteArray? {
-        if (Build.VERSION.SDK_INT < 35) return null
+        if (!mlkemSupported) return null
         return generateMLKEMKeyPairImpl()
     }
 
@@ -1137,8 +1137,27 @@ class RealityClient(
             val encoded = kp.public.encoded
             if (encoded.size >= 1184) encoded.copyOfRange(encoded.size - 1184, encoded.size) else null
         } catch (e: Exception) {
-            Log.d(TAG, "[Reality] ML-KEM keypair unavailable: ${e.message}")
+            logger.debug("[Reality] ML-KEM keypair unavailable: ${e.message}")
             null
+        }
+    }
+
+    companion object {
+        /**
+         * Whether ML-KEM-768 is usable on this device. Probed once on first access
+         * (Android 15 / API 35 adds the provider). Caching here avoids re-logging
+         * "ML-KEM keypair unavailable" on every Reality handshake on older devices.
+         */
+        private val mlkemSupported: Boolean by lazy {
+            if (Build.VERSION.SDK_INT < 35) {
+                false
+            } else runCatching {
+                java.security.KeyPairGenerator.getInstance("ML-KEM-768")
+                true
+            }.getOrElse {
+                AnywhereLogger("Reality").debug("ML-KEM-768 unavailable on this device: ${it.message}")
+                false
+            }
         }
     }
 
@@ -1159,7 +1178,7 @@ class RealityClient(
             val decapsulator = kem.newDecapsulator(privKey)
             decapsulator.decapsulate(ciphertext).encoded
         } catch (e: Exception) {
-            Log.w(TAG, "[Reality] ML-KEM decapsulation failed: ${e.message}")
+            logger.warning("[Reality] ML-KEM decapsulation failed: ${e.message}")
             null
         }
     }

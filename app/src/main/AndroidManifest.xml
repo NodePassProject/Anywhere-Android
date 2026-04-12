@@ -21,10 +21,23 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.Anywhere">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Deep links: anywhere://add-proxy?link=… and bare proxy URL schemes. Mirrors iOS DeepLinkManager. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="anywhere" />
+                <data android:scheme="vless" />
+                <data android:scheme="ss" />
+                <data android:scheme="socks5" />
+                <data android:scheme="socks" />
+                <data android:scheme="quic" />
             </intent-filter>
         </activity>
 

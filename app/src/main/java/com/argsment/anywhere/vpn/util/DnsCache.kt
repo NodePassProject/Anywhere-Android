@@ -1,13 +1,12 @@
 package com.argsment.anywhere.vpn.util
 
 import android.net.Network
-import android.util.Log
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
 
-private const val TAG = "DnsCache"
+private val logger = AnywhereLogger("ProxyDNSCache")
 
 /**
  * Thread-safe DNS cache with TTL-based expiry.
@@ -76,15 +75,19 @@ object DnsCache {
 
         val key = bare.lowercase()
         val now = System.currentTimeMillis()
+        val isActive = activeProxyDomain == key
 
-        cache[key]?.let { entry ->
-            if (now < entry.expiry) return entry.ips
-            // Expired entry — remove it (prevents unbounded cache growth)
-            cache.remove(key)
-            if (activeProxyDomain == key) {
-                refreshAsync(key, bare)
-                return entry.ips
-            }
+        val entry = cache[key]
+        if (entry != null && now < entry.expiry) return entry.ips
+
+        // Active proxy with stale cache — return stale IPs immediately, refresh in
+        // background. Mirrors iOS ProxyDNSCache: avoid blocking connections on the
+        // active proxy when TTL expires; the background refresh will replace the
+        // entry. We keep the stale entry in-place so concurrent lookups also
+        // benefit and so a failed refresh still has a fallback.
+        if (entry != null && isActive) {
+            refreshAsync(key, bare)
+            return entry.ips
         }
 
         // Periodic eviction: when cache exceeds threshold, purge all expired entries
@@ -92,11 +95,12 @@ object DnsCache {
             evictExpired(now)
         }
 
-        // Cache miss — resolve via system DNS
+        // Cache miss, or expired non-active entry — resolve synchronously
         val ips = resolveAndCache(key, bare)
         if (ips.isNotEmpty()) return ips
 
-        return cache[key]?.ips ?: emptyList()
+        // Resolution failed: fall back to stale IPs if we have any (matches iOS).
+        return entry?.ips ?: emptyList()
     }
 
     /**
@@ -173,7 +177,7 @@ object DnsCache {
             }
             addresses.mapNotNull { it.hostAddress }.distinct()
         } catch (e: Exception) {
-            Log.w(TAG, "DNS resolution failed for $bare: ${e.message}")
+            logger.warning("[DNS] Resolution failed for $bare")
             emptyList()
         }
 

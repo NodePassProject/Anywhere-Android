@@ -1,7 +1,7 @@
 package com.argsment.anywhere.ui.scanner
 
 import android.Manifest
-import android.util.Log
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -220,7 +220,7 @@ private fun CameraPreview(
                     imageAnalysis
                 )
             } catch (e: Exception) {
-                Log.e("QrScanner", "Camera bind failed", e)
+                AnywhereLogger("QrScanner").debug("Camera bind failed: ${e.message}")
             }
         }, ContextCompat.getMainExecutor(context))
 

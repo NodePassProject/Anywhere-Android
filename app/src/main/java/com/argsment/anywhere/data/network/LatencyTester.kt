@@ -1,9 +1,9 @@
 package com.argsment.anywhere.data.network
 
-import android.util.Log
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
@@ -36,7 +36,7 @@ sealed class LatencyResult {
  */
 object LatencyTester {
 
-    private const val TAG = "LatencyTester"
+    private val logger = AnywhereLogger("LatencyTester")
     private const val TIMEOUT_MS = 10_000L
 
     /** Latency test endpoint — plain HTTP, matching iOS captive.apple.com:80. */
@@ -53,10 +53,10 @@ object LatencyTester {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: com.argsment.anywhere.vpn.protocol.tls.TlsError.CertificateValidationFailed) {
-                Log.d(TAG, "Latency test insecure for ${config.name}: ${e.message}")
+                logger.error("Latency test insecure for ${config.name}: ${e.message}")
                 LatencyResult.Insecure
             } catch (e: Exception) {
-                Log.d(TAG, "Latency test failed for ${config.name}: ${e.message}")
+                logger.error("Latency test failed for ${config.name}: ${e.message}")
                 LatencyResult.Failed
             }
         } ?: LatencyResult.Failed
@@ -181,7 +181,7 @@ object LatencyTester {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.d(TAG, "Latency test failed for ${config.name}: ${e.message}")
+            logger.error("Latency test failed for ${config.name}: ${e.message}")
             LatencyResult.Failed
         } finally {
             watcher.cancel()

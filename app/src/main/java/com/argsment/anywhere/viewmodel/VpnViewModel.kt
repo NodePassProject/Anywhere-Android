@@ -8,7 +8,6 @@ import android.content.ServiceConnection
 import android.content.SharedPreferences
 import android.net.VpnService
 import android.os.IBinder
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.argsment.anywhere.data.model.ProxyChain
@@ -22,8 +21,9 @@ import com.argsment.anywhere.data.repository.ChainRepository
 import com.argsment.anywhere.data.repository.ConfigRepository
 import com.argsment.anywhere.data.repository.RuleSetRepository
 import com.argsment.anywhere.data.repository.SubscriptionRepository
-import com.argsment.anywhere.vpn.protocol.tls.TlsClient
+import com.argsment.anywhere.vpn.protocol.tls.CertificatePolicy
 import com.argsment.anywhere.vpn.AnywhereVpnService
+import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,7 +42,7 @@ enum class VpnStatus {
     DISCONNECTED, CONNECTING, CONNECTED, DISCONNECTING, REASSERTING
 }
 
-private const val TAG = "VpnViewModel"
+private val logger = AnywhereLogger("VPNViewModel")
 
 class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -95,6 +95,35 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // VPN permission request callback
     var onRequestVpnPermission: ((Intent) -> Unit)? = null
 
+    // Deep-link pending URL (vless://…, ss://…, socks5://…, quic://…, or raw link from anywhere://add-proxy?link=…).
+    // Consumed by ProxyListScreen to open the Add Proxy sheet with the URL pre-filled. Mirrors iOS DeepLinkManager.pendingAction.
+    private val _pendingDeepLinkUrl = MutableStateFlow<String?>(null)
+    val pendingDeepLinkUrl: StateFlow<String?> = _pendingDeepLinkUrl.asStateFlow()
+
+    fun onDeepLink(uri: android.net.Uri) {
+        val scheme = uri.scheme?.lowercase() ?: return
+        when (scheme) {
+            "anywhere" -> {
+                if (uri.host != "add-proxy") return
+                val full = uri.toString()
+                val marker = "?link="
+                val idx = full.indexOf(marker)
+                if (idx < 0) return
+                val raw = full.substring(idx + marker.length)
+                if (raw.isEmpty()) return
+                _pendingDeepLinkUrl.value = runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+            }
+            "vless", "ss", "socks5", "socks", "quic" -> {
+                _pendingDeepLinkUrl.value = uri.toString()
+            }
+            else -> {}
+        }
+    }
+
+    fun consumePendingDeepLink() {
+        _pendingDeepLinkUrl.value = null
+    }
+
     // Service binding
     private var vpnService: AnywhereVpnService? = null
     private var serviceBound = false
@@ -140,11 +169,19 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
         ensureValidSelection()
 
-        // Sync trusted certificate fingerprints to TlsClient
-        TlsClient.trustedFingerprints = certificateRepository.fingerprints.value
+        // Prime CertificatePolicy with the current allowInsecure + trusted-certificate
+        // values so TLS validation has a fresh snapshot before the first connection.
+        CertificatePolicy.reload(application)
+
+        // React to trusted-certificate changes: update the singleton immediately and
+        // notify the tunnel so live TLS connections tear down and reconnect under the
+        // new policy. Matches iOS CertificatePolicy + certificatePolicyChanged.
         viewModelScope.launch {
+            var first = true
             certificateRepository.fingerprints.collect { fingerprints ->
-                TlsClient.trustedFingerprints = fingerprints
+                CertificatePolicy.setTrustedFingerprints(fingerprints)
+                if (first) { first = false; return@collect }
+                signalCertificatePolicyChanged()
             }
         }
     }
@@ -256,7 +293,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 _vpnStatus.value = VpnStatus.CONNECTED
                 startStatsPolling()
             } catch (e: Exception) {
-                Log.e(TAG, "[VPN] Failed to start service: ${e.message}")
+                logger.warning("Failed to send configuration to tunnel: ${e.message}")
                 _vpnStatus.value = VpnStatus.DISCONNECTED
                 _startError.value = e.message
             }
@@ -484,6 +521,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         subscriptionRepository.update(subscription.copy(collapsed = !subscription.collapsed))
     }
 
+    fun renameSubscription(subscription: Subscription, newName: String) {
+        subscriptionRepository.update(subscription.copy(name = newName, isNameCustomized = true))
+    }
+
     fun deleteSubscription(subscription: Subscription) {
         subscriptionRepository.delete(subscription.id, configRepository)
         ensureValidSelection()
@@ -521,10 +562,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         // Atomically replace old configurations with new ones (single StateFlow emission)
         configRepository.replaceBySubscription(subscription.id, newConfigs)
 
-        // Update subscription metadata (preserve old values when new ones are null)
+        // Update subscription metadata (preserve old values when new ones are null).
+        // Respect user-customized names: don't overwrite them with the remote name. Mirrors iOS.
         val updated = subscription.copy(
             lastUpdate = System.currentTimeMillis(),
-            name = result.name ?: subscription.name,
+            name = if (subscription.isNameCustomized) subscription.name else (result.name ?: subscription.name),
             upload = result.upload ?: subscription.upload,
             download = result.download ?: subscription.download,
             total = result.total ?: subscription.total,
@@ -707,6 +749,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         get() = prefs.getBoolean("alwaysOnEnabled", false)
         set(value) = prefs.edit().putBoolean("alwaysOnEnabled", value).apply()
 
+    /** "rule" (default) applies routing rules per-destination; "global" routes everything through the proxy. Mirrors iOS. */
+    var proxyMode: String
+        get() = prefs.getString("proxyMode", "rule") ?: "rule"
+        set(value) = prefs.edit().putString("proxyMode", value).apply()
+
     var bypassCountryCode: String
         get() = prefs.getString("bypassCountryCode", "") ?: ""
         set(value) = prefs.edit().putString("bypassCountryCode", value).apply()
@@ -733,7 +780,29 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     var allowInsecure: Boolean
         get() = prefs.getBoolean("allowInsecure", false)
-        set(value) = prefs.edit().putBoolean("allowInsecure", value).apply()
+        set(value) {
+            if (value == allowInsecure) return
+            prefs.edit().putBoolean("allowInsecure", value).apply()
+            // Mirrors iOS: toggling allowInsecure posts `certificatePolicyChanged`, which
+            // tears down active TLS connections so the new policy applies immediately.
+            signalCertificatePolicyChanged()
+        }
+
+    /**
+     * UI-only flag gating experimental features (e.g. custom rule set creation). Mirrors
+     * iOS `experimentalEnabled` AppStorage — no tunnel interaction, no restart needed.
+     */
+    var experimentalEnabled: Boolean
+        get() = prefs.getBoolean("experimentalEnabled", false)
+        set(value) = prefs.edit().putBoolean("experimentalEnabled", value).apply()
+
+    /**
+     * Fires the Android-side equivalent of iOS's `certificatePolicyChanged` Darwin
+     * notification. LwipStack observes this key and tears down active connections.
+     */
+    fun signalCertificatePolicyChanged() {
+        prefs.edit().putLong("certificatePolicyChanged", System.currentTimeMillis()).apply()
+    }
 
     val hasCompletedOnboarding: Boolean
         get() = prefs.getBoolean("hasCompletedOnboarding", false)
