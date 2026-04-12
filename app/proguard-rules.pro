@@ -72,3 +72,12 @@
 # ============================================================================
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
+
+# ============================================================================
+# javax.crypto.KEM (JDK 21 / Android 15+ API 35). Guarded by Build.VERSION
+# checks at runtime; not present in compile SDK stubs.
+# ============================================================================
+-dontwarn javax.crypto.KEM
+-dontwarn javax.crypto.KEM$Decapsulator
+-dontwarn javax.crypto.KEM$Encapsulator
+-dontwarn javax.crypto.KEM$Encapsulated
