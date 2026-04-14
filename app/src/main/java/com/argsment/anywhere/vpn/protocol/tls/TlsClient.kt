@@ -90,17 +90,27 @@ class TlsClient(private val configuration: TlsConfiguration) {
         ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
         ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
 
+        // Build the ClientHello up front so it can ride along with the TCP
+        // handshake — mirroring iOS, where `NWTransport.connect(initialData:)`
+        // queues the ClientHello as the TFO payload. The kernel will flush it
+        // the instant the SYN-ACK arrives, saving one scheduling hop compared
+        // to a separate `send` after `finishConnect`.
+        val clientHello = buildTLSClientHello(
+            ephemeralPublicKeyBytes ?: throw TlsError.HandshakeFailed("No ephemeral key")
+        )
+        storedClientHello = clientHello.copyOfRange(5, clientHello.size)
+
         val socket = NioSocket()
         connection = socket
 
         try {
-            socket.connect(host, port)
+            socket.connect(host, port, initialData = clientHello)
         } catch (e: Exception) {
             logger.error("TCP connection failed: ${e.message}")
             throw TlsError.ConnectionFailed(e.message ?: "Unknown error")
         }
 
-        return performTLSHandshake()
+        return receiveServerResponse()
     }
 
     /**
@@ -851,11 +861,13 @@ class TlsClient(private val configuration: TlsConfiguration) {
             sig.update(content)
             val isValid = sig.verify(signature)
             if (!isValid) {
+                if (configuration.allowInsecure || CertificatePolicy.allowInsecure) return
                 throw TlsError.CertificateValidationFailed("CertificateVerify signature verification failed")
             }
         } catch (e: TlsError) {
             throw e
         } catch (e: Exception) {
+            if (configuration.allowInsecure || CertificatePolicy.allowInsecure) return
             throw TlsError.CertificateValidationFailed("CertificateVerify failed: ${e.message}")
         }
     }
@@ -1360,11 +1372,13 @@ class TlsClient(private val configuration: TlsConfiguration) {
             sig.initVerify(serverCert.publicKey)
             sig.update(content)
             if (!sig.verify(signature)) {
+                if (configuration.allowInsecure || CertificatePolicy.allowInsecure) return
                 throw TlsError.CertificateValidationFailed("ServerKeyExchange signature verification failed")
             }
         } catch (e: TlsError) {
             throw e
         } catch (e: Exception) {
+            if (configuration.allowInsecure || CertificatePolicy.allowInsecure) return
             throw TlsError.CertificateValidationFailed("ServerKeyExchange signature verification error: ${e.message}")
         }
     }

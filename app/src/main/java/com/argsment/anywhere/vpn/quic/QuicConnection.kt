@@ -46,7 +46,18 @@ class QuicConnection(
     private val port: Int,
     serverName: String? = null,
     private val alpn: List<String> = listOf("h3"),
-    private val datagramsEnabled: Boolean = false
+    private val datagramsEnabled: Boolean = false,
+    /**
+     * Per-protocol tuning knobs. Defaults to [QuicTuning.naive] which
+     * matches Chromium's QUIC client (CUBIC + 64 MB / 128 MB windows).
+     * Pass [QuicTuning.hysteria] for Hysteria v2 sessions — that preset
+     * selects [QuicTuning.CongestionControl.Brutal] which causes
+     * [connect] to overlay the Brutal callbacks on top of ngtcp2's
+     * CUBIC state once the connection exists.
+     *
+     * Mirrors `QUICTuning` on iOS (`Shared/QUIC/QUICTuning.swift`).
+     */
+    private val tuning: QuicTuning = QuicTuning.naive
 ) {
     private val sni: String = serverName ?: host
 
@@ -79,6 +90,15 @@ class QuicConnection(
     private var connectDeferred: CompletableDeferred<Unit>? = null
     private var readerJob: Job? = null
     private var timerJob: Job? = null
+
+    /**
+     * Hysteria Brutal CC handle. Non-null when [tuning]'s congestion
+     * controller is [QuicTuning.CongestionControl.Brutal] and the native
+     * install succeeded. Its lifetime matches the ngtcp2 connection;
+     * `nativeDestroy` tears down the registry entry before freeing
+     * `conn->cc`.
+     */
+    private var brutalCC: BrutalCongestionControl? = null
 
     /** Callbacks to the application (HTTP/3 layer). */
     var streamDataHandler: ((Long, ByteArray, Boolean) -> Unit)? = null
@@ -142,16 +162,54 @@ class QuicConnection(
         val ipv6 = addr.address.size == 16
 
         val sock = DatagramSocket()
+        // Match iOS RawUDPSocket (4 MB) so a paced QUIC sender doesn't get
+        // stalled by the kernel's default ~200 KB datagram buffer when the
+        // path is briefly under-served. iOS does this in QUICConnection.swift
+        // setupUDP() via SO_SNDBUF/SO_RCVBUF setsockopt — Java exposes the
+        // same knobs on DatagramSocket.
+        try { sock.sendBufferSize = 4 * 1024 * 1024 } catch (_: Throwable) {}
+        try { sock.receiveBufferSize = 4 * 1024 * 1024 } catch (_: Throwable) {}
         sock.connect(InetSocketAddress(addr, port))
         sock.soTimeout = 100 // short timeout so the reader loop can check state
         socket = sock
 
+        val tuningParams = longArrayOf(
+            tuning.ngtcp2CcAlgo.toLong(),
+            tuning.maxStreamWindow,
+            tuning.maxWindow,
+            tuning.initialMaxData,
+            tuning.initialMaxStreamDataBidiLocal,
+            tuning.initialMaxStreamDataBidiRemote,
+            tuning.initialMaxStreamDataUni,
+            tuning.initialMaxStreamsBidi,
+            tuning.initialMaxStreamsUni,
+            tuning.maxIdleTimeoutNs,
+            tuning.handshakeTimeoutNs,
+            if (tuning.disableActiveMigration) 1L else 0L,
+            // Emit a PING every 15 s of inactivity so a silently-broken UDP
+            // path (carrier NAT rebind, server-side idle sweep) surfaces as a
+            // loss / idle-close within one retransmission cycle. Mirrors
+            // QUICConnection.swift:830 and naiveproxy's
+            // `set_keep_alive_ping_timeout(kPingTimeoutSecs)`.
+            15L * 1_000_000_000L
+        )
+
         handle = QuicBridge.nativeCreate(callbacks, host, port, ipv6,
-                                          addr.address, datagramsEnabled)
+                                          addr.address, datagramsEnabled,
+                                          tuningParams)
         if (handle == 0L) {
             state = State.CLOSED
             sock.close()
             throw QuicError.ConnectionFailed("ngtcp2_conn_client_new failed")
+        }
+
+        // Install Brutal CC on top of CUBIC before any packets have been
+        // read/sent, so no stale CUBIC decisions leak through. Mirrors
+        // QUICConnection.swift:839.
+        (tuning.cc as? QuicTuning.CongestionControl.Brutal)?.let { brutal ->
+            val cc = BrutalCongestionControl(handle)
+            cc.install(brutal.initialBps)
+            brutalCC = cc
         }
 
         state = State.HANDSHAKING
@@ -244,6 +302,18 @@ class QuicConnection(
         return QuicBridge.nativeWriteDatagram(handle, data)
     }
 
+    /**
+     * Updates the Hysteria Brutal target send rate (bytes/sec). No-op
+     * if this connection wasn't constructed with a Brutal-flavoured
+     * [QuicTuning]. Safe to call from any thread. Mirrors
+     * `QUICConnection.setBrutalBandwidth` on iOS.
+     */
+    fun setBrutalBandwidth(bytesPerSec: Long) {
+        scope.launch {
+            brutalCC?.setTargetBandwidth(bytesPerSec)
+        }
+    }
+
     val maxDatagramPayloadSize: Int
         get() = if (handle == 0L) 0 else QuicBridge.nativeMaxDatagramPayload(handle).toInt()
 
@@ -286,9 +356,12 @@ class QuicConnection(
         readerJob?.cancel(); readerJob = null
         socket?.close(); socket = null
         if (handle != 0L) {
+            // `nativeDestroy` removes the Brutal registry entry before
+            // freeing `conn->cc`, so no explicit tear-down here.
             QuicBridge.nativeDestroy(handle)
             handle = 0L
         }
+        brutalCC = null
         val e = error ?: QuicError.Closed()
         connectionClosedHandler?.invoke(e)
         connectionClosedHandler = null

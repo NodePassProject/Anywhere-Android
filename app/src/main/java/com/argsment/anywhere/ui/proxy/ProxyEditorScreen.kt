@@ -40,8 +40,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
+import com.argsment.anywhere.data.model.HysteriaUploadMbpsDefault
+import com.argsment.anywhere.data.model.HysteriaUploadMbpsRange
 import com.argsment.anywhere.data.model.NaiveProtocol
 import com.argsment.anywhere.data.model.OutboundProtocol
+import com.argsment.anywhere.data.model.clampHysteriaUploadMbps
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.data.model.TlsFingerprint
@@ -116,9 +119,15 @@ fun ProxyEditorScreen(
     var socks5Username by remember { mutableStateOf("") }
     var socks5Password by remember { mutableStateOf("") }
 
+    // Hysteria fields. Matches iOS ProxyEditorView which only edits password +
+    // uploadMbps. SNI/insecure flags stay on the original config's TLS blob.
+    var hysteriaPassword by remember { mutableStateOf("") }
+    var hysteriaUploadMbpsText by remember { mutableStateOf(HysteriaUploadMbpsDefault.toString()) }
+
     val isShadowsocks = selectedProtocol == OutboundProtocol.SHADOWSOCKS
     val isSocks5 = selectedProtocol == OutboundProtocol.SOCKS5
     val isNaive = selectedProtocol.isNaive
+    val isHysteria = selectedProtocol == OutboundProtocol.HYSTERIA
     val isReality = security == "reality"
     val isTLS = security == "tls"
 
@@ -129,6 +138,9 @@ fun ProxyEditorScreen(
                 isNaive -> naiveUsername.isNotEmpty() && naivePassword.isNotEmpty()
                 isShadowsocks -> ssPassword.isNotEmpty()
                 isSocks5 -> true  // SOCKS5 username/password are optional
+                isHysteria -> hysteriaPassword.isNotEmpty() &&
+                        (hysteriaUploadMbpsText.toIntOrNull()
+                            ?.let { it in HysteriaUploadMbpsRange } == true)
                 else -> runCatching { UUID.fromString(uuid) }.isSuccess &&
                         (!isReality || (sni.isNotEmpty() && publicKey.isNotEmpty()))
             }
@@ -180,6 +192,9 @@ fun ProxyEditorScreen(
             naivePassword = config.naivePassword ?: ""
             socks5Username = config.socks5Username ?: ""
             socks5Password = config.socks5Password ?: ""
+            hysteriaPassword = config.hysteriaPassword ?: ""
+            hysteriaUploadMbpsText =
+                (config.hysteriaUploadMbps ?: HysteriaUploadMbpsDefault).toString()
         }
     }
 
@@ -200,14 +215,16 @@ fun ProxyEditorScreen(
                 actions = {
                     IconButton(onClick = {
                         val port = serverPort.toUShortOrNull() ?: return@IconButton
-                        val parsedUUID = if (isShadowsocks || isNaive || isSocks5) {
+                        val needsUuid =
+                            !(isShadowsocks || isNaive || isSocks5 || isHysteria)
+                        val parsedUUID = if (!needsUuid) {
                             configuration?.uuid ?: UUID.randomUUID()
                         } else {
                             runCatching { UUID.fromString(uuid) }.getOrNull() ?: return@IconButton
                         }
 
                         var tlsConfiguration: TlsConfiguration? = null
-                        if (isTLS && !isNaive) {
+                        if (isTLS && !isNaive && !isHysteria) {
                             val resolvedSNI = tlsSNI.ifEmpty { serverAddress }
                             val alpn = tlsALPN.takeIf { it.isNotEmpty() }?.split(",")
                             tlsConfiguration = TlsConfiguration(
@@ -220,8 +237,16 @@ fun ProxyEditorScreen(
                             )
                         }
 
+                        // Hysteria: preserve the original TLS blob (which carries
+                        // SNI/insecure flags populated by URL import). The editor
+                        // itself doesn't expose those knobs — matching iOS, which
+                        // only edits password + upload Mbps for Hysteria.
+                        if (isHysteria) {
+                            tlsConfiguration = configuration?.tls
+                        }
+
                         var realityConfiguration: RealityConfiguration? = null
-                        if (isReality && !isNaive && !isShadowsocks && !isSocks5) {
+                        if (isReality && !isNaive && !isShadowsocks && !isSocks5 && !isHysteria) {
                             val pk = publicKey.base64UrlToByteArrayOrNull() ?: return@IconButton
                             val sid = shortId.hexToByteArrayOrNull() ?: byteArrayOf()
                             realityConfiguration = RealityConfiguration(
@@ -233,19 +258,19 @@ fun ProxyEditorScreen(
                         }
 
                         var wsConfiguration: WebSocketConfiguration? = null
-                        if (transport == "ws" && !isNaive && !isSocks5) {
+                        if (transport == "ws" && !isNaive && !isSocks5 && !isHysteria) {
                             val host = wsHost.ifEmpty { serverAddress }
                             wsConfiguration = WebSocketConfiguration(host = host, path = wsPath)
                         }
 
                         var httpUpgradeConfiguration: HttpUpgradeConfiguration? = null
-                        if (transport == "httpupgrade" && !isNaive && !isSocks5) {
+                        if (transport == "httpupgrade" && !isNaive && !isSocks5 && !isHysteria) {
                             val host = httpUpgradeHost.ifEmpty { serverAddress }
                             httpUpgradeConfiguration = HttpUpgradeConfiguration(host = host, path = httpUpgradePath)
                         }
 
                         var xhttpConfiguration: XHttpConfiguration? = null
-                        if (transport == "xhttp" && !isNaive && !isSocks5) {
+                        if (transport == "xhttp" && !isNaive && !isSocks5 && !isHysteria) {
                             val host = xhttpHost.ifEmpty { serverAddress }
                             val mode = XHttpMode.fromRaw(xhttpMode)
                             xhttpConfiguration = XHttpConfiguration.fromExtraJson(
@@ -263,23 +288,29 @@ fun ProxyEditorScreen(
                             else -> null
                         }
 
+                        val hysteriaMbps = if (isHysteria) {
+                            clampHysteriaUploadMbps(
+                                hysteriaUploadMbpsText.toIntOrNull() ?: HysteriaUploadMbpsDefault
+                            )
+                        } else null
+
                         val config = ProxyConfiguration(
                             id = configuration?.id ?: UUID.randomUUID(),
                             name = name,
                             serverAddress = bareAddress,
                             serverPort = port,
                             uuid = parsedUUID,
-                            encryption = if (isShadowsocks || isNaive || isSocks5) "none" else encryption,
-                            transport = if (isNaive || isSocks5) "tcp" else transport,
-                            flow = if (isShadowsocks || isNaive || isSocks5) null else flow.ifEmpty { null },
-                            security = if (isNaive) "none" else security,
+                            encryption = if (isShadowsocks || isNaive || isSocks5 || isHysteria) "none" else encryption,
+                            transport = if (isNaive || isSocks5 || isHysteria) "tcp" else transport,
+                            flow = if (isShadowsocks || isNaive || isSocks5 || isHysteria) null else flow.ifEmpty { null },
+                            security = if (isNaive || isHysteria) "none" else security,
                             tls = tlsConfiguration,
                             reality = realityConfiguration,
                             websocket = wsConfiguration,
                             httpUpgrade = httpUpgradeConfiguration,
                             xhttp = xhttpConfiguration,
-                            muxEnabled = if (isShadowsocks || isNaive || isSocks5) false else muxEnabled,
-                            xudpEnabled = if (isShadowsocks || isNaive || isSocks5) false else xudpEnabled,
+                            muxEnabled = if (isShadowsocks || isNaive || isSocks5 || isHysteria) false else muxEnabled,
+                            xudpEnabled = if (isShadowsocks || isNaive || isSocks5 || isHysteria) false else xudpEnabled,
                             subscriptionId = configuration?.subscriptionId,
                             outboundProtocol = selectedProtocol,
                             ssPassword = if (isShadowsocks) ssPassword else null,
@@ -289,6 +320,8 @@ fun ProxyEditorScreen(
                             naiveUsername = if (isNaive) naiveUsername else null,
                             naivePassword = if (isNaive) naivePassword else null,
                             naiveProtocol = naiveProto,
+                            hysteriaPassword = if (isHysteria) hysteriaPassword else null,
+                            hysteriaUploadMbps = hysteriaMbps,
                             // Preserve the original testseed — matches iOS which reads
                             // self.configuration?.testseed rather than resetting to default.
                             testseed = configuration?.testseed ?: listOf(900u, 500u, 900u, 256u)
@@ -318,22 +351,24 @@ fun ProxyEditorScreen(
                 singleLine = true
             )
 
-            // Protocol picker
+            // Protocol picker. Order mirrors iOS ProxyEditorView so users see
+            // the same list across platforms.
             SectionHeader(stringResource(R.string.protocol_label))
             DropdownField(
                 label = stringResource(R.string.protocol_label),
                 selectedValue = selectedProtocol.name,
                 options = listOf(
                     OutboundProtocol.VLESS.name to "VLESS",
+                    OutboundProtocol.HYSTERIA.name to "Hysteria",
                     OutboundProtocol.SHADOWSOCKS.name to "Shadowsocks",
                     OutboundProtocol.SOCKS5.name to "SOCKS5",
-                    OutboundProtocol.NAIVE_HTTP11.name to "HTTPS (HTTP/1.1)",
+                    OutboundProtocol.NAIVE_HTTP11.name to "HTTPS",
                     OutboundProtocol.NAIVE_HTTP2.name to "HTTP2",
                     OutboundProtocol.NAIVE_HTTP3.name to "QUIC"
                 ),
                 onSelect = { value ->
                     selectedProtocol = OutboundProtocol.valueOf(value)
-                    if (isShadowsocks || isSocks5 || selectedProtocol.isNaive) {
+                    if (isShadowsocks || isSocks5 || isHysteria || selectedProtocol.isNaive) {
                         flow = ""
                         if (security == "reality") security = "none"
                     }
@@ -415,6 +450,28 @@ fun ProxyEditorScreen(
                     ),
                     onSelect = { ssMethod = it }
                 )
+            } else if (isHysteria) {
+                // Matches iOS ProxyEditorView: Hysteria exposes only a password
+                // and an upload-bandwidth field; SNI is preserved from the
+                // original config (populated via URL import) but not edited here.
+                OutlinedTextField(
+                    value = hysteriaPassword,
+                    onValueChange = { hysteriaPassword = it },
+                    label = { Text(stringResource(R.string.password)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation()
+                )
+                OutlinedTextField(
+                    value = hysteriaUploadMbpsText,
+                    onValueChange = { new ->
+                        hysteriaUploadMbpsText = new.filter { it.isDigit() }
+                    },
+                    label = { Text(stringResource(R.string.upload_mbps)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
             } else {
                 // VLESS fields
                 OutlinedTextField(
@@ -432,8 +489,9 @@ fun ProxyEditorScreen(
                 )
             }
 
-            // Transport section (not for Naive or SOCKS5)
-            if (!isNaive && !isSocks5) {
+            // Transport section (not for Naive, SOCKS5, or Hysteria — Hysteria
+            // always runs over QUIC with no user-selectable transport.)
+            if (!isNaive && !isSocks5 && !isHysteria) {
                 SectionHeader(stringResource(R.string.transport))
                 DropdownField(
                     label = stringResource(R.string.transport),
@@ -549,8 +607,10 @@ fun ProxyEditorScreen(
                 }
             }
 
-            // TLS section (not for Naive)
-            if (!isNaive) {
+            // TLS section (not for Naive, SOCKS5, or Hysteria — Hysteria's
+            // QUIC handshake carries its own TLS internally, so there's nothing
+            // for the user to configure here.)
+            if (!isNaive && !isSocks5 && !isHysteria) {
                 SectionHeader("TLS")
                 DropdownField(
                     label = stringResource(R.string.security),

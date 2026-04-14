@@ -2,6 +2,7 @@ package com.argsment.anywhere.data.network
 
 import android.util.Base64
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.vpn.protocol.tls.CertificatePolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
@@ -31,7 +32,10 @@ object SubscriptionFetcher {
         class NetworkError(message: String) : FetchError("Network error: $message")
     }
 
-    suspend fun fetch(urlString: String, allowInsecure: Boolean = false): Result = withContext(Dispatchers.IO) {
+    suspend fun fetch(
+        urlString: String,
+        allowInsecure: Boolean = CertificatePolicy.allowInsecure
+    ): Result = withContext(Dispatchers.IO) {
         val url = runCatching { URL(urlString) }.getOrNull()
             ?: throw FetchError.InvalidUrl()
 
@@ -80,9 +84,7 @@ object SubscriptionFetcher {
             val decodedString = decoded?.let { String(it, Charsets.UTF_8) }
 
             // Parsable URL prefixes — matches iOS ProxyConfiguration.parsableURLPrefixes.
-            val parsablePrefixes = listOf(
-                "vless://", "ss://", "socks5://", "socks://", "https://", "quic://", "naive+https://"
-            )
+            val parsablePrefixes = ProxyConfiguration.parsableUrlPrefixes
 
             bodyString = if (decodedString != null && parsablePrefixes.any { decodedString.contains(it) }) {
                 decodedString

@@ -62,6 +62,48 @@ class LwipUdpFlow(
     var closed = false
         private set
 
+    /**
+     * Logs a transport failure with the right severity. If the lwIP stack
+     * recently noted a tunnel-level interruption (network path drop, sleep,
+     * memory pressure, …) we downgrade the message — those failures are
+     * expected and don't indicate a server problem. Mirrors iOS
+     * `LWIPUDPFlow.logTransportFailure(_:error:defaultLevel:)`.
+     */
+    private fun logTransportFailure(operation: String, error: Throwable, defaultLevel: LwipStack.LogLevel) {
+        val errorDescription = conciseErrorDescription(error)
+        val interruption = LwipStack.instance?.recentTunnelInterruptionContext()
+        if (interruption != null) {
+            if (interruption.level == LwipStack.LogLevel.INFO) {
+                logger.debug("[UDP] $operation ended after ${interruption.summary}: $flowKey: $errorDescription")
+            } else {
+                logger.warning("[UDP] $operation interrupted after ${interruption.summary}: $flowKey ($errorDescription)")
+            }
+            return
+        }
+        when (defaultLevel) {
+            LwipStack.LogLevel.INFO -> logger.info("[UDP] $operation failed: $flowKey: $errorDescription")
+            LwipStack.LogLevel.WARNING -> logger.warning("[UDP] $operation failed: $flowKey: $errorDescription")
+            LwipStack.LogLevel.ERROR -> logger.error("[UDP] $operation failed: $flowKey: $errorDescription")
+        }
+    }
+
+    private fun conciseErrorDescription(error: Throwable): String {
+        var message = (error.message ?: error.toString()).trim()
+        val redundantPrefixes = listOf(
+            "Connection failed: ",
+            "Send failed: ",
+            "Receive failed: ",
+            "DNS resolution failed: "
+        )
+        for (prefix in redundantPrefixes) {
+            if (message.startsWith(prefix)) {
+                message = message.substring(prefix.length)
+                break
+            }
+        }
+        return message
+    }
+
     // -- Data Handling (called on lwIP thread) --
 
     fun handleReceivedData(data: ByteArray, payloadLength: Int) {
@@ -227,7 +269,7 @@ class LwipUdpFlow(
                     lwipExecutor.execute {
                         vlessConnecting = false
                         if (closed) return@execute
-                        logger.error("[UDP] Mux dispatch failed: $flowKey: ${e.message}")
+                        logTransportFailure("Mux dispatch", e, LwipStack.LogLevel.ERROR)
                         releaseProtocol()
                         LwipStack.instance?.udpFlows?.remove(flowKey)
                     }
@@ -305,7 +347,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
+                    logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
                     releaseProtocol()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -363,7 +405,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
+                    logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
                     releaseProtocol()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -410,7 +452,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
+                    logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
                     close()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -450,7 +492,7 @@ class LwipUdpFlow(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (closed) return@execute
-                    logger.error("[UDP] connect failed: $flowKey: ${e.message}")
+                    logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
                     close()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }

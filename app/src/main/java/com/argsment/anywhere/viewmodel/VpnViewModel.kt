@@ -111,7 +111,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 if (idx < 0) return
                 val raw = full.substring(idx + marker.length)
                 if (raw.isEmpty()) return
-                _pendingDeepLinkUrl.value = runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+                _pendingDeepLinkUrl.value = runCatching {
+                    com.argsment.anywhere.data.model.percentDecode(raw)
+                }.getOrDefault(raw)
             }
             "vless", "ss", "socks5", "socks", "quic" -> {
                 _pendingDeepLinkUrl.value = uri.toString()
@@ -758,10 +760,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         get() = prefs.getString("bypassCountryCode", "") ?: ""
         set(value) = prefs.edit().putString("bypassCountryCode", value).apply()
 
-    var ipv6ConnectionsEnabled: Boolean
-        get() = prefs.getBoolean("ipv6ConnectionsEnabled", false)
-        set(value) = prefs.edit().putBoolean("ipv6ConnectionsEnabled", value).apply()
-
+    /**
+     * IPv6 DNS lookup toggle. Matches iOS `ipv6DNSEnabled` — a single knob that
+     * controls both IPv6 routes in the TUN interface and fake-IPv6 answers for
+     * AAAA queries. When off, IPv6 is effectively disabled.
+     */
     var ipv6DnsEnabled: Boolean
         get() = prefs.getBoolean("ipv6DnsEnabled", false)
         set(value) = prefs.edit().putBoolean("ipv6DnsEnabled", value).apply()
@@ -783,6 +786,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         set(value) {
             if (value == allowInsecure) return
             prefs.edit().putBoolean("allowInsecure", value).apply()
+            // Update the in-memory policy immediately so non-tunnel callers
+            // (e.g. SubscriptionFetcher) observe the new value without waiting
+            // for LwipStack to reload after a prefs listener fires.
+            CertificatePolicy.setAllowInsecure(value)
             // Mirrors iOS: toggling allowInsecure posts `certificatePolicyChanged`, which
             // tears down active TLS connections so the new policy applies immediately.
             signalCertificatePolicyChanged()

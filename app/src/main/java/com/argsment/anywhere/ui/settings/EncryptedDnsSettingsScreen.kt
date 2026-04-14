@@ -105,6 +105,11 @@ fun EncryptedDnsSettingsScreen(
                     }
                 )
             }
+            Text(
+                text = stringResource(R.string.encrypted_dns_footer),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             if (enabled) {
                 Spacer(modifier = Modifier.height(4.dp))

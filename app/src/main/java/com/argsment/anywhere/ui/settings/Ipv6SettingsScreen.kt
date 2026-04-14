@@ -3,10 +3,8 @@ package com.argsment.anywhere.ui.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -38,7 +36,6 @@ fun Ipv6SettingsScreen(
     viewModel: VpnViewModel,
     onBack: () -> Unit
 ) {
-    var connectionsEnabled by remember { mutableStateOf(viewModel.ipv6ConnectionsEnabled) }
     var dnsEnabled by remember { mutableStateOf(viewModel.ipv6DnsEnabled) }
 
     Scaffold(
@@ -68,54 +65,16 @@ fun Ipv6SettingsScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = stringResource(R.string.ipv6_connections),
+                    text = stringResource(R.string.ipv6_dns_lookup),
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.weight(1f)
                 )
                 Switch(
-                    checked = connectionsEnabled,
+                    checked = dnsEnabled,
                     onCheckedChange = { newValue ->
-                        connectionsEnabled = newValue
-                        viewModel.ipv6ConnectionsEnabled = newValue
-                        if (newValue) {
-                            dnsEnabled = true
-                            viewModel.ipv6DnsEnabled = true
-                        }
+                        dnsEnabled = newValue
+                        viewModel.ipv6DnsEnabled = newValue
                     }
-                )
-            }
-            Text(
-                text = stringResource(R.string.ipv6_connections_footer),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            if (connectionsEnabled) {
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = stringResource(R.string.ipv6_dns_lookup),
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Switch(
-                        checked = dnsEnabled,
-                        onCheckedChange = { newValue ->
-                            dnsEnabled = newValue
-                            viewModel.ipv6DnsEnabled = newValue
-                        }
-                    )
-                }
-                Text(
-                    text = stringResource(R.string.ipv6_dns_footer),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

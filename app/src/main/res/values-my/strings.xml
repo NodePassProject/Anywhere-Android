@@ -93,10 +93,7 @@
 
     <!-- Phase 9: IPv6 -->
     <string name="ipv6">IPv6</string>
-    <string name="ipv6_connections">IPv6 ချိတ်ဆက်မှုများ</string>
     <string name="ipv6_dns_lookup">IPv6 DNS ရှာဖွေမှု</string>
-    <string name="ipv6_connections_footer">IPv6 ချိတ်ဆက်မှုများကို ဥမင်လိုဏ်မှတစ်ဆင့် လမ်းကြောင်းသတ်မှတ်ပါ။</string>
-    <string name="ipv6_dns_footer">AAAA DNS မေးခွန်းများကို IPv6 လိပ်စာများဖြင့် တုံ့ပြန်ပါ။</string>
 
     <!-- Phase 9: Trusted Certificates -->
     <string name="trusted_certificates">ယုံကြည်ရသော လက်မှတ်များ</string>

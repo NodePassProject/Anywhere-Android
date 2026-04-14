@@ -88,13 +88,71 @@ fun AddProxyScreen(
         else -> false
     }
 
-    // Auto-paste from clipboard when link method selected
+    // Auto-paste from clipboard when link method selected.
+    // Accepts the same scheme set iOS recognises, plus a bare http:// URL so
+    // users can paste a raw subscription endpoint.
     LaunchedEffect(selectedMethod) {
         if (selectedMethod == ImportMethod.LINK && linkURL.isEmpty()) {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString()?.trim()
-            if (clip != null && (clip.startsWith("vless://") || clip.startsWith("ss://") || clip.startsWith("socks5://") || clip.startsWith("socks://") || clip.startsWith("naive+https://") || clip.startsWith("quic://") || clip.startsWith("http://") || clip.startsWith("https://"))) {
+            if (clip != null && (ProxyConfiguration.canParseUrl(clip) || clip.startsWith("http://"))) {
                 linkURL = clip
+            }
+        }
+    }
+
+    // Shared import flow — used by both the Link button and the QR scanner result
+    // so a scanned subscription URL is handled the same way as a pasted one
+    // (matches iOS AddProxyView.importFromString).
+    fun importFromString(string: String, fromQr: Boolean) {
+        val trimmed = string.trim()
+        val isHTTP = trimmed.startsWith("http://") || trimmed.startsWith("https://")
+        // QR codes don't expose the segmented picker, so default to subscription
+        // for any http(s) URL (matches iOS where httpsLinkType defaults to .subscription).
+        val effectiveLinkType = if (fromQr) LinkType.SUBSCRIPTION else linkType
+
+        // A definite single-proxy URL is one whose scheme is parsable and is NOT
+        // http(s) — for http(s) URLs the user's link-type selection decides.
+        val isDefiniteProxy = ProxyConfiguration.canParseUrl(trimmed) && !isHTTP
+
+        if (isDefiniteProxy || (isHTTP && effectiveLinkType != LinkType.SUBSCRIPTION)) {
+            val naiveProtocol: OutboundProtocol? = when (effectiveLinkType) {
+                LinkType.HTTPS_PROXY -> OutboundProtocol.NAIVE_HTTP11
+                LinkType.HTTP2_PROXY -> OutboundProtocol.NAIVE_HTTP2
+                LinkType.SUBSCRIPTION -> null
+            }
+            try {
+                val config = ProxyConfiguration.fromUrl(trimmed, naiveProtocol)
+                onImport(config)
+            } catch (e: Exception) {
+                linkErrorMessage = e.message ?: context.getString(
+                    if (fromQr) R.string.invalid_qr_code else R.string.invalid_url
+                )
+                showLinkError = true
+            }
+        } else {
+            isLoading = true
+            scope.launch {
+                try {
+                    val result = SubscriptionFetcher.fetch(trimmed)
+                    val name = result.name
+                        ?: runCatching { URL(trimmed).host }.getOrNull()
+                        ?: context.getString(R.string.subscription)
+                    val subscription = Subscription(
+                        name = name,
+                        url = trimmed,
+                        lastUpdate = System.currentTimeMillis(),
+                        upload = result.upload,
+                        download = result.download,
+                        total = result.total,
+                        expire = result.expire
+                    )
+                    onSubscriptionImport(result.configurations, subscription)
+                } catch (e: Exception) {
+                    linkErrorMessage = e.message ?: context.getString(R.string.import_failed)
+                    showLinkError = true
+                }
+                isLoading = false
             }
         }
     }
@@ -197,56 +255,8 @@ fun AddProxyScreen(
             onClick = {
                 when (selectedMethod) {
                     ImportMethod.QR_CODE -> showQrScanner = true
-                    ImportMethod.LINK -> {
-                        val trimmed = linkURL.trim()
-                        val isHTTP = trimmed.startsWith("http://") || trimmed.startsWith("https://")
-
-                        if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("socks5://") || trimmed.startsWith("socks://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://") ||
-                            (isHTTP && linkType != LinkType.SUBSCRIPTION)) {
-                            // Single proxy link (VLESS, Shadowsocks, NaiveProxy, QUIC,
-                            // or HTTPS/HTTP2 proxy selected via the link type picker)
-                            val naiveProtocol: OutboundProtocol? = when (linkType) {
-                                LinkType.HTTPS_PROXY -> OutboundProtocol.NAIVE_HTTP11
-                                LinkType.HTTP2_PROXY -> OutboundProtocol.NAIVE_HTTP2
-                                LinkType.SUBSCRIPTION -> null
-                            }
-                            try {
-                                val config = ProxyConfiguration.fromUrl(trimmed, naiveProtocol)
-                                onImport(config)
-                            } catch (e: Exception) {
-                                linkErrorMessage = e.message ?: context.getString(R.string.invalid_url)
-                                showLinkError = true
-                            }
-                        } else {
-                            // Subscription URL
-                            isLoading = true
-                            scope.launch {
-                                try {
-                                    val result = SubscriptionFetcher.fetch(trimmed)
-                                    val name = result.name
-                                        ?: runCatching { URL(trimmed).host }.getOrNull()
-                                        ?: context.getString(R.string.subscription)
-                                    val subscription = Subscription(
-                                        name = name,
-                                        url = trimmed,
-                                        lastUpdate = System.currentTimeMillis(),
-                                        upload = result.upload,
-                                        download = result.download,
-                                        total = result.total,
-                                        expire = result.expire
-                                    )
-                                    onSubscriptionImport(result.configurations, subscription)
-                                } catch (e: Exception) {
-                                    linkErrorMessage = e.message ?: context.getString(R.string.import_failed)
-                                    showLinkError = true
-                                }
-                                isLoading = false
-                            }
-                        }
-                    }
-                    ImportMethod.MANUAL -> {
-                        onShowManualAdd()
-                    }
+                    ImportMethod.LINK -> importFromString(linkURL, fromQr = false)
+                    ImportMethod.MANUAL -> onShowManualAdd()
                     null -> {}
                 }
             },
@@ -277,19 +287,7 @@ fun AddProxyScreen(
         com.argsment.anywhere.ui.scanner.QrScannerScreen(
             onResult = { code ->
                 showQrScanner = false
-                val trimmed = code.trim()
-                if (trimmed.startsWith("vless://") || trimmed.startsWith("ss://") || trimmed.startsWith("socks5://") || trimmed.startsWith("socks://") || trimmed.startsWith("naive+https://") || trimmed.startsWith("quic://")) {
-                    try {
-                        val config = ProxyConfiguration.fromUrl(trimmed)
-                        onImport(config)
-                    } catch (e: Exception) {
-                        linkErrorMessage = e.message ?: context.getString(R.string.invalid_qr_code)
-                        showLinkError = true
-                    }
-                } else {
-                    linkErrorMessage = context.getString(R.string.qr_code_not_supported)
-                    showLinkError = true
-                }
+                importFromString(code, fromQr = true)
             },
             onDismiss = { showQrScanner = false }
         )

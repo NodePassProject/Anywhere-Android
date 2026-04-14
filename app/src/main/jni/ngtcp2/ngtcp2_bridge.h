@@ -8,6 +8,7 @@
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
 #include "shared.h"
+#include "ngtcp2_cc.h"
 
 /* AEAD cipher type identifiers. Kept Apple-named so generated names match
    iOS docs; the Kotlin callbacks interpret these values. */
@@ -123,5 +124,25 @@ static inline ngtcp2_ssize ngtcp2_swift_conn_write_datagram(
                                      paccepted, flags, dgram_id,
                                      data, datalen, ts);
 }
+
+/* --- Hysteria Brutal CC -------------------------------------------- */
+/* Port of Shared/ngtcp2/ngtcp2_swift_brutal.c. Overwrites `conn->cc`'s
+ * callback table with Brutal trampolines and registers a C-side state
+ * struct keyed by the `ngtcp2_cc *`. The ngtcp2-native CC (initialized
+ * as CUBIC via `settings.cc_algo`) remains behind as dead state.
+ *
+ * Returns the `ngtcp2_cc *` to pass back into the update/remove
+ * functions, or NULL on failure. Call `ngtcp2_android_remove_brutal`
+ * before `ngtcp2_conn_del` — otherwise a trampoline fired during close
+ * could reach through a dangling key. */
+ngtcp2_cc *ngtcp2_android_install_brutal(ngtcp2_conn *conn, uint64_t initial_bps);
+
+/* Updates the Brutal target send rate (bytes/sec). Thread-safe; the
+ * next update_cwnd call picks up the new value. */
+void ngtcp2_android_set_brutal_bandwidth(ngtcp2_cc *cc, uint64_t bps);
+
+/* Drops the state registered by `ngtcp2_android_install_brutal`. No-op
+ * if `cc` wasn't installed. */
+void ngtcp2_android_remove_brutal(ngtcp2_cc *cc);
 
 #endif /* NGTCP2_BRIDGE_H */

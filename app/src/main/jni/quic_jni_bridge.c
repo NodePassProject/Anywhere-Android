@@ -95,6 +95,11 @@ typedef struct {
     ngtcp2_crypto_conn_ref conn_ref;
 
     int          datagrams_enabled;
+
+    /* Brutal CC install handle (the `ngtcp2_cc *` inside `conn`). Non-NULL
+     * iff Brutal is active on this connection; used to tear down the
+     * registry entry before `ngtcp2_conn_del`. */
+    ngtcp2_cc   *brutal_cc;
 } AndroidQuicConn;
 
 static AndroidQuicConn *conn_from_user_data(void *ud) {
@@ -498,10 +503,33 @@ static void fill_random(uint8_t *dest, size_t len) {
     }
 }
 
+/* Indices into the long[] tuningParams from QuicBridge.nativeCreate.
+ * Must stay in sync with QuicConnection.kt::tuningParams. */
+#define TP_CC_ALGO                            0
+#define TP_MAX_STREAM_WINDOW                  1
+#define TP_MAX_WINDOW                         2
+#define TP_INITIAL_MAX_DATA                   3
+#define TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL 4
+#define TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE 5
+#define TP_INITIAL_MAX_STREAM_DATA_UNI        6
+#define TP_INITIAL_MAX_STREAMS_BIDI           7
+#define TP_INITIAL_MAX_STREAMS_UNI            8
+#define TP_MAX_IDLE_TIMEOUT_NS                9
+#define TP_HANDSHAKE_TIMEOUT_NS              10
+#define TP_DISABLE_ACTIVE_MIGRATION          11
+#define TP_KEEP_ALIVE_NS                     12
+#define TP_COUNT                             13
+
+/* PMTUD probe sizes — must lie in (1200, max_tx_udp_payload_size]. ngtcp2
+ * silently skips probes above hard_max_udp_payload_size. Ascending so each
+ * success advances. Mirrors QUICConnection.swift:140. */
+static const uint16_t k_pmtud_probes[] = { 1350, 1400, 1452 };
+
 JNIEXPORT jlong JNICALL
 JNI_FN(nativeCreate)(JNIEnv *env, jclass cls, jobject callbacks,
                      jstring jhost, jint jport, jboolean ipv6,
-                     jbyteArray hostAddrBytes, jboolean datagramsEnabled) {
+                     jbyteArray hostAddrBytes, jboolean datagramsEnabled,
+                     jlongArray tuningParams) {
     (void)cls; (void)jhost;
     AndroidQuicConn *c = calloc(1, sizeof(*c));
     if (!c) return 0;
@@ -567,21 +595,44 @@ JNI_FN(nativeCreate)(JNIEnv *env, jclass cls, jobject callbacks,
     cbs.handshake_completed        = cb_handshake_completed;
     if (c->datagrams_enabled) cbs.recv_datagram = cb_recv_datagram;
 
+    /* Decode the packed tuning array, falling back to naive defaults if
+     * the caller passed a null/short array (defensive — the Kotlin side
+     * always populates all TP_COUNT entries). */
+    jlong tp_buf[TP_COUNT];
+    for (int i = 0; i < TP_COUNT; i++) tp_buf[i] = 0;
+    if (tuningParams) {
+        jsize tp_len = (*env)->GetArrayLength(env, tuningParams);
+        if (tp_len > TP_COUNT) tp_len = TP_COUNT;
+        (*env)->GetLongArrayRegion(env, tuningParams, 0, tp_len, tp_buf);
+    }
+
     ngtcp2_settings settings;
     ngtcp2_swift_settings_default(&settings);
     settings.initial_ts = now_ns();
     settings.max_tx_udp_payload_size = 1452;
+    settings.cc_algo = (ngtcp2_cc_algo)tp_buf[TP_CC_ALGO];
+    settings.max_stream_window = (uint64_t)tp_buf[TP_MAX_STREAM_WINDOW];
+    settings.max_window = (uint64_t)tp_buf[TP_MAX_WINDOW];
+    settings.handshake_timeout = (ngtcp2_duration)tp_buf[TP_HANDSHAKE_TIMEOUT_NS];
+    /* PMTUD probes — pointed at a static const array, copied into ngtcp2
+     * settings at conn-new time, so it's safe to point at a stack-local
+     * structure that survives the call below. Mirrors QUICConnection.swift:812. */
+    settings.pmtud_probes = k_pmtud_probes;
+    settings.pmtud_probeslen = sizeof(k_pmtud_probes) / sizeof(k_pmtud_probes[0]);
 
     ngtcp2_transport_params params;
     ngtcp2_swift_transport_params_default(&params);
-    params.initial_max_streams_bidi = 100;
-    params.initial_max_streams_uni = 100;
-    params.initial_max_data = 64ULL * 1024 * 1024;
-    params.initial_max_stream_data_bidi_local = 64ULL * 1024 * 1024;
-    params.initial_max_stream_data_bidi_remote = 64ULL * 1024 * 1024;
-    params.initial_max_stream_data_uni = 64ULL * 1024 * 1024;
-    params.max_idle_timeout = 30ULL * 1000000000ULL;
-    params.disable_active_migration = 1;
+    params.initial_max_streams_bidi = (uint64_t)tp_buf[TP_INITIAL_MAX_STREAMS_BIDI];
+    params.initial_max_streams_uni = (uint64_t)tp_buf[TP_INITIAL_MAX_STREAMS_UNI];
+    params.initial_max_data = (uint64_t)tp_buf[TP_INITIAL_MAX_DATA];
+    params.initial_max_stream_data_bidi_local =
+        (uint64_t)tp_buf[TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL];
+    params.initial_max_stream_data_bidi_remote =
+        (uint64_t)tp_buf[TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE];
+    params.initial_max_stream_data_uni =
+        (uint64_t)tp_buf[TP_INITIAL_MAX_STREAM_DATA_UNI];
+    params.max_idle_timeout = (ngtcp2_duration)tp_buf[TP_MAX_IDLE_TIMEOUT_NS];
+    params.disable_active_migration = tp_buf[TP_DISABLE_ACTIVE_MIGRATION] ? 1 : 0;
     if (c->datagrams_enabled) params.max_datagram_frame_size = 65535;
 
     ngtcp2_path path;
@@ -603,6 +654,16 @@ JNI_FN(nativeCreate)(JNIEnv *env, jclass cls, jobject callbacks,
         return 0;
     }
 
+    /* Emit a PING every keepAliveNs of inactivity so a silently-broken UDP
+     * path (carrier NAT rebind, server-side idle sweep) surfaces as a loss
+     * or idle-close within one retransmission cycle rather than waiting for
+     * the next app write to hit CONNECTION_CLOSE. Mirrors
+     * QUICConnection.swift:830 / naiveproxy `set_keep_alive_ping_timeout`. */
+    if (tp_buf[TP_KEEP_ALIVE_NS] > 0) {
+        ngtcp2_conn_set_keep_alive_timeout(c->conn,
+            (ngtcp2_duration)tp_buf[TP_KEEP_ALIVE_NS]);
+    }
+
     /* Signal the cipher suite to ngtcp2 (initial only; updated when TLS handshake
        settles on a concrete suite). */
     ngtcp2_conn_set_tls_native_handle(c->conn,
@@ -615,9 +676,42 @@ JNI_FN(nativeDestroy)(JNIEnv *env, jclass cls, jlong handle) {
     (void)cls;
     AndroidQuicConn *c = (AndroidQuicConn *)(intptr_t)handle;
     if (!c) return;
+    /* Drop the Brutal registry entry before `ngtcp2_conn_del` frees
+     * `conn->cc` — a callback fired after this point would otherwise
+     * look up a dangling key. Mirrors QUICConnection.swift:442. */
+    if (c->brutal_cc) {
+        ngtcp2_android_remove_brutal(c->brutal_cc);
+        c->brutal_cc = NULL;
+    }
     if (c->conn) { ngtcp2_conn_del(c->conn); c->conn = NULL; }
     if (c->callbacks) { (*env)->DeleteGlobalRef(env, c->callbacks); c->callbacks = NULL; }
     free(c);
+}
+
+/* Installs Brutal CC on top of the CUBIC state ngtcp2 has already set up
+ * for this connection. Must be called *after* `nativeCreate` (so the CC
+ * struct is valid) and before any ACK/loss has been processed. Returns
+ * 0 on failure, non-zero on success (caller should just compare != 0). */
+JNIEXPORT jint JNICALL
+JNI_FN(nativeInstallBrutalCC)(JNIEnv *env, jclass cls, jlong handle, jlong initialBps) {
+    (void)env; (void)cls;
+    AndroidQuicConn *c = (AndroidQuicConn *)(intptr_t)handle;
+    if (!c || !c->conn) return 0;
+    if (c->brutal_cc) return 1; /* already installed */
+    ngtcp2_cc *cc = ngtcp2_android_install_brutal(c->conn, (uint64_t)initialBps);
+    if (!cc) return 0;
+    c->brutal_cc = cc;
+    return 1;
+}
+
+/* Updates the Brutal target send rate (bytes/sec). No-op if Brutal
+ * isn't installed. */
+JNIEXPORT void JNICALL
+JNI_FN(nativeSetBrutalBandwidth)(JNIEnv *env, jclass cls, jlong handle, jlong bps) {
+    (void)env; (void)cls;
+    AndroidQuicConn *c = (AndroidQuicConn *)(intptr_t)handle;
+    if (!c || !c->brutal_cc) return;
+    ngtcp2_android_set_brutal_bandwidth(c->brutal_cc, (uint64_t)bps);
 }
 
 JNIEXPORT jlong JNICALL

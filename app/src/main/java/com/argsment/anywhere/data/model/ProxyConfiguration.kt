@@ -16,6 +16,19 @@ import java.net.URLEncoder
 import java.util.UUID
 import org.json.JSONObject
 
+/**
+ * Percent-decodes [s] matching iOS `String.removingPercentEncoding` semantics:
+ * only `%XX` hex escapes are decoded; `+` stays literal (unlike
+ * `URLDecoder.decode`, which treats `+` as a space per form-url-encoded rules).
+ *
+ * VLESS/WebSocket share links follow standard URL percent-encoding, not form
+ * encoding — a path like `/?ed=2048+xray` must stay byte-identical on both
+ * platforms, otherwise the HTTP upgrade request path differs between iOS and
+ * Android for the same share link.
+ */
+internal fun percentDecode(s: String): String =
+    URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
+
 // =============================================================================
 // TLS Fingerprint
 // =============================================================================
@@ -200,7 +213,7 @@ data class WebSocketConfiguration(
     companion object {
         fun parse(params: Map<String, String>, serverAddress: String): WebSocketConfiguration {
             val host = params["host"] ?: serverAddress
-            val path = params["path"]?.let { URLDecoder.decode(it, "UTF-8") } ?: "/"
+            val path = params["path"]?.let { percentDecode(it) } ?: "/"
             val maxEarlyData = params["ed"]?.toIntOrNull() ?: 0
             return WebSocketConfiguration(host = host, path = path, maxEarlyData = maxEarlyData)
         }
@@ -220,7 +233,7 @@ data class HttpUpgradeConfiguration(
     companion object {
         fun parse(params: Map<String, String>, serverAddress: String): HttpUpgradeConfiguration {
             val host = params["host"] ?: serverAddress
-            var path = params["path"]?.let { URLDecoder.decode(it, "UTF-8") } ?: "/"
+            var path = params["path"]?.let { percentDecode(it) } ?: "/"
             if (!path.startsWith("/")) path = "/$path"
             return HttpUpgradeConfiguration(host = host, path = path)
         }
@@ -394,7 +407,7 @@ data class XHttpConfiguration(
     companion object {
         fun parse(params: Map<String, String>, serverAddress: String): XHttpConfiguration {
             val host = params["host"] ?: serverAddress
-            val path = params["path"]?.let { URLDecoder.decode(it, "UTF-8") } ?: "/"
+            val path = params["path"]?.let { percentDecode(it) } ?: "/"
             val mode = XHttpMode.fromRaw(params["mode"] ?: "auto")
             val extra = params["extra"] ?: ""
             // Delegate to fromExtraJson when an extra blob is present, mirroring iOS
@@ -542,6 +555,23 @@ object HexByteArraySerializer : KSerializer<ByteArray> {
 }
 
 // =============================================================================
+// Hysteria Constants
+// =============================================================================
+
+/** Valid range (inclusive) for Hysteria's declared upload bandwidth. Matches
+ *  iOS `HysteriaUploadMbpsRange`. */
+val HysteriaUploadMbpsRange: IntRange = 0..100
+
+/** Default upload bandwidth used when `upmbps` is missing from a share link.
+ *  Matches iOS `HysteriaUploadMbpsDefault`. */
+const val HysteriaUploadMbpsDefault: Int = 20
+
+/** Clamps [raw] into [HysteriaUploadMbpsRange]. Matches iOS
+ *  `clampHysteriaUploadMbps`. */
+fun clampHysteriaUploadMbps(raw: Int): Int =
+    raw.coerceIn(HysteriaUploadMbpsRange)
+
+// =============================================================================
 // Outbound Protocol
 // =============================================================================
 
@@ -552,7 +582,8 @@ enum class OutboundProtocol {
     @SerialName("socks5") SOCKS5,
     @SerialName("naive_http11") NAIVE_HTTP11,
     @SerialName("naive_http2") NAIVE_HTTP2,
-    @SerialName("naive_http3") NAIVE_HTTP3;
+    @SerialName("naive_http3") NAIVE_HTTP3,
+    @SerialName("hysteria") HYSTERIA;
 
     val isNaive: Boolean get() = this == NAIVE_HTTP11 || this == NAIVE_HTTP2 || this == NAIVE_HTTP3
     val displayName: String
@@ -563,6 +594,7 @@ enum class OutboundProtocol {
             NAIVE_HTTP11 -> "HTTPS"
             NAIVE_HTTP2 -> "HTTP/2"
             NAIVE_HTTP3 -> "QUIC"
+            HYSTERIA -> "Hysteria"
         }
 }
 
@@ -605,6 +637,11 @@ data class ProxyConfiguration(
     val naiveUsername: String? = null,
     val naivePassword: String? = null,
     val naiveProtocol: NaiveProtocol? = null,
+    /** Hysteria v2 password (sent in the Hysteria-Auth header). */
+    val hysteriaPassword: String? = null,
+    /** Client's declared upload bandwidth in Mbit/s for Brutal congestion
+     *  control. Clamped to 0…100 (matches iOS `HysteriaUploadMbpsRange`). */
+    val hysteriaUploadMbps: Int? = null,
     val chain: List<ProxyConfiguration>? = null
 ) {
     val connectAddress: String get() = resolvedIP ?: serverAddress
@@ -638,6 +675,8 @@ data class ProxyConfiguration(
                 naiveUsername == other.naiveUsername &&
                 naivePassword == other.naivePassword &&
                 naiveProtocol == other.naiveProtocol &&
+                hysteriaPassword == other.hysteriaPassword &&
+                hysteriaUploadMbps == other.hysteriaUploadMbps &&
                 chain == other.chain
 
     fun withChain(chain: List<ProxyConfiguration>?): ProxyConfiguration = copy(chain = chain)
@@ -652,6 +691,17 @@ data class ProxyConfiguration(
         OutboundProtocol.SOCKS5 -> toSocks5Url()
         OutboundProtocol.NAIVE_HTTP11, OutboundProtocol.NAIVE_HTTP2 -> toNaiveUrl()
         OutboundProtocol.NAIVE_HTTP3 -> toQuicUrl()
+        OutboundProtocol.HYSTERIA -> toHysteriaUrl()
+    }
+
+    private fun toHysteriaUrl(): String {
+        val params = mutableListOf<String>()
+        tls?.serverName?.takeIf { it.isNotBlank() }?.let { params.add("sni=$it") }
+        hysteriaUploadMbps?.let { params.add("upmbps=$it") }
+        val query = if (params.isNotEmpty()) "?${params.joinToString("&")}" else ""
+        val pwd = (hysteriaPassword ?: "").let { java.net.URLEncoder.encode(it, "UTF-8") }
+        val frag = "#${java.net.URLEncoder.encode(name, "UTF-8")}"
+        return "hy2://$pwd@$bracketedServerAddress:$serverPort$query$frag"
     }
 
     private fun toVlessUrl(): String {
@@ -687,25 +737,15 @@ data class ProxyConfiguration(
     }
 
     private fun toShadowsocksUrl(): String {
+        // Matches iOS: plain `ss://base64(method:password)@host:port#name` — no
+        // transport/security params. Shadowsocks runs over bare TCP in iOS.
         val method = ssMethod ?: return "ss://invalid"
         val password = ssPassword ?: return "ss://invalid"
         val userInfo = "$method:$password"
         val encoded = java.util.Base64.getEncoder().encodeToString(userInfo.toByteArray())
             .trimEnd('=')
-
-        val params = mutableListOf<String>()
-        if (transport != "tcp") params.add("type=$transport")
-        if (security != "none") params.add("security=$security")
-
-        if (security == "tls" && tls != null) {
-            appendTlsParams(params, tls)
-        }
-
-        appendTransportParams(params)
-
-        val query = if (params.isEmpty()) "" else "?${params.joinToString("&")}"
         val fragment = urlEncode(name)
-        return "ss://$encoded@$bracketedServerAddress:$serverPort/$query#$fragment"
+        return "ss://$encoded@$bracketedServerAddress:$serverPort#$fragment"
     }
 
     /**
@@ -774,13 +814,85 @@ data class ProxyConfiguration(
     // =========================================================================
 
     companion object {
+        /** URL scheme prefixes [fromUrl] recognises — matches iOS
+         *  `ProxyConfiguration.parsableURLPrefixes`. */
+        val parsableUrlPrefixes = listOf(
+            "vless://", "hysteria2://", "hy2://", "ss://",
+            "socks5://", "socks://", "https://", "quic://"
+        )
+
+        /** Whether [fromUrl] can parse [url]. */
+        fun canParseUrl(url: String): Boolean =
+            parsableUrlPrefixes.any { url.startsWith(it) }
+
         fun fromUrl(url: String, naiveProtocol: OutboundProtocol? = null): ProxyConfiguration = when {
             url.startsWith("ss://") -> fromShadowsocksUrl(url)
             url.startsWith("socks5://") || url.startsWith("socks://") -> fromSocks5Url(url)
-            url.startsWith("https://") || url.startsWith("naive+https://") -> fromNaiveUrl(url, naiveProtocol)
+            url.startsWith("https://") -> fromNaiveUrl(url, naiveProtocol)
             url.startsWith("quic://") -> fromQuicUrl(url)
             url.startsWith("vless://") -> fromVlessUrl(url)
-            else -> throw ProxyError.InvalidUrl("URL must start with vless://, ss://, socks5://, https://, or quic://")
+            url.startsWith("hy2://") || url.startsWith("hysteria2://") ->
+                fromHysteriaUrl(url)
+            else -> throw ProxyError.InvalidUrl("URL must start with vless://, ss://, socks5://, https://, quic://, or hy2://")
+        }
+
+        private fun fromHysteriaUrl(url: String): ProxyConfiguration {
+            var remaining = when {
+                url.startsWith("hy2://") -> url.removePrefix("hy2://")
+                else -> url.removePrefix("hysteria2://")
+            }
+
+            var fragmentName: String? = null
+            val hashIndex = remaining.lastIndexOf('#')
+            if (hashIndex >= 0) {
+                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
+                remaining = remaining.substring(0, hashIndex)
+            }
+
+            val atIndex = remaining.indexOf('@')
+            if (atIndex < 0) throw ProxyError.InvalidUrl("Hysteria URL missing @ separator")
+            val password = percentDecode(remaining.substring(0, atIndex))
+            val serverPart = remaining.substring(atIndex + 1)
+
+            val hostPort: String
+            var queryString: String? = null
+            val q = serverPart.indexOf('?')
+            if (q >= 0) {
+                val before = serverPart.substring(0, q)
+                hostPort = if (before.endsWith("/")) before.dropLast(1) else before
+                queryString = serverPart.substring(q + 1)
+            } else {
+                val s = serverPart.indexOf('/')
+                hostPort = if (s >= 0) serverPart.substring(0, s) else serverPart
+            }
+
+            val (host, port) = parseHostPort(hostPort)
+            val params = parseQueryParams(queryString)
+
+            val sni = params["sni"] ?: params["peer"] ?: host
+            val insecure = params["insecure"] == "1" || params["insecure"]?.lowercase() == "true"
+            val tlsCfg = TlsConfiguration(
+                serverName = sni,
+                allowInsecure = insecure,
+                minVersion = TlsVersion.TLS13,
+                maxVersion = TlsVersion.TLS13
+            )
+
+            return ProxyConfiguration(
+                name = fragmentName ?: "Untitled",
+                serverAddress = host,
+                serverPort = port,
+                uuid = UUID.randomUUID(),
+                encryption = "none",
+                transport = "tcp",
+                security = "tls",
+                tls = tlsCfg,
+                outboundProtocol = OutboundProtocol.HYSTERIA,
+                hysteriaPassword = password,
+                hysteriaUploadMbps = clampHysteriaUploadMbps(
+                    params["upmbps"]?.toIntOrNull() ?: HysteriaUploadMbpsDefault
+                )
+            )
         }
 
         private fun fromVlessUrl(url: String): ProxyConfiguration {
@@ -790,7 +902,7 @@ data class ProxyConfiguration(
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
-                fragmentName = URLDecoder.decode(remaining.substring(hashIndex + 1), "UTF-8")
+                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
                 remaining = remaining.substring(0, hashIndex)
             }
 
@@ -877,7 +989,7 @@ data class ProxyConfiguration(
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
-                fragmentName = URLDecoder.decode(remaining.substring(hashIndex + 1), "UTF-8")
+                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
                 remaining = remaining.substring(0, hashIndex)
             }
 
@@ -972,7 +1084,6 @@ data class ProxyConfiguration(
 
         private fun fromNaiveUrl(url: String, protocolOverride: OutboundProtocol? = null): ProxyConfiguration {
             var remaining = when {
-                url.startsWith("naive+https://") -> url.removePrefix("naive+https://")
                 url.startsWith("https://") -> url.removePrefix("https://")
                 else -> throw ProxyError.InvalidUrl("Naive URL must start with https://")
             }
@@ -981,7 +1092,7 @@ data class ProxyConfiguration(
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
-                fragmentName = URLDecoder.decode(remaining.substring(hashIndex + 1), "UTF-8")
+                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
                 remaining = remaining.substring(0, hashIndex)
             }
 
@@ -1001,8 +1112,8 @@ data class ProxyConfiguration(
             // Parse user:pass
             val colonIndex = userInfo.indexOf(':')
             if (colonIndex < 0) throw ProxyError.InvalidUrl("Missing password in naive URL (expected user:pass)")
-            val username = URLDecoder.decode(userInfo.substring(0, colonIndex), "UTF-8")
-            val password = URLDecoder.decode(userInfo.substring(colonIndex + 1), "UTF-8")
+            val username = percentDecode(userInfo.substring(0, colonIndex))
+            val password = percentDecode(userInfo.substring(colonIndex + 1))
 
             // Parse host:port
             val (host, port) = parseHostPort(serverPart)
@@ -1036,7 +1147,7 @@ data class ProxyConfiguration(
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
-                fragmentName = URLDecoder.decode(remaining.substring(hashIndex + 1), "UTF-8")
+                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
                 remaining = remaining.substring(0, hashIndex)
             }
 
@@ -1053,10 +1164,10 @@ data class ProxyConfiguration(
                 }
                 val colonIndex = userInfo.indexOf(':')
                 if (colonIndex >= 0) {
-                    username = URLDecoder.decode(userInfo.substring(0, colonIndex), "UTF-8")
-                    password = URLDecoder.decode(userInfo.substring(colonIndex + 1), "UTF-8")
+                    username = percentDecode(userInfo.substring(0, colonIndex))
+                    password = percentDecode(userInfo.substring(colonIndex + 1))
                 } else {
-                    username = URLDecoder.decode(userInfo, "UTF-8")
+                    username = percentDecode(userInfo)
                 }
             } else {
                 val slashIndex = remaining.indexOf('/')
@@ -1084,7 +1195,7 @@ data class ProxyConfiguration(
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
-                fragmentName = URLDecoder.decode(remaining.substring(hashIndex + 1), "UTF-8")
+                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
                 remaining = remaining.substring(0, hashIndex)
             }
 
@@ -1104,8 +1215,8 @@ data class ProxyConfiguration(
             // Parse user:pass
             val colonIndex = userInfo.indexOf(':')
             if (colonIndex < 0) throw ProxyError.InvalidUrl("Missing password in quic URL (expected user:pass)")
-            val username = URLDecoder.decode(userInfo.substring(0, colonIndex), "UTF-8")
-            val password = URLDecoder.decode(userInfo.substring(colonIndex + 1), "UTF-8")
+            val username = percentDecode(userInfo.substring(0, colonIndex))
+            val password = percentDecode(userInfo.substring(colonIndex + 1))
 
             // Parse host:port
             val (host, port) = parseHostPort(serverPart)
@@ -1133,7 +1244,7 @@ data class ProxyConfiguration(
             queryString.split("&").forEach { param ->
                 val kv = param.split("=", limit = 2)
                 if (kv.size == 2) {
-                    params[kv[0]] = URLDecoder.decode(kv[1], "UTF-8")
+                    params[kv[0]] = percentDecode(kv[1])
                 }
             }
             return params

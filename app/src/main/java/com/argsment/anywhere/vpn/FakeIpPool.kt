@@ -10,7 +10,11 @@ package com.argsment.anywhere.vpn
  * IPv4 range: 198.18.0.0/15 (offsets 1..131071)
  * IPv6 range: fc00:: + offset (same offset range)
  *
- * Thread safety: NOT internally synchronized. All access must be on the lwIP thread.
+ * Thread safety: every mutator/reader takes the intrinsic monitor on
+ * [stateLock]. Mirrors iOS `FakeIPPool`'s `UnfairLock` so that calls from
+ * outside the lwIP executor (debug / stats / IPC) cannot tear the LRU
+ * structure even if they momentarily race the DNS / accept callbacks
+ * that normally drive allocation.
  */
 class FakeIpPool {
 
@@ -34,6 +38,9 @@ class FakeIpPool {
 
     private var nextOffset = 1
 
+    /** Single-purpose monitor for all mutable pool state. */
+    private val stateLock = Any()
+
     // -- Pool Operations --
 
     /**
@@ -44,11 +51,11 @@ class FakeIpPool {
      * time via [LwipStack.resolveFakeIp] which checks [DomainRouter]. This ensures
      * routing rule changes take effect immediately without rebuilding the pool.
      */
-    fun allocate(domain: String): Int {
+    fun allocate(domain: String): Int = synchronized(stateLock) {
         // Already allocated? Touch LRU and return existing offset
         domainToOffset[domain]?.let { offset ->
             touchLru(offset)
-            return offset
+            return@synchronized offset
         }
 
         // Need a new offset
@@ -65,19 +72,21 @@ class FakeIpPool {
         offsetToEntry[offset] = Entry(domain)
         appendLru(offset)
 
-        return offset
+        offset
     }
 
     /** Look up an entry by its fake IP string (IPv4 or IPv6). */
     fun lookup(ip: String): Entry? {
         val offset = ipToOffset(ip) ?: return null
-        val entry = offsetToEntry[offset] ?: return null
-        touchLru(offset)
-        return entry
+        return synchronized(stateLock) {
+            val entry = offsetToEntry[offset] ?: return@synchronized null
+            touchLru(offset)
+            entry
+        }
     }
 
     /** Clear all mappings (called on full stop). */
-    fun reset() {
+    fun reset() = synchronized(stateLock) {
         domainToOffset.clear()
         offsetToEntry.clear()
         offsetToNode.clear()

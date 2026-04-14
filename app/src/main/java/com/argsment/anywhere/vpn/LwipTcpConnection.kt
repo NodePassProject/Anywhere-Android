@@ -103,18 +103,38 @@ class LwipTcpConnection(
         if (directRelay != null || vlessConnection != null) {
             // Coalesce segments: accumulate data and schedule a batched send
             // to reduce per-segment encryption overhead.
-            // When flush is in-flight or buffer would exceed max, send directly per-segment.
-            if (coalesceFlushInFlight ||
-                (coalesceBuffer != null && coalesceBuffer!!.size() + data.size > MAX_COALESCE_SIZE)) {
-                sendSegmentDirect(data)
-            } else {
-                if (coalesceBuffer == null) coalesceBuffer = ByteArrayOutputStream()
-                coalesceBuffer!!.write(data)
-
-                if (!coalesceScheduled) {
-                    coalesceScheduled = true
-                    lwipExecutor.execute { flushCoalesceBuffer() }
+            val bufferedSize = coalesceBuffer?.size() ?: 0
+            if (bufferedSize + data.size > MAX_COALESCE_SIZE) {
+                // Buffer would overflow — flush accumulated data first to
+                // maintain stream ordering, then fall back to per-segment sends.
+                if (bufferedSize > 0 && !coalesceFlushInFlight) {
+                    flushCoalesceBuffer()
                 }
+                val nowBuffered = coalesceBuffer?.size() ?: 0
+                if (nowBuffered == 0) {
+                    // Buffer is empty (was empty or just flushed) — safe to
+                    // send per-segment for backpressure without reordering.
+                    sendSegmentDirect(data)
+                } else {
+                    // A flush is in-flight and the buffer still has unsent data.
+                    // Coalesce to preserve ordering; the chain-flush on
+                    // completion will send it after the in-flight data.
+                    coalesceBuffer!!.write(data)
+                }
+                return
+            }
+
+            // Always coalesce — even while a flush is in-flight. This matches
+            // Xray-core's buffered-pipe design where data accumulates during the
+            // scMinPostsIntervalMs sleep and is sent as one large POST.
+            if (coalesceBuffer == null) coalesceBuffer = ByteArrayOutputStream()
+            coalesceBuffer!!.write(data)
+
+            // Schedule flush only when no send is in-flight (data accumulated
+            // during an in-flight send will be flushed when it completes).
+            if (!coalesceFlushInFlight && !coalesceScheduled) {
+                coalesceScheduled = true
+                lwipExecutor.execute { flushCoalesceBuffer() }
             }
         } else {
             pendingData.write(data)
@@ -422,6 +442,13 @@ class LwipTcpConnection(
                             NativeBridge.nativeTcpRecved(pcb, ack)
                             remaining -= ack
                         }
+                        // Immediately flush data that accumulated during the in-flight send.
+                        // Matches iOS Xray-core batched-upload behavior (LWIPTCPConnection.swift:207-209):
+                        // data coalesces while the previous POST + delay runs, then flushes
+                        // as one large POST instead of many small per-segment POSTs.
+                        if (coalesceBuffer != null && coalesceBuffer!!.size() > 0) {
+                            flushCoalesceBuffer()
+                        }
                     }
                 }
             } catch (_: CancellationException) {
@@ -504,6 +531,11 @@ class LwipTcpConnection(
 
         if (closed) return
         NativeBridge.nativeTcpOutput(pcb)
+        // Drain immediately on the same lwIP cycle — LwipStack's batching
+        // path would otherwise defer the TUN write to the next executor
+        // tick. Mirrors iOS LWIPTCPConnection.swift:533
+        // (`LWIPStack.shared?.flushOutputInline()`).
+        LwipStack.instance?.flushOutputInline()
 
         // Backpressure gate: if overflow has accumulated beyond the soft limit,
         // pause receives so the remote side stops sending.
@@ -536,9 +568,17 @@ class LwipTcpConnection(
                 overflowBuffer.consume(written)
             }
             NativeBridge.nativeTcpOutput(pcb)
+            // Mirrors iOS LWIPTCPConnection.swift:573 — flush the egress
+            // queue inline so freed pbufs leave the host within the same
+            // drain cycle that consumed them.
+            LwipStack.instance?.flushOutputInline()
         } else if (overflowBuffer.size() > 0) {
             // Nothing drained (ERR_MEM with empty send buffer) — no handleSent will
             // fire for this connection, so schedule a delayed retry (matching iOS).
+            logger.warning(
+                "[TCP] Drain stalled (${overflowBuffer.size()} bytes pending), " +
+                "retrying in ${DRAIN_RETRY_DELAY_MS}ms: $dstHost:$dstPort"
+            )
             lwipExecutor.schedule({ drainOverflowBuffer() }, DRAIN_RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
             return
         }
@@ -671,7 +711,7 @@ class LwipTcpConnection(
         private const val MAX_OVERFLOW_BUFFER_SIZE = 2 * 1024 * 1024  // 2 MB (soft limit, increased from iOS's 512 KB)
         private const val MAX_LWIP_WRITE_SIZE = 16 * 1024        // 16 KB per tcp_write (matching iOS, limits pbuf/segment pressure)
         private const val MAX_COALESCE_SIZE = 65535              // UInt16 max (matching iOS, protocol framing limit)
-        private const val DRAIN_RETRY_DELAY_MS = 100L            // 100ms drain retry (matching iOS)
+        private const val DRAIN_RETRY_DELAY_MS = 250L            // 250ms drain retry (matching iOS TunnelConstants.drainRetryDelayMs)
     }
 }
 

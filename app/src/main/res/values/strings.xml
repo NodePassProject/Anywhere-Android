@@ -106,6 +106,7 @@
 
     <!-- Phase 9: Encrypted DNS -->
     <string name="encrypted_dns">Encrypted DNS</string>
+    <string name="encrypted_dns_footer">Not recommended.</string>
     <string name="dns_protocol">Protocol</string>
     <string name="dns_over_https">DNS over HTTPS</string>
     <string name="dns_over_tls">DNS over TLS</string>
@@ -115,10 +116,7 @@
 
     <!-- Phase 9: IPv6 -->
     <string name="ipv6">IPv6</string>
-    <string name="ipv6_connections">IPv6 Connections</string>
     <string name="ipv6_dns_lookup">IPv6 DNS Lookup</string>
-    <string name="ipv6_connections_footer">Route IPv6 connections through the tunnel.</string>
-    <string name="ipv6_dns_footer">Respond to AAAA DNS queries with IPv6 addresses.</string>
 
     <!-- Phase 9: Trusted Certificates -->
     <string name="trusted_certificates">Trusted Certificates</string>
@@ -182,6 +180,7 @@
     <!-- Phase 9: Proxy Editor -->
     <string name="protocol_label">Protocol</string>
     <string name="password">Password</string>
+    <string name="upload_mbps">Upload (Mbps)</string>
     <string name="username">Username</string>
     <string name="method">Method</string>
 

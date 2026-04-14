@@ -54,9 +54,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     var configuration: ProxyConfiguration? = null
         private set
 
-    // Settings (read from SharedPreferences)
-    var ipv6ConnectionsEnabled: Boolean = false
-        private set
+    // Settings (read from SharedPreferences).
+    // `ipv6DNSEnabled` matches iOS — a single knob that controls both IPv6
+    // routes on the TUN interface and whether AAAA queries resolve to fake
+    // IPv6 addresses.
     var ipv6DNSEnabled: Boolean = false
         private set
     var encryptedDnsEnabled: Boolean = false
@@ -138,7 +139,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     // -- Settings observation --
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when (key) {
-            "ipv6ConnectionsEnabled",
             "ipv6DnsEnabled",
             "bypassCountryCode",
             "encryptedDnsEnabled",
@@ -155,16 +155,15 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
     }
 
-    // -- GeoIP Bypass --
+    // -- Bypass --
 
     /** Returns true if traffic to the given host should bypass the tunnel.
-     *  Checks proxy server addresses first (prevents routing loops after config switch),
-     *  then falls back to GeoIP country-based bypass. */
+     *  Matches iOS LWIPStack.shouldBypass: only the proxy-server-address check.
+     *  Country-based bypass is compiled into DomainRouter rules (`bypassRules` in
+     *  routing.json) by the app, so all routing decisions go through DomainRouter
+     *  consistently — runtime GeoIP would override user routing rules. */
     fun shouldBypass(host: String): Boolean {
-        if (isProxyServerAddress(host)) return true
-        if (proxyMode == "global") return false
-        if (bypassCountry == 0) return false
-        return geoIpDatabase?.lookup(host) == bypassCountry
+        return isProxyServerAddress(host)
     }
 
     /** Returns true if the given host matches any proxy server address across all
@@ -279,16 +278,15 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
      *
      * @param fd          The TUN file descriptor from VpnService.establish()
      * @param config      The VLESS proxy configuration
-     * @param ipv6        Whether IPv6 is enabled
+     * @param ipv6Dns     Whether IPv6 routes and AAAA fake-IP resolution are enabled
      */
-    fun start(fd: ParcelFileDescriptor, config: ProxyConfiguration, ipv6Connections: Boolean = false, ipv6Dns: Boolean = false) {
-        logger.debug("[LWIPStack] Starting, ipv6Connections=$ipv6Connections, ipv6Dns=$ipv6Dns")
+    fun start(fd: ParcelFileDescriptor, config: ProxyConfiguration, ipv6Dns: Boolean = false) {
+        logger.debug("[LWIPStack] Starting, ipv6Dns=$ipv6Dns")
         instance = this
         this.tunFd = fd
         this.tunInput = FileInputStream(fd.fileDescriptor)
         this.tunOutput = FileOutputStream(fd.fileDescriptor)
         this.configuration = config
-        this.ipv6ConnectionsEnabled = ipv6Connections
         this.ipv6DNSEnabled = ipv6Dns
 
         // Register as lwIP callback handler
@@ -376,45 +374,23 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         lwipExecutor.execute {
             if (!running) return@execute
             val config = configuration ?: return@execute
-
-            val now = System.nanoTime()
-            val elapsed = now - lastRestartNanos
-            if (elapsed < restartThrottleNanos) {
-                deferredRestart?.cancel(false)
-                val delayMs = (restartThrottleNanos - elapsed) / 1_000_000L
-                deferredRestart = lwipExecutor.schedule({
-                    deferredRestart = null
-                    if (!running) return@schedule
-                    val cfg = configuration ?: return@schedule
-                    logger.warning("[VPN] Restarting stack after $summary")
-                    lastRestartNanos = System.nanoTime()
-                    restartStack(cfg, ipv6ConnectionsEnabled, ipv6DNSEnabled)
-                }, delayMs, TimeUnit.MILLISECONDS)
-                logger.debug("[LWIPStack] Restart throttled, deferred by ${delayMs}ms")
-                return@execute
-            }
-
             logger.warning("[VPN] Restarting stack after $summary")
-            lastRestartNanos = now
-            restartStack(config, ipv6ConnectionsEnabled, ipv6DNSEnabled)
+            noteRecentTunnelInterruption(summary, LogLevel.WARNING)
+            restartStack(config, ipv6DNSEnabled)
         }
     }
 
     /** Switches to a new configuration, tearing down all active connections.
      *
-     * Re-applies tunnel network settings before restarting the stack.
-     * This resets the virtual interface and flushes the OS DNS cache,
-     * causing apps to terminate stale connections and re-resolve domains
-     * through the new configuration — matching iOS LWIPStack.switchConfiguration()
-     * and handleSettingsChanged() behavior. */
+     * Only restarts the lwIP stack — does NOT reapply tunnel network settings.
+     * The TUN fd stays open and the packet read loop continues uninterrupted.
+     * `onTunnelSettingsNeedReapply` is only called when IPv6/DNS settings change
+     * (matches iOS LWIPStack.switchConfiguration behavior). */
     fun switchConfiguration(newConfig: ProxyConfiguration) {
-        logger.info("[VPN] Configuration switched; reconnecting active connections")
         lwipExecutor.execute {
-            // Only restart the lwIP stack — do NOT reapply tunnel settings.
-            // The TUN fd stays open and the packet read loop continues uninterrupted.
-            // onTunnelSettingsNeedReapply is only called when IPv6/DNS settings change
-            // (matching iOS LWIPStack.switchConfiguration behavior).
-            restartStack(newConfig, ipv6ConnectionsEnabled, ipv6DNSEnabled)
+            logger.info("[VPN] Configuration switched; reconnecting active connections")
+            noteRecentTunnelInterruption("configuration switch", LogLevel.INFO)
+            restartStack(newConfig, ipv6DNSEnabled)
         }
     }
 
@@ -490,12 +466,42 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         logger.debug("[LWIPStack] Shutdown complete, closed $flowCount UDP flows")
     }
 
-    /** Tears down and restarts the lwIP stack. Must be called on lwipExecutor. */
-    private fun restartStack(config: ProxyConfiguration, ipv6Connections: Boolean, ipv6Dns: Boolean) {
+    /**
+     * Tears down all connections and restarts the lwIP stack. Must be called on lwipExecutor.
+     *
+     * Throttled to at most once per [restartThrottleNanos] (1s, matching iOS
+     * LWIPStack.restartThrottleInterval). When a restart is requested within the
+     * cooldown window the request is deferred; only the last deferred request
+     * executes (earlier ones are cancelled and replaced). All restart entry points
+     * (handleNetworkPathChange, switchConfiguration, handleSettingsChanged,
+     * handleRoutingChanged, handleCertificatePolicyChanged) flow through here.
+     */
+    private fun restartStack(config: ProxyConfiguration, ipv6Dns: Boolean) {
+        val now = System.nanoTime()
+        val elapsed = now - lastRestartNanos
+        if (elapsed < restartThrottleNanos) {
+            deferredRestart?.cancel(false)
+            val delayMs = (restartThrottleNanos - elapsed) / 1_000_000L
+            deferredRestart = lwipExecutor.schedule({
+                deferredRestart = null
+                if (!running) return@schedule
+                restartStackNow(config, ipv6Dns)
+            }, delayMs, TimeUnit.MILLISECONDS)
+            logger.debug("[LWIPStack] Restart throttled, deferred by ${delayMs}ms")
+            return
+        }
+        restartStackNow(config, ipv6Dns)
+    }
+
+    /** Performs the actual stack restart unconditionally. Must be called on lwipExecutor. */
+    private fun restartStackNow(config: ProxyConfiguration, ipv6Dns: Boolean) {
+        deferredRestart?.cancel(false)
+        deferredRestart = null
+        lastRestartNanos = System.nanoTime()
+
         shutdownInternal()
 
         this.configuration = config
-        this.ipv6ConnectionsEnabled = ipv6Connections
         this.ipv6DNSEnabled = ipv6Dns
         this.proxyMode = prefs.getString("proxyMode", "rule") ?: "rule"
         loadBypassCountry()
@@ -520,7 +526,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             tunFdSwapped = false
             startReadingPackets()
         }
-        logger.debug("[LWIPStack] Restarted, mode=$proxyMode, mux=${muxManager != null}, bypass=${bypassCountry != 0}, encryptedDns=$encryptedDnsEnabled, ipv6conn=$ipv6ConnectionsEnabled, ipv6dns=$ipv6DNSEnabled")
+        logger.debug("[LWIPStack] Restarted, mode=$proxyMode, mux=${muxManager != null}, bypass=${bypassCountry != 0}, encryptedDns=$encryptedDnsEnabled, ipv6dns=$ipv6DNSEnabled")
     }
 
     // -- Settings Observation --
@@ -533,12 +539,80 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
     }
 
+    // -- Tunnel-interruption attribution --
+    //
+    // Mirrors iOS LWIPStack.noteRecentTunnelInterruption / recentTunnelInterruptionContext.
+    // Records a recent tunnel-level interruption so connection errors that follow can be
+    // reclassified as VPN/path interruptions instead of generic socket failures. Used by
+    // LwipTcpConnection / LwipUdpFlow logTransportFailure paths to reduce log spam during
+    // network path flux.
+
+    /**
+     * Tunnel-event severity matching iOS `LWIPStack.LogLevel` exactly:
+     * INFO / WARNING / ERROR only. Used by `noteRecentTunnelInterruption`
+     * and `logTransportFailure` to classify follow-up errors.
+     *
+     * Do not add a DEBUG case — the iOS [AnywhereLogger]'s `debug` channel
+     * is intentionally separate from the user-facing buffer (see
+     * AnywhereLogger.kt::debug), and exposing it here would diverge from
+     * iOS `LWIPStack.LogLevel`.
+     */
+    enum class LogLevel { INFO, WARNING, ERROR }
+
+    data class RecentTunnelInterruption(
+        val timestampNanos: Long,
+        val level: LogLevel,
+        val summary: String
+    )
+
+    @Volatile
+    private var recentTunnelInterruption: RecentTunnelInterruption? = null
+    private val recentTunnelInterruptionWindowNanos: Long = 8_000_000_000L  // 8 seconds (TunnelConstants.recentTunnelInterruptionWindow)
+
+    fun noteRecentTunnelInterruption(summary: String, level: LogLevel) {
+        recentTunnelInterruption = RecentTunnelInterruption(
+            timestampNanos = System.nanoTime(),
+            level = level,
+            summary = summary
+        )
+    }
+
+    /** Returns the most recent tunnel interruption if it is still fresh enough
+     *  to explain follow-up socket failures. */
+    fun recentTunnelInterruptionContext(): RecentTunnelInterruption? {
+        val ctx = recentTunnelInterruption ?: return null
+        if (System.nanoTime() - ctx.timestampNanos > recentTunnelInterruptionWindowNanos) {
+            recentTunnelInterruption = null
+            return null
+        }
+        return ctx
+    }
+
+    fun clearRecentTunnelInterruption() {
+        recentTunnelInterruption = null
+    }
+
+    // -- Log buffer note --
+    //
+    // The user-facing log buffer (iOS `LWIPStack.appendLog/fetchLogs/
+    // compactLogs`, LWIPStack.swift:89-149) is implemented on Android by
+    // [com.argsment.anywhere.vpn.util.LogBuffer]. Same retention rules
+    // (5 min, 50 entries) and the same dual-write semantics — every
+    // [AnywhereLogger] info/warning/error call also lands in the buffer
+    // via the sink wired from [AnywhereVpnService.startVpn].
+    //
+    // We don't duplicate the buffer here because Android's VPN service
+    // shares a process with the UI, so [com.argsment.anywhere.viewmodel.LogsModel]
+    // can collect [LogBuffer.state] directly. iOS keeps the buffer
+    // inside LWIPStack only because the Network Extension is a separate
+    // process and PacketTunnelProvider answers an IPC `fetchLogs`
+    // message — that boundary doesn't exist on Android.
+
     private fun handleSettingsChanged() {
         lwipExecutor.execute {
             if (!running) return@execute
             val config = configuration ?: return@execute
 
-            val newIpv6Connections = prefs.getBoolean("ipv6ConnectionsEnabled", false)
             val newIpv6Dns = prefs.getBoolean("ipv6DnsEnabled", false)
             val newBypassCode = prefs.getString("bypassCountryCode", "") ?: ""
             val newBypass = if (newBypassCode.isEmpty()) 0 else GeoIpDatabase.packCountryCode(newBypassCode)
@@ -547,7 +621,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             val newEncryptedDnsServer = prefs.getString("encryptedDnsServer", "") ?: ""
             val newProxyMode = prefs.getString("proxyMode", "rule") ?: "rule"
 
-            val ipv6ConnectionsChanged = newIpv6Connections != ipv6ConnectionsEnabled
             val ipv6DnsChanged = newIpv6Dns != ipv6DNSEnabled
             val bypassChanged = newBypass != bypassCountry
             val encryptedDnsEnabledChanged = newEncryptedDnsEnabled != encryptedDnsEnabled
@@ -555,8 +628,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             val encryptedDnsServerChanged = newEncryptedDnsServer != encryptedDnsServer
             val proxyModeChanged = newProxyMode != proxyMode
 
-            if (!ipv6ConnectionsChanged &&
-                !ipv6DnsChanged &&
+            if (!ipv6DnsChanged &&
                 !bypassChanged &&
                 !encryptedDnsEnabledChanged &&
                 !encryptedDnsProtocolChanged &&
@@ -564,7 +636,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
                 !proxyModeChanged
             ) return@execute
 
-            if (ipv6ConnectionsChanged ||
+            // iOS re-applies the tunnel network settings whenever IPv6 changes
+            // (adds/removes IPv6 routes and IPv6 DNS servers) or encrypted DNS
+            // changes (switches between NEDNSSettings/DoH/DoT).
+            if (ipv6DnsChanged ||
                 encryptedDnsEnabledChanged ||
                 encryptedDnsProtocolChanged ||
                 encryptedDnsServerChanged
@@ -572,18 +647,22 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
                 onTunnelSettingsNeedReapply?.invoke()
             }
 
-            logger.info("[VPN] Settings changed (bypass=${newBypass != 0}, ipv6conn=$newIpv6Connections, ipv6dns=$newIpv6Dns, encryptedDns=$newEncryptedDnsEnabled); reconnecting active connections")
-            restartStack(config, newIpv6Connections, newIpv6Dns)
+            logger.info("[VPN] Settings changed (bypass=${newBypass != 0}, ipv6dns=$newIpv6Dns, encryptedDns=$newEncryptedDnsEnabled); reconnecting active connections")
+            noteRecentTunnelInterruption("settings change", LogLevel.INFO)
+            restartStack(config, newIpv6Dns)
         }
     }
 
     private fun handleRoutingChanged() {
         lwipExecutor.execute {
             if (!running) return@execute
-            logger.info("[VPN] Routing changed; reloading domain router")
-            // Hot-reload routing table only; existing connections keep their dispatched
-            // path. Matches iOS `routingChanged` handler in LWIPStack+Lifecycle.
-            domainRouter.loadRoutingConfiguration()
+            val config = configuration ?: return@execute
+            logger.info("[VPN] Routing changed; reconnecting active connections")
+            noteRecentTunnelInterruption("routing change", LogLevel.INFO)
+            // Restart the stack: closes all connections using outdated proxy configurations,
+            // rebuilds the FakeIPPool, and reloads DomainRouter rules from routing.json.
+            // Matches iOS LWIPStack.handleRoutingChanged (LWIPStack+Lifecycle.swift:286).
+            restartStack(config, ipv6DNSEnabled)
         }
     }
 
@@ -602,7 +681,8 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             if (!running) return@execute
             val config = configuration ?: return@execute
             logger.info("[VPN] Certificate policy changed; reconnecting active connections")
-            restartStack(config, ipv6ConnectionsEnabled, ipv6DNSEnabled)
+            noteRecentTunnelInterruption("certificate policy change", LogLevel.INFO)
+            restartStack(config, ipv6DNSEnabled)
         }
     }
 
@@ -638,6 +718,22 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         outputPackets.clear()
     }
 
+    /**
+     * Drains the pending output buffer immediately on the calling thread.
+     * Connection write paths (TCP send / UDP sendto) call this right after
+     * `nativeTcpOutput` so the egress packet leaves the TUN within the
+     * same lwIP cycle instead of waiting for the deferred flush to run on
+     * the next executor tick. Mirrors iOS `LWIPStack.flushOutputInline()`
+     * (LWIPStack+IO.swift:26-28).
+     *
+     * Safe to call from the lwIP executor or from inline JNI callbacks
+     * — `flushOutputPackets()` is a single-shot drain that clears
+     * [outputFlushScheduled] so the deferred path becomes a no-op.
+     */
+    fun flushOutputInline() {
+        flushOutputPackets()
+    }
+
     override fun onTcpAccept(
         srcIp: ByteArray, srcPort: Int,
         dstIp: ByteArray, dstPort: Int,
@@ -648,7 +744,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             return 0L
         }
 
-        if (isIpv6 && !ipv6ConnectionsEnabled) {
+        if (isIpv6 && !ipv6DNSEnabled) {
             return 0L
         }
 
@@ -738,7 +834,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         dstIp: ByteArray, dstPort: Int,
         isIpv6: Boolean, data: ByteArray
     ) {
-        if (isIpv6 && !ipv6ConnectionsEnabled) {
+        if (isIpv6 && !ipv6DNSEnabled) {
             return
         }
 

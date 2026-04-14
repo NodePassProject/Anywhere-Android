@@ -93,10 +93,7 @@
 
     <!-- Phase 9: IPv6 -->
     <string name="ipv6">IPv6</string>
-    <string name="ipv6_connections">اتصالات IPv6</string>
     <string name="ipv6_dns_lookup">بحث DNS عبر IPv6</string>
-    <string name="ipv6_connections_footer">توجيه اتصالات IPv6 عبر النفق.</string>
-    <string name="ipv6_dns_footer">الاستجابة لاستعلامات AAAA DNS بعناوين IPv6.</string>
 
     <!-- Phase 9: Trusted Certificates -->
     <string name="trusted_certificates">الشهادات الموثوقة</string>

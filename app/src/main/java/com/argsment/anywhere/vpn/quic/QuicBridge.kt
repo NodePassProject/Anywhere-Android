@@ -39,13 +39,27 @@ object QuicBridge {
 
     @JvmStatic external fun nativeInstall(callbacksClass: Class<*>, cryptoClass: Class<*>)
 
+    /**
+     * Creates a new ngtcp2 client connection. [tuningParams] is a packed
+     * `long[]` carrying the [QuicTuning] knobs in the order the native
+     * bridge expects (see `quic_jni_bridge.c::nativeCreate`):
+     *
+     * `[ccAlgo, maxStreamWindow, maxWindow, initialMaxData,
+     *   initialMaxStreamDataBidiLocal, initialMaxStreamDataBidiRemote,
+     *   initialMaxStreamDataUni, initialMaxStreamsBidi, initialMaxStreamsUni,
+     *   maxIdleTimeoutNs, handshakeTimeoutNs, disableActiveMigration,
+     *   keepAliveNs]`
+     *
+     * `disableActiveMigration` is encoded as 0/1.
+     */
     @JvmStatic external fun nativeCreate(
         callbacks: NativeCallbacks,
         host: String,
         port: Int,
         ipv6: Boolean,
         hostAddrBytes: ByteArray,
-        datagramsEnabled: Boolean
+        datagramsEnabled: Boolean,
+        tuningParams: LongArray
     ): Long
 
     @JvmStatic external fun nativeDestroy(handle: Long)
@@ -63,6 +77,17 @@ object QuicBridge {
     @JvmStatic external fun nativeSubmitCryptoData(handle: Long, level: Int, data: ByteArray): Int
     @JvmStatic external fun nativeInstallHandshakeKeys(handle: Long, rxSecret: ByteArray, txSecret: ByteArray): Int
     @JvmStatic external fun nativeInstallApplicationKeys(handle: Long, rxSecret: ByteArray, txSecret: ByteArray): Int
+
+    /**
+     * Overwrites the connection's CC callback table with Hysteria Brutal
+     * trampolines. Must be called after [nativeCreate] and before any
+     * ACK/loss has been processed. Returns 0 on failure, non-zero on
+     * success.
+     */
+    @JvmStatic external fun nativeInstallBrutalCC(handle: Long, initialBps: Long): Int
+
+    /** Updates the Brutal target send rate. No-op if Brutal isn't installed. */
+    @JvmStatic external fun nativeSetBrutalBandwidth(handle: Long, bps: Long)
 
     /** ngtcp2 encryption levels. */
     const val LEVEL_INITIAL = 0

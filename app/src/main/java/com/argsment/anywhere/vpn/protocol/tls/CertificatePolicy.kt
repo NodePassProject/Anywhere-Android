@@ -43,4 +43,11 @@ object CertificatePolicy {
     fun setTrustedFingerprints(fingerprints: List<String>) {
         _trustedFingerprints = fingerprints
     }
+
+    /** Push the latest allowInsecure value — called by [VpnViewModel]'s setter so
+     *  subscription fetches and other callers see the change without waiting for
+     *  the tunnel to reload. */
+    fun setAllowInsecure(value: Boolean) {
+        _allowInsecure = value
+    }
 }

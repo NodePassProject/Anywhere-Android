@@ -121,7 +121,12 @@ fun SettingsScreen(viewModel: VpnViewModel) {
             )
             else -> SettingsRoot(
                 alwaysOn = alwaysOn,
-                onAlwaysOnChange = { alwaysOn = it; viewModel.alwaysOnEnabled = it },
+                onAlwaysOnChange = {
+                    alwaysOn = it
+                    viewModel.alwaysOnEnabled = it
+                    // Mirror iOS: reconnect so the new always-on state takes effect immediately.
+                    viewModel.reconnect()
+                },
                 globalMode = globalMode,
                 onGlobalModeChange = { globalMode = it; viewModel.proxyMode = if (it) "global" else "rule" },
                 bypassCountryCode = bypassCountryCode,

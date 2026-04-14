@@ -4,8 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
@@ -48,6 +50,16 @@ class AnywhereVpnService : VpnService() {
     private var lastUnderlyingNetwork: Network? = null
     private var lastUnderlyingTransports: Int = 0
     private var lastNetworkAvailable: Boolean = false
+
+    // Screen on/off proxy for iOS PacketTunnelProvider's sleep()/wake() — Android
+    // doesn't expose those callbacks on a foreground VpnService directly, so we
+    // listen on `ACTION_SCREEN_OFF` / `ACTION_SCREEN_ON` (or `ACTION_USER_PRESENT`
+    // on locked devices) and infer the duration the device spent in low-power
+    // doze. Long sleeps (≥ wakeRestartThresholdSecs) trigger a stack restart so
+    // stale connections bound to a NAT entry that has since timed out get
+    // replaced instead of waiting for keep-alive failures.
+    private var screenStateReceiver: BroadcastReceiver? = null
+    private var sleepTimestampMillis: Long = 0L
 
     // Binder for activity communication
     private val binder = LocalBinder()
@@ -194,9 +206,9 @@ class AnywhereVpnService : VpnService() {
         }
         tunFd = fd
 
-        // Start lwIP stack
+        // Start lwIP stack. Matches iOS: a single `ipv6DNSEnabled` knob controls
+        // both IPv6 routes and AAAA fake-IP resolution.
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-        val ipv6Connections = prefs.getBoolean("ipv6ConnectionsEnabled", false)
         val ipv6Dns = prefs.getBoolean("ipv6DnsEnabled", false)
 
         // Register socket protector so protocol code can protect outbound sockets
@@ -224,15 +236,22 @@ class AnywhereVpnService : VpnService() {
             reapplyTunnelSettings(effectiveConfig)
         }
 
-        stack.start(fd, effectiveConfig, ipv6Connections, ipv6Dns)
+        stack.start(fd, effectiveConfig, ipv6Dns)
 
         // Begin observing the underlying physical network so we can restart
         // the stack when the user roams between Wi-Fi and Cellular.
         startNetworkMonitoring()
+
+        // Mirror iOS PacketTunnelProvider.sleep()/wake(): observe screen
+        // off/on as a proxy for device-level sleep so we can proactively
+        // restart connections after long periods of inactivity (NAT
+        // rebinds, server-side idle sweeps).
+        startScreenStateMonitoring()
     }
 
     private fun stopVpn() {
         stopNetworkMonitoring()
+        stopScreenStateMonitoring()
         SocketProtector.clearProtector()
         DnsCache.setUnderlyingNetwork(null)
 
@@ -320,7 +339,8 @@ class AnywhereVpnService : VpnService() {
 
     private fun buildTunInterface(config: ProxyConfiguration): ParcelFileDescriptor? {
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-        val ipv6Enabled = prefs.getBoolean("ipv6ConnectionsEnabled", false)
+        // Single IPv6 knob, matching iOS: when enabled we add IPv6 address/routes/DNS.
+        val ipv6Enabled = prefs.getBoolean("ipv6DnsEnabled", false)
         val remoteAddress = config.connectAddress
 
         val builder = Builder()
@@ -503,6 +523,77 @@ class AnywhereVpnService : VpnService() {
     }
 
     /**
+     * Listens for screen on/off so we can approximate iOS
+     * `PacketTunnelProvider.sleep()/wake()`. Long sleeps (≥
+     * [WAKE_RESTART_THRESHOLD_SECS]) trigger a stack restart on resume —
+     * the same heuristic iOS uses to defeat carrier NAT rebinds and
+     * server-side idle sweeps after the device has been off for a while.
+     */
+    private fun startScreenStateMonitoring() {
+        if (screenStateReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    Intent.ACTION_SCREEN_OFF -> {
+                        sleepTimestampMillis = System.currentTimeMillis()
+                        logger.warning("[VPN] Device going to sleep; active connections may pause")
+                        lwipStack?.noteRecentTunnelInterruption(
+                            "device sleep", LwipStack.LogLevel.WARNING
+                        )
+                    }
+                    Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> {
+                        if (sleepTimestampMillis == 0L) return
+                        val sleepSecs = (System.currentTimeMillis() - sleepTimestampMillis) / 1000L
+                        sleepTimestampMillis = 0L
+                        logger.info("[VPN] Device woke up after ${sleepSecs}s")
+                        if (sleepSecs >= WAKE_RESTART_THRESHOLD_SECS) {
+                            logger.warning(
+                                "[VPN] Long sleep detected (${sleepSecs}s); restarting connections"
+                            )
+                            lwipStack?.handleNetworkPathChange(
+                                "device wake after ${sleepSecs}s sleep"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        try {
+            registerReceiver(receiver, filter)
+            screenStateReceiver = receiver
+        } catch (e: Throwable) {
+            logger.debug("[VPN] Screen state receiver register failed: ${e.message}")
+        }
+    }
+
+    private fun stopScreenStateMonitoring() {
+        val r = screenStateReceiver ?: return
+        screenStateReceiver = null
+        sleepTimestampMillis = 0L
+        try { unregisterReceiver(r) } catch (_: Throwable) {}
+    }
+
+    /**
+     * Logs a low-memory event so a follow-up TCP/UDP failure can be
+     * attributed to memory pressure instead of network trouble. Mirrors
+     * iOS `didReceiveMemoryWarning`-style hooks.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            logger.warning("[VPN] Memory pressure level=$level")
+            lwipStack?.noteRecentTunnelInterruption(
+                "memory pressure", LwipStack.LogLevel.WARNING
+            )
+        }
+    }
+
+    /**
      * Decides whether a network update represents a meaningful change that
      * requires restarting the lwIP stack. Mirrors iOS handlePathUpdate(): we
      * compare the current snapshot to the previous one and trigger a restart
@@ -646,6 +737,16 @@ class AnywhereVpnService : VpnService() {
         const val ACTION_STOP = "com.argsment.anywhere.STOP"
         const val ACTION_SWITCH_CONFIG = "com.argsment.anywhere.SWITCH_CONFIG"
         const val EXTRA_CONFIG = "config"
+
+        /**
+         * Wake-from-sleep restart threshold. Mirrors iOS
+         * `PacketTunnelProvider.wakeRestartThreshold = 60`. Any sleep at
+         * least this long causes the lwIP stack to drop and rebuild
+         * connections on resume — long enough to filter out screen-off
+         * noise from interactive use, short enough to beat most carrier
+         * NAT mappings (which typically time out after 60–120 s).
+         */
+        private const val WAKE_RESTART_THRESHOLD_SECS: Long = 60L
 
         // Private/local IPv4 ranges excluded from the VPN tunnel.
         // Mirrors iOS PacketTunnelProvider excludedRoutes.

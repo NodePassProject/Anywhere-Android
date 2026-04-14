@@ -96,6 +96,7 @@ set(JNI_BRIDGE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/crypto_jni_bridge.c
     ${CMAKE_CURRENT_SOURCE_DIR}/yaml_jni_bridge.c
     ${CMAKE_CURRENT_SOURCE_DIR}/quic_jni_bridge.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ngtcp2_android_brutal.c
 )
 
 # --------------------------------------------------------------------------

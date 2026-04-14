@@ -161,53 +161,85 @@ private fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
-    var hasDetected by remember { mutableStateOf(false) }
+    val hasDetected = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val disposed = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
     val previewView = remember { PreviewView(context) }
+    val barcodeScanner = remember { BarcodeScanning.getClient() }
+    val cameraProviderFutureRef = remember {
+        androidx.compose.runtime.mutableStateOf<com.google.common.util.concurrent.ListenableFuture<ProcessCameraProvider>?>(null)
+    }
+
+    AndroidView(
+        factory = { previewView },
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(0.dp))
+    )
 
     DisposableEffect(Unit) {
+        val logger = AnywhereLogger("QrScanner")
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        cameraProviderFutureRef.value = cameraProviderFuture
 
         cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
+            if (disposed.get()) return@addListener
+            val cameraProvider = try {
+                cameraProviderFuture.get()
+            } catch (e: Exception) {
+                logger.debug("Failed to obtain camera provider: ${e.message}")
+                return@addListener
+            }
+
+            // Bail out if the dialog's lifecycle has already moved past STARTED — binding
+            // to a DESTROYED LifecycleOwner throws IllegalArgumentException on CameraX.
+            if (!lifecycleOwner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.CREATED)) {
+                return@addListener
+            }
 
             val preview = Preview.Builder().build().also {
                 it.surfaceProvider = previewView.surfaceProvider
             }
-
-            val barcodeScanner = BarcodeScanning.getClient()
 
             val imageAnalysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(1280, 720))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
                 .also { analysis ->
-                    analysis.setAnalyzer(executor) { imageProxy ->
+                    analysis.setAnalyzer(executor) analyzerLoop@ { imageProxy ->
+                        if (disposed.get() || hasDetected.get()) {
+                            imageProxy.close()
+                            return@analyzerLoop
+                        }
                         val mediaImage = imageProxy.image
-                        if (mediaImage != null && !hasDetected) {
-                            val inputImage = InputImage.fromMediaImage(
-                                mediaImage,
-                                imageProxy.imageInfo.rotationDegrees
-                            )
-                            barcodeScanner.process(inputImage)
-                                .addOnSuccessListener { barcodes ->
-                                    for (barcode in barcodes) {
-                                        if (barcode.valueType == Barcode.TYPE_TEXT ||
-                                            barcode.valueType == Barcode.TYPE_URL) {
-                                            val value = barcode.rawValue
-                                            if (value != null && !hasDetected) {
-                                                hasDetected = true
-                                                onQrCodeDetected(value)
-                                            }
+                        if (mediaImage == null) {
+                            imageProxy.close()
+                            return@analyzerLoop
+                        }
+                        val inputImage = InputImage.fromMediaImage(
+                            mediaImage,
+                            imageProxy.imageInfo.rotationDegrees
+                        )
+                        barcodeScanner.process(inputImage)
+                            .addOnSuccessListener { barcodes ->
+                                if (disposed.get()) return@addOnSuccessListener
+                                for (barcode in barcodes) {
+                                    if (barcode.valueType == Barcode.TYPE_TEXT ||
+                                        barcode.valueType == Barcode.TYPE_URL) {
+                                        val value = barcode.rawValue
+                                        if (value != null && hasDetected.compareAndSet(false, true)) {
+                                            onQrCodeDetected(value)
+                                            break
                                         }
                                     }
                                 }
-                                .addOnCompleteListener {
-                                    imageProxy.close()
-                                }
-                        } else {
-                            imageProxy.close()
-                        }
+                            }
+                            .addOnFailureListener { e ->
+                                logger.debug("Barcode scan failed: ${e.message}")
+                            }
+                            .addOnCompleteListener {
+                                imageProxy.close()
+                            }
                     }
                 }
 
@@ -220,20 +252,22 @@ private fun CameraPreview(
                     imageAnalysis
                 )
             } catch (e: Exception) {
-                AnywhereLogger("QrScanner").debug("Camera bind failed: ${e.message}")
+                logger.debug("Camera bind failed: ${e.message}")
             }
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
-            cameraProviderFuture.get().unbindAll()
-            executor.shutdown()
+            disposed.set(true)
+            try {
+                val future = cameraProviderFutureRef.value
+                if (future != null && future.isDone) {
+                    future.get().unbindAll()
+                }
+            } catch (e: Exception) {
+                AnywhereLogger("QrScanner").debug("onDispose unbind failed: ${e.message}")
+            }
+            try { barcodeScanner.close() } catch (_: Exception) {}
+            try { executor.shutdown() } catch (_: Exception) {}
         }
     }
-
-    AndroidView(
-        factory = { previewView },
-        modifier = Modifier
-            .fillMaxSize()
-            .clip(RoundedCornerShape(0.dp))
-    )
 }

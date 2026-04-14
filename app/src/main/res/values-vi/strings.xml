@@ -93,10 +93,7 @@
 
     <!-- Phase 9: IPv6 -->
     <string name="ipv6">IPv6</string>
-    <string name="ipv6_connections">Kết nối IPv6</string>
     <string name="ipv6_dns_lookup">Tra cứu DNS IPv6</string>
-    <string name="ipv6_connections_footer">Định tuyến kết nối IPv6 qua đường hầm.</string>
-    <string name="ipv6_dns_footer">Phản hồi truy vấn DNS AAAA bằng địa chỉ IPv6.</string>
 
     <!-- Phase 9: Trusted Certificates -->
     <string name="trusted_certificates">Chứng chỉ tin cậy</string>
