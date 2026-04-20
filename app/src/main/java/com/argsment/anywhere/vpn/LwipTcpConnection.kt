@@ -2,6 +2,8 @@ package com.argsment.anywhere.vpn
 
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.util.AnywhereLogger
+import com.argsment.anywhere.vpn.util.TlsClientHelloSniffer
+import com.argsment.anywhere.vpn.util.TransportErrorLogger
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.direct.DirectTcpRelay
 import com.argsment.anywhere.vpn.protocol.vless.VlessClient
@@ -27,12 +29,30 @@ import java.util.concurrent.TimeUnit
 class LwipTcpConnection(
     val connId: Long,
     val pcb: Long,
-    val dstHost: String,
+    dstHost: String,
     val dstPort: Int,
-    val configuration: ProxyConfiguration,
+    configuration: ProxyConfiguration,
     forceBypass: Boolean,
+    sniffSNI: Boolean,
     private val lwipExecutor: ScheduledExecutorService
 ) {
+    /**
+     * Destination the proxy will be asked to connect to. Initialized from
+     * the tcp_accept signal and may be replaced with the SNI hostname
+     * once sniffing resolves. Mirrors iOS
+     * `LWIPTCPConnection.dstHost`.
+     */
+    var dstHost: String = dstHost
+        private set
+
+    /**
+     * Routing configuration for this connection. Mutable because a
+     * successful SNI sniff can re-match a domain rule that points to a
+     * different proxy. Mirrors iOS `LWIPTCPConnection.configuration`.
+     */
+    var configuration: ProxyConfiguration = configuration
+        private set
+
     // Coroutine scope for protocol operations, dispatched on the lwIP executor
     private val scopeJob = SupervisorJob()
     private val scope = CoroutineScope(lwipExecutor.asCoroutineDispatcher() + scopeJob)
@@ -50,11 +70,35 @@ class LwipTcpConnection(
     private var coalesceScheduled = false
     private var coalesceFlushInFlight = false
 
-    private val bypass: Boolean = forceBypass ||
+    /**
+     * Whether the connection should bypass the configured proxy and connect
+     * directly. May flip after SNI sniff resolves a routing rule.
+     */
+    private var bypass: Boolean = forceBypass ||
         (LwipStack.instance?.shouldBypass(dstHost) == true)
+
     private var pendingData = ByteArrayOutputStream()
     var closed = false
         private set
+
+    // -- SNI Sniffing --
+    //
+    // When present, the connection is in the "sniff" phase: inbound bytes
+    // are buffered (in `pendingData`) and fed to the sniffer before the
+    // proxy is dialed. The first terminal state (Found / NotTls /
+    // Unavailable) commits the route and kicks off the proxy connect.
+    // Cleared to null once the route is committed. Mirrors iOS
+    // `LWIPTCPConnection.sniffer`.
+    private var sniffer: TlsClientHelloSniffer? =
+        if (sniffSNI) TlsClientHelloSniffer() else null
+
+    /**
+     * Fires if the sniff phase doesn't resolve within [SNIFF_DEADLINE_MS]
+     * — commits the IP-based route so server-speaks-first protocols
+     * (SSH, SMTP, FTP) don't stall waiting for a ClientHello. Mirrors
+     * iOS `LWIPTCPConnection.sniffDeadline`.
+     */
+    private var sniffDeadline: ScheduledFuture<*>? = null
 
     // -- Backpressure State --
 
@@ -72,18 +116,127 @@ class LwipTcpConnection(
     private var downlinkDone = false
 
     init {
-        // Start handshake timeout (60s)
+        // Handshake timeout (60s) — covers both the SNI-sniff wait and the
+        // proxy dial, so a stalled client can't hold a connection open
+        // indefinitely before we ever call connect. Mirrors iOS
+        // LWIPTCPConnection handshakeTimer.
         handshakeTimer = lwipExecutor.schedule({
-            if (!closed && (vlessConnecting || directConnecting)) {
-                logger.error("[TCP] Handshake timeout for $dstHost:$dstPort")
+            if (!closed && isEstablishing) {
+                val phase = if (sniffer != null) "TLS ClientHello sniff" else "proxy dial"
+                logger.error("[TCP] Handshake timeout during $phase: $dstHost:$dstPort")
                 abort()
             }
         }, HANDSHAKE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
 
-        if (bypass) {
-            connectDirect()
+        // If we're sniffing, wait for the first ClientHello bytes in
+        // handleReceivedData before choosing a route. Otherwise commit
+        // immediately using the IP-derived configuration.
+        if (sniffer == null) {
+            beginConnecting()
         } else {
-            connectProxy()
+            // Safety net: non-TLS protocols where the server speaks first
+            // (SSH, SMTP, FTP) never send client bytes of their own accord.
+            // If we haven't decided by SNIFF_DEADLINE_MS, commit the IP-
+            // based route and proceed.
+            sniffDeadline = lwipExecutor.schedule({
+                if (!closed && sniffer != null) {
+                    sniffer = null
+                    beginConnecting()
+                }
+            }, SNIFF_DEADLINE_MS, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    private val isEstablishing: Boolean
+        get() = vlessConnecting || directConnecting || sniffer != null
+
+    /** Cancels the sniff deadline timer. Called whenever the sniff phase
+     *  resolves (successful SNI, fast reject, cap reached, close, abort). */
+    private fun cancelSniffDeadline() {
+        sniffDeadline?.cancel(false)
+        sniffDeadline = null
+    }
+
+    /**
+     * Appends to `pendingData` and enforces [MAX_PENDING_DATA_SIZE].
+     * Aborts the connection if the cap would be exceeded and returns
+     * `false` so callers can bail out early. Mirrors iOS
+     * `LWIPTCPConnection.appendPendingData`.
+     */
+    private fun appendPendingData(data: ByteArray): Boolean {
+        if (pendingData.size() + data.size > MAX_PENDING_DATA_SIZE) {
+            logger.warning(
+                "[TCP] pendingData cap exceeded for $dstHost:$dstPort " +
+                "(${pendingData.size()} + ${data.size} > $MAX_PENDING_DATA_SIZE), aborting"
+            )
+            abort()
+            return false
+        }
+        pendingData.write(data)
+        return true
+    }
+
+    /**
+     * Kicks off the outbound connection using the currently committed
+     * routing (configuration, bypass, dstHost). Idempotent — no-op once
+     * the connect has started or completed. Mirrors iOS
+     * `LWIPTCPConnection.beginConnecting`.
+     */
+    private fun beginConnecting() {
+        if (closed || vlessConnecting || directConnecting) return
+        if (vlessConnection != null || directRelay != null) return
+        if (bypass) connectDirect() else connectProxy()
+    }
+
+    /**
+     * Re-evaluates routing using the hostname extracted from the TLS
+     * ClientHello. Updates [dstHost], [configuration], and [bypass] in
+     * place so the subsequent [beginConnecting] sees the SNI-based
+     * decision.
+     *
+     * Behavior mirrors iOS `LWIPTCPConnection.applySNI`:
+     *   - Found a matching domain rule: apply it (may switch proxy, flip
+     *     bypass, or reject the connection) and swap [dstHost] to the SNI
+     *     so the new route resolves the name itself.
+     *   - No rule matches: keep the IP-derived [dstHost] and
+     *     configuration. Rewriting to the SNI hostname would force the
+     *     outbound proxy to re-resolve via its own DNS, which can land on
+     *     a different CDN IP than the one the caller already chose.
+     */
+    private fun applySNI(sni: String) {
+        val stack = LwipStack.instance ?: return
+        val action = stack.domainRouter.matchDomain(sni) ?: return
+
+        // Rule matched: the sniffed hostname drives the new route, so
+        // forward the proxy CONNECT to the name rather than the tentative
+        // IP.
+        dstHost = sni
+
+        when (action) {
+            RouteAction.Direct -> {
+                bypass = true
+            }
+            RouteAction.Reject -> {
+                logger.debug("[TCP] SNI rejected by routing rule: $sni ($dstHost:$dstPort)")
+                rejectGracefully()
+            }
+            is RouteAction.Proxy -> {
+                val resolved = stack.domainRouter.resolveConfiguration(action)
+                if (resolved != null) {
+                    // Preserve the ambient chain from the default
+                    // configuration if the rule-targeted configuration
+                    // didn't specify one.
+                    val defaultChain = configuration.chain
+                    configuration = if (!defaultChain.isNullOrEmpty() && resolved.chain == null) {
+                        resolved.withChain(defaultChain)
+                    } else {
+                        resolved
+                    }
+                } else {
+                    logger.warning("[TCP] SNI routing configuration not found for $sni")
+                }
+                bypass = stack.shouldBypass(sni)
+            }
         }
     }
 
@@ -94,9 +247,38 @@ class LwipTcpConnection(
         if (closed) return
         activityTimer?.update()
 
+        // SNI sniff phase: buffer bytes and feed the sniffer before
+        // dialing. Once a terminal state is reached we re-evaluate
+        // routing (if SNI was found) and then kick off the proxy /
+        // direct connect. Mirrors iOS LWIPTCPConnection.handleReceivedData
+        // sniff branch.
+        val snifferRef = sniffer
+        if (snifferRef != null) {
+            val state = snifferRef.feed(data)
+            if (!appendPendingData(data)) return
+            when (state) {
+                is TlsClientHelloSniffer.State.NeedMore -> return
+                is TlsClientHelloSniffer.State.Found -> {
+                    sniffer = null
+                    cancelSniffDeadline()
+                    applySNI(state.serverName)
+                    if (closed) return  // rule may have rejected
+                    beginConnecting()
+                    return
+                }
+                is TlsClientHelloSniffer.State.NotTls,
+                is TlsClientHelloSniffer.State.Unavailable -> {
+                    sniffer = null
+                    cancelSniffDeadline()
+                    beginConnecting()
+                    return
+                }
+            }
+        }
+
         // Buffer data while outbound connection is being established
         if (vlessConnecting || directConnecting) {
-            pendingData.write(data)
+            appendPendingData(data)
             return
         }
 
@@ -137,8 +319,8 @@ class LwipTcpConnection(
                 lwipExecutor.execute { flushCoalesceBuffer() }
             }
         } else {
-            pendingData.write(data)
-            if (bypass) connectDirect() else connectProxy()
+            if (!appendPendingData(data)) return
+            beginConnecting()
         }
     }
 
@@ -154,6 +336,21 @@ class LwipTcpConnection(
     /** Called when the local app closes its write side (TCP FIN from app). */
     fun handleRemoteClose() {
         if (closed) return
+
+        // Client FIN'd before we finished sniffing. If we never received
+        // any bytes, there's nothing to forward — drop the connection.
+        // Otherwise commit the tentative IP-based route and forward what
+        // we have. Mirrors iOS LWIPTCPConnection.handleRemoteClose.
+        if (sniffer != null) {
+            sniffer = null
+            cancelSniffDeadline()
+            if (pendingData.size() == 0) {
+                close()
+                return
+            }
+            beginConnecting()
+        }
+
         uplinkDone = true
         if (downlinkDone) {
             close()
@@ -162,12 +359,47 @@ class LwipTcpConnection(
         }
     }
 
-    /** Called when lwIP reports an error (PCB is already freed). */
+    /**
+     * Surfaces why lwIP tore this connection down. Without this log the
+     * connection simply vanishes from the user's perspective — no send /
+     * receive error fires because the PCB has already been freed by the
+     * time tcp_err runs. Mirrors iOS LWIPTCPConnection.handleError.
+     */
     fun handleError(err: Int) {
+        val reason = TransportErrorLogger.describeLwIPError(err)
+        val interruption = LwipStack.instance?.recentTunnelInterruptionContext()
+        when {
+            err == -15 ->  // ERR_CLSD — orderly close, not a failure
+                logger.debug("[TCP] lwIP closed connection: $endpointDescription: $reason")
+            interruption != null ->
+                logger.warning("[TCP] lwIP aborted after ${interruption.summary}: $endpointDescription: $reason")
+            err == -14 ->  // ERR_RST — always local-app-initiated in TUN mode
+                logger.debug("[TCP] lwIP peer reset: $endpointDescription: $reason")
+            else ->
+                logger.warning("[TCP] lwIP aborted connection: $endpointDescription: $reason")
+        }
         if (closed) return
         closed = true
         releaseProtocol()
         LwipStack.instance?.removeConnection(connId)
+    }
+
+    private val endpointDescription: String
+        get() = "$dstHost:$dstPort"
+
+    private fun logTransportFailure(
+        operation: String,
+        error: Throwable,
+        defaultLevel: LwipStack.LogLevel = LwipStack.LogLevel.ERROR
+    ) {
+        TransportErrorLogger.log(
+            operation = operation,
+            endpoint = endpointDescription,
+            error = error,
+            logger = logger,
+            prefix = "[TCP]",
+            defaultLevel = defaultLevel
+        )
     }
 
     // -- Direct Connection (bypass) --
@@ -191,7 +423,7 @@ class LwipTcpConnection(
                 lwipExecutor.execute {
                     directConnecting = false
                     if (!closed) {
-                        logger.error("[TCP] connect failed: $dstHost:$dstPort: ${e.message}")
+                        logTransportFailure("Connect", e)
                         abort()
                     }
                 }
@@ -219,7 +451,7 @@ class LwipTcpConnection(
                             }
                         } catch (_: CancellationException) {
                         } catch (e: Exception) {
-                            if (!closed) logger.debug("[TCP] Direct initial send error for $dstHost: ${e.message}")
+                            if (!closed) logTransportFailure("Send", e, LwipStack.LogLevel.WARNING)
                             lwipExecutor.execute { abort() }
                         }
                     }
@@ -238,7 +470,7 @@ class LwipTcpConnection(
                             }
                         } catch (_: CancellationException) {
                         } catch (e: Exception) {
-                            if (!closed) logger.debug("[TCP] Direct pending send error for $dstHost: ${e.message}")
+                            if (!closed) logTransportFailure("Send", e, LwipStack.LogLevel.WARNING)
                             lwipExecutor.execute { abort() }
                         }
                     }
@@ -281,7 +513,7 @@ class LwipTcpConnection(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (!closed) {
-                        logger.error("[TCP] connect failed: $dstHost:$dstPort: ${e.message}")
+                        logTransportFailure("Connect", e)
                         abort()
                     }
                 }
@@ -321,7 +553,7 @@ class LwipTcpConnection(
                         }
                     } catch (_: CancellationException) {
                     } catch (e: Exception) {
-                        if (!closed) logger.debug("[TCP] pending send error for $dstHost: ${e.message}")
+                        if (!closed) logTransportFailure("Send", e, LwipStack.LogLevel.WARNING)
                         lwipExecutor.execute { abort() }
                     }
                 }
@@ -371,7 +603,7 @@ class LwipTcpConnection(
                 lwipExecutor.execute {
                     vlessConnecting = false
                     if (!closed) {
-                        logger.error("[TCP] connect failed: $dstHost:$dstPort: ${e.message}")
+                        logTransportFailure("Connect", e)
                         abort()
                     }
                 }
@@ -402,7 +634,7 @@ class LwipTcpConnection(
                 }
             } catch (_: CancellationException) {
             } catch (e: Exception) {
-                if (!closed) logger.debug("[TCP] segment send error for $dstHost:$dstPort: ${e.message}")
+                if (!closed) logTransportFailure("Send", e, LwipStack.LogLevel.WARNING)
                 lwipExecutor.execute { abort() }
             }
         }
@@ -454,7 +686,7 @@ class LwipTcpConnection(
             } catch (_: CancellationException) {
                 lwipExecutor.execute { coalesceFlushInFlight = false }
             } catch (e: Exception) {
-                if (!closed) logger.debug("[TCP] send error for $dstHost:$dstPort: ${e.message}")
+                if (!closed) logTransportFailure("Send", e, LwipStack.LogLevel.WARNING)
                 lwipExecutor.execute {
                     coalesceFlushInFlight = false
                     abort()
@@ -616,7 +848,7 @@ class LwipTcpConnection(
                 } catch (_: CancellationException) {
                     // Scope cancelled during teardown — silently ignore
                 } catch (e: Exception) {
-                    if (!closed) logger.debug("[TCP] Direct recv error: $dstHost:$dstPort: ${e.message}")
+                    if (!closed) logTransportFailure("Receive", e, LwipStack.LogLevel.WARNING)
                     lwipExecutor.execute { abort() }
                 }
             }
@@ -645,7 +877,7 @@ class LwipTcpConnection(
             } catch (_: CancellationException) {
                 // Scope cancelled during teardown — silently ignore
             } catch (e: Exception) {
-                if (!closed) logger.debug("[TCP] VLESS recv error: $dstHost:$dstPort: ${e.message}")
+                if (!closed) logTransportFailure("Receive", e, LwipStack.LogLevel.WARNING)
                 lwipExecutor.execute { abort() }
             }
         }
@@ -671,6 +903,32 @@ class LwipTcpConnection(
         LwipStack.instance?.removeConnection(connId)
     }
 
+    /**
+     * Tears the connection down with a clean FIN instead of a RST.
+     *
+     * `tcp_close` in lwIP downgrades to RST whenever the receive window
+     * is below `TCP_WND_MAX` — i.e. when bytes were delivered via
+     * `tcp_recv_cb` but never acknowledged via `tcp_recved`. The sniffed
+     * ClientHello in `pendingData` is exactly that: received but
+     * unacknowledged because we never forwarded it upstream. A mid-
+     * handshake RST is widely interpreted by TLS stacks as a transient
+     * failure, which drives browsers and HTTP clients to retry
+     * aggressively — defeating the point of the reject rule. Advancing
+     * the window first lets `close()` send a real FIN, which clients
+     * treat as a deliberate peer close and don't retry. Mirrors iOS
+     * `LWIPTCPConnection.rejectGracefully`.
+     */
+    private fun rejectGracefully() {
+        if (closed) return
+        var remaining = pendingData.size()
+        while (remaining > 0) {
+            val chunk = remaining.coerceAtMost(65535)
+            NativeBridge.nativeTcpRecved(pcb, chunk)
+            remaining -= chunk
+        }
+        close()
+    }
+
     fun abort() {
         if (closed) return
         closed = true
@@ -685,6 +943,8 @@ class LwipTcpConnection(
 
         handshakeTimer?.cancel(false)
         handshakeTimer = null
+        cancelSniffDeadline()
+        sniffer = null
         activityTimer?.cancel()
         activityTimer = null
         val relay = directRelay
@@ -712,6 +972,26 @@ class LwipTcpConnection(
         private const val MAX_LWIP_WRITE_SIZE = 16 * 1024        // 16 KB per tcp_write (matching iOS, limits pbuf/segment pressure)
         private const val MAX_COALESCE_SIZE = 65535              // UInt16 max (matching iOS, protocol framing limit)
         private const val DRAIN_RETRY_DELAY_MS = 250L            // 250ms drain retry (matching iOS TunnelConstants.drainRetryDelayMs)
+
+        /**
+         * Maximum time to wait for a TLS ClientHello on a real-IP TCP
+         * connection before falling back to IP-based routing. Covers
+         * server-speaks-first protocols (SSH, SMTP, FTP) so they don't
+         * stall inside the sniff phase. TLS clients typically send
+         * ClientHello within a few ms of TCP accept. Matches iOS
+         * `TunnelConstants.sniffDeadline = 0.5`.
+         */
+        private const val SNIFF_DEADLINE_MS = 500L
+
+        /**
+         * Safety cap on per-connection `pendingData` (bytes accumulated
+         * while the sniff phase runs or the proxy is dialing). Bounded
+         * naturally by TCP_WND since we defer `tcp_recved` until the
+         * route is committed; this cap defends against pathological
+         * states where the window bookkeeping drifts. Matches iOS
+         * `TunnelConstants.tcpMaxPendingDataSize = 2 * 512 * 1360` bytes.
+         */
+        private const val MAX_PENDING_DATA_SIZE = 2 * 512 * 1360
     }
 }
 

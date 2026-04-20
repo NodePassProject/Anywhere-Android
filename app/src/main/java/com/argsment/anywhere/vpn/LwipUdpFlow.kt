@@ -2,6 +2,7 @@ package com.argsment.anywhere.vpn
 
 import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.vpn.util.AnywhereLogger
+import com.argsment.anywhere.vpn.util.TransportErrorLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.protocol.direct.DirectUdpRelay
 import com.argsment.anywhere.vpn.protocol.mux.MuxNetwork
@@ -59,49 +60,36 @@ class LwipUdpFlow(
     private var vlessConnecting = false
     private var pendingData = mutableListOf<ByteArray>()  // always raw payloads
     private var pendingBufferSize = 0
+    /**
+     * One-shot gate so a runaway send path doesn't flood the log with
+     * "pending buffer overflow" lines — one warning per flow is enough
+     * for the user to see that datagrams are being dropped. Mirrors iOS
+     * `LWIPUDPFlow.didWarnPendingOverflow`.
+     */
+    private var didWarnPendingOverflow = false
     var closed = false
         private set
 
     /**
      * Logs a transport failure with the right severity. If the lwIP stack
-     * recently noted a tunnel-level interruption (network path drop, sleep,
-     * memory pressure, …) we downgrade the message — those failures are
-     * expected and don't indicate a server problem. Mirrors iOS
-     * `LWIPUDPFlow.logTransportFailure(_:error:defaultLevel:)`.
+     * recently noted a tunnel-level interruption (network path drop,
+     * sleep, memory pressure, …) we downgrade the message — those
+     * failures are expected and don't indicate a server problem.
+     * Mirrors iOS `LWIPUDPFlow.logTransportFailure`.
      */
-    private fun logTransportFailure(operation: String, error: Throwable, defaultLevel: LwipStack.LogLevel) {
-        val errorDescription = conciseErrorDescription(error)
-        val interruption = LwipStack.instance?.recentTunnelInterruptionContext()
-        if (interruption != null) {
-            if (interruption.level == LwipStack.LogLevel.INFO) {
-                logger.debug("[UDP] $operation ended after ${interruption.summary}: $flowKey: $errorDescription")
-            } else {
-                logger.warning("[UDP] $operation interrupted after ${interruption.summary}: $flowKey ($errorDescription)")
-            }
-            return
-        }
-        when (defaultLevel) {
-            LwipStack.LogLevel.INFO -> logger.info("[UDP] $operation failed: $flowKey: $errorDescription")
-            LwipStack.LogLevel.WARNING -> logger.warning("[UDP] $operation failed: $flowKey: $errorDescription")
-            LwipStack.LogLevel.ERROR -> logger.error("[UDP] $operation failed: $flowKey: $errorDescription")
-        }
-    }
-
-    private fun conciseErrorDescription(error: Throwable): String {
-        var message = (error.message ?: error.toString()).trim()
-        val redundantPrefixes = listOf(
-            "Connection failed: ",
-            "Send failed: ",
-            "Receive failed: ",
-            "DNS resolution failed: "
+    private fun logTransportFailure(
+        operation: String,
+        error: Throwable,
+        defaultLevel: LwipStack.LogLevel
+    ) {
+        TransportErrorLogger.log(
+            operation = operation,
+            endpoint = flowKey,
+            error = error,
+            logger = logger,
+            prefix = "[UDP]",
+            defaultLevel = defaultLevel
         )
-        for (prefix in redundantPrefixes) {
-            if (message.startsWith(prefix)) {
-                message = message.substring(prefix.length)
-                break
-            }
-        }
-        return message
     }
 
     // -- Data Handling (called on lwIP thread) --
@@ -149,8 +137,20 @@ class LwipUdpFlow(
     }
 
     private fun bufferPayload(payload: ByteArray) {
-        // Drop datagram if buffer limit would be exceeded (DiscardOverflow)
-        if (pendingBufferSize + payload.size > MAX_UDP_BUFFER_SIZE) return
+        // Drop datagram if buffer limit would be exceeded (DiscardOverflow).
+        // Warn once per flow so users can tell they're losing packets, but
+        // avoid flooding the log — matches iOS
+        // LWIPUDPFlow.didWarnPendingOverflow gate.
+        if (pendingBufferSize + payload.size > MAX_UDP_BUFFER_SIZE) {
+            if (!didWarnPendingOverflow) {
+                didWarnPendingOverflow = true
+                logger.warning(
+                    "[UDP] Pending buffer overflow for $flowKey " +
+                    "(${pendingBufferSize}+${payload.size} > $MAX_UDP_BUFFER_SIZE), dropping datagrams"
+                )
+            }
+            return
+        }
         pendingData.add(payload)
         pendingBufferSize += payload.size
     }
@@ -560,6 +560,7 @@ class LwipUdpFlow(
         vlessConnecting = false
         pendingData.clear()
         pendingBufferSize = 0
+        didWarnPendingOverflow = false
         relay?.cancel()
         connection?.cancel()
         session?.close()

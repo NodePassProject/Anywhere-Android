@@ -262,6 +262,7 @@ private fun RuleRow(rule: DomainRule, onDelete: () -> Unit) {
 @Composable
 private fun ruleTypeLabel(type: DomainRuleType): String = when (type) {
     DomainRuleType.DOMAIN_SUFFIX -> stringResource(R.string.domain_suffix)
+    DomainRuleType.DOMAIN_KEYWORD -> stringResource(R.string.domain_keyword)
     DomainRuleType.IP_CIDR -> stringResource(R.string.ipv4_cidr)
     DomainRuleType.IP_CIDR6 -> stringResource(R.string.ipv6_cidr)
 }
@@ -355,6 +356,7 @@ private fun AddRuleSheet(
 
     val placeholder = when (type) {
         DomainRuleType.DOMAIN_SUFFIX -> stringResource(R.string.example_domain)
+        DomainRuleType.DOMAIN_KEYWORD -> stringResource(R.string.example_keyword)
         DomainRuleType.IP_CIDR -> stringResource(R.string.example_ipv4)
         DomainRuleType.IP_CIDR6 -> stringResource(R.string.example_ipv6)
     }
@@ -399,6 +401,10 @@ private fun AddRuleSheet(
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.domain_suffix)) },
                         onClick = { type = DomainRuleType.DOMAIN_SUFFIX; typeMenuOpen = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.domain_keyword)) },
+                        onClick = { type = DomainRuleType.DOMAIN_KEYWORD; typeMenuOpen = false }
                     )
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.ipv4_cidr)) },
@@ -619,6 +625,7 @@ internal object RuleParser {
     private fun normalize(value: String, type: DomainRuleType): String = when (type) {
         DomainRuleType.IP_CIDR -> if ("/" in value) value else "$value/32"
         DomainRuleType.IP_CIDR6 -> if ("/" in value) value else "$value/128"
-        DomainRuleType.DOMAIN_SUFFIX -> value
+        DomainRuleType.DOMAIN_SUFFIX,
+        DomainRuleType.DOMAIN_KEYWORD -> value
     }
 }

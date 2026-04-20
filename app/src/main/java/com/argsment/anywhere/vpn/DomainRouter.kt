@@ -29,7 +29,16 @@ sealed class RouteAction {
  */
 class DomainRouter(private val context: Context) {
 
-    // -- Suffix Trie (reverse-label) --
+    // -- Suffix Trie (reverse-label) & Keyword List --
+    //
+    // DOMAIN-SUFFIX rules live in a reverse-label trie: "www.google.com" is
+    // inserted as ["com","google","www"]. Lookup walks the domain from the
+    // TLD inward and remembers the deepest action seen — naturally label-
+    // aligned and longest-match, O(labels) per query.
+    //
+    // DOMAIN-KEYWORD rules are substring matches, evaluated only when no
+    // suffix rule matched. Within the keyword tier, longer patterns win and
+    // later inserts win ties, mirroring iOS `DomainRouter.lookupKeywordRule`.
 
     private class TrieNode {
         val children = HashMap<String, TrieNode>()
@@ -37,6 +46,14 @@ class DomainRouter(private val context: Context) {
     }
 
     private var trieRoot = TrieNode()
+
+    private data class KeywordRule(
+        val pattern: String,
+        val action: RouteAction,
+        val patternLength: Int
+    )
+
+    private val keywordRules = ArrayList<KeywordRule>()
 
     // -- CIDR Binary Tries --
 
@@ -56,6 +73,7 @@ class DomainRouter(private val context: Context) {
     /** Clears all routing rules and configurations. */
     fun reset() {
         trieRoot = TrieNode()
+        keywordRules.clear()
         ipv4Trie = CIDRTrie()
         ipv6Trie = CIDRTrie()
         configurationMap.clear()
@@ -93,6 +111,10 @@ class DomainRouter(private val context: Context) {
                 when (type) {
                     DomainRuleType.DOMAIN_SUFFIX -> {
                         trieInsert(value.lowercase(), RouteAction.Direct)
+                        bypassDomainCount++
+                    }
+                    DomainRuleType.DOMAIN_KEYWORD -> {
+                        insertKeywordRule(value.lowercase(), RouteAction.Direct)
                         bypassDomainCount++
                     }
                     DomainRuleType.IP_CIDR -> parseIPv4CIDR(value)?.let { (net, prefix) ->
@@ -152,9 +174,16 @@ class DomainRouter(private val context: Context) {
                     val dr = arr.optJSONObject(j) ?: continue
                     val type = parseRuleType(dr.opt("type")) ?: continue
                     val value = dr.optString("value", "").takeIf { it.isNotEmpty() } ?: continue
-                    if (type == DomainRuleType.DOMAIN_SUFFIX) {
-                        trieInsert(value.lowercase(), action)
-                        domainRuleCount++
+                    when (type) {
+                        DomainRuleType.DOMAIN_SUFFIX -> {
+                            trieInsert(value.lowercase(), action)
+                            domainRuleCount++
+                        }
+                        DomainRuleType.DOMAIN_KEYWORD -> {
+                            insertKeywordRule(value.lowercase(), action)
+                            domainRuleCount++
+                        }
+                        DomainRuleType.IP_CIDR, DomainRuleType.IP_CIDR6 -> Unit
                     }
                 }
             }
@@ -173,7 +202,8 @@ class DomainRouter(private val context: Context) {
                             ipv6Trie.insert(net, prefix, action)
                             ipRuleCount++
                         }
-                        DomainRuleType.DOMAIN_SUFFIX -> Unit
+                        DomainRuleType.DOMAIN_SUFFIX,
+                        DomainRuleType.DOMAIN_KEYWORD -> Unit
                     }
                 }
             }
@@ -188,10 +218,15 @@ class DomainRouter(private val context: Context) {
     val hasRules: Boolean
         get() = domainRuleCount > 0 || ipRuleCount > 0
 
-    /** Matches a domain against the suffix trie; bypass entries present as [RouteAction.Direct]. */
+    /**
+     * Matches a domain in two tiers: suffix rules first, keyword rules second.
+     * Bypass entries present as [RouteAction.Direct]. Matches iOS
+     * `DomainRouter.matchDomain(_:)`.
+     */
     fun matchDomain(domain: String): RouteAction? {
         if (domain.isEmpty()) return null
-        return trieLookup(domain.lowercase())
+        val lowered = domain.lowercase()
+        return trieLookup(lowered) ?: lookupKeywordRule(lowered)
     }
 
     /** Matches an IP against CIDR rules. O(32) IPv4 / O(128) IPv6. */
@@ -230,6 +265,43 @@ class DomainRouter(private val context: Context) {
             node.action?.let { deepest = it }
         }
         return deepest
+    }
+
+    // -- Keyword tier --
+
+    /**
+     * Inserts a keyword pattern, overwriting any existing entry with the
+     * same pattern so user rules replace bypass rules (mirroring the suffix
+     * trie's overwrite behavior). Matches iOS
+     * `DomainRouter.insertKeywordRule`.
+     */
+    private fun insertKeywordRule(pattern: String, action: RouteAction) {
+        if (pattern.isEmpty()) return
+        val rule = KeywordRule(pattern, action, pattern.toByteArray(Charsets.UTF_8).size)
+        val index = keywordRules.indexOfFirst { it.pattern == pattern }
+        if (index >= 0) {
+            keywordRules[index] = rule
+        } else {
+            keywordRules.add(rule)
+        }
+    }
+
+    /**
+     * Linearly scans keyword rules only after suffix lookup has failed.
+     * Longer keywords win; ties go to the later-inserted rule. Matches iOS
+     * `DomainRouter.lookupKeywordRule`.
+     */
+    private fun lookupKeywordRule(domain: String): RouteAction? {
+        var bestAction: RouteAction? = null
+        var bestLength = -1
+        for (rule in keywordRules) {
+            if (!domain.contains(rule.pattern)) continue
+            if (rule.patternLength >= bestLength) {
+                bestAction = rule.action
+                bestLength = rule.patternLength
+            }
+        }
+        return bestAction
     }
 
     // -- Parsing helpers --

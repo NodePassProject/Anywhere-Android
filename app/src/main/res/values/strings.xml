@@ -146,6 +146,7 @@
     <string name="import_rules">Import Rules</string>
     <string name="route_to">Route To</string>
     <string name="domain_suffix">Domain Suffix</string>
+    <string name="domain_keyword">Domain Keyword</string>
     <string name="ipv4_cidr">IPv4 CIDR</string>
     <string name="ipv6_cidr">IPv6 CIDR</string>
     <string name="type_label">Type</string>
@@ -159,6 +160,7 @@
     <string name="import_action">Import</string>
     <string name="parsed_rules">%1$d rule(s)</string>
     <string name="example_domain">example.com</string>
+    <string name="example_keyword">example</string>
     <string name="example_ipv4">10.0.0.0/8</string>
     <string name="example_ipv6">2001:db8::/32</string>
 

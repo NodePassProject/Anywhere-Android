@@ -6,6 +6,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +26,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
@@ -48,6 +49,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.rules.CountryBypassCatalog
+import com.argsment.anywhere.ui.theme.GradientConnectedEndDark
+import com.argsment.anywhere.ui.theme.GradientConnectedEndLight
+import com.argsment.anywhere.ui.theme.GradientConnectedStartDark
+import com.argsment.anywhere.ui.theme.GradientConnectedStartLight
 import java.util.Locale
 
 private fun flagForCountryCode(code: String): String {
@@ -67,11 +72,19 @@ fun OnboardingScreen(
     var selectedCountry by remember { mutableStateOf(defaultCountry) }
     var adBlockEnabled by remember { mutableStateOf(false) }
 
+    // Mirrors iOS OnboardingView: fixed branded gradient with a dark-mode
+    // variant (see Assets.xcassets/GradientStart + GradientEnd). Must NOT
+    // use MaterialTheme.colorScheme.primary/tertiary — with
+    // `dynamicColor = true` those adapt to the user's wallpaper and can
+    // become light pastels in light mode, at which point the hardcoded
+    // white text on this screen has no contrast.
+    val isDark = isSystemInDarkTheme()
+    val gradientStart = if (isDark) GradientConnectedStartDark else GradientConnectedStartLight
+    val gradientEnd = if (isDark) GradientConnectedEndDark else GradientConnectedEndLight
     val gradientBrush = Brush.linearGradient(
-        colors = listOf(
-            MaterialTheme.colorScheme.primary,
-            MaterialTheme.colorScheme.tertiary
-        )
+        colors = listOf(gradientStart, gradientEnd),
+        start = Offset.Zero,
+        end = Offset.Infinite
     )
 
     Box(

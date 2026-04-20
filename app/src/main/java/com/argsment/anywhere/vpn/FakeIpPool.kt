@@ -95,6 +95,10 @@ class FakeIpPool {
         nextOffset = 1
     }
 
+    /** Returns the number of active entries. Mirrors iOS `FakeIPPool.count`. */
+    val count: Int
+        get() = synchronized(stateLock) { domainToOffset.size }
+
     // -- IP ↔ Offset Conversion --
 
     private fun ipToOffset(ip: String): Int? {

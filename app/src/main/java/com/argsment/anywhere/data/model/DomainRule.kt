@@ -22,7 +22,8 @@ import kotlinx.serialization.json.intOrNull
 enum class DomainRuleType(val rawValue: Int) {
     IP_CIDR(0),
     IP_CIDR6(1),
-    DOMAIN_SUFFIX(2);
+    DOMAIN_SUFFIX(2),
+    DOMAIN_KEYWORD(3);
 
     companion object {
         fun fromRawValue(value: Int): DomainRuleType? = entries.firstOrNull { it.rawValue == value }
@@ -30,7 +31,8 @@ enum class DomainRuleType(val rawValue: Int) {
         fun fromLegacyString(value: String): DomainRuleType? = when (value) {
             "ipCIDR" -> IP_CIDR
             "ipCIDR6" -> IP_CIDR6
-            "domain", "domainKeyword", "domainSuffix" -> DOMAIN_SUFFIX
+            "domain", "domainSuffix" -> DOMAIN_SUFFIX
+            "domainKeyword" -> DOMAIN_KEYWORD
             else -> null
         }
     }

@@ -239,7 +239,8 @@ class RuleSetRepository(private val context: Context) {
                 }
                 when (rule.type) {
                     DomainRuleType.IP_CIDR, DomainRuleType.IP_CIDR6 -> ipRulesArray.put(entry)
-                    DomainRuleType.DOMAIN_SUFFIX -> domainRulesArray.put(entry)
+                    DomainRuleType.DOMAIN_SUFFIX,
+                    DomainRuleType.DOMAIN_KEYWORD -> domainRulesArray.put(entry)
                 }
             }
 

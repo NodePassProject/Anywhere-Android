@@ -759,6 +759,12 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         var dstHost = dstIpString
         var connectionConfig = defaultConfig
         var forceBypass = false
+        // Enable TLS ClientHello sniffing only on real-IP connections.
+        // Fake-IP connections already know the domain via the fake-IP
+        // pool; sniffing would add latency for no benefit (and could
+        // miscategorize if the SNI disagrees with the DNS-resolved
+        // name). Mirrors iOS LWIPStack+Callbacks.swift:51-55,78.
+        var sniffSNI = false
 
         when (val resolution = resolveFakeIp(dstIpString, dstPort, "TCP")) {
             FakeIpResolution.Passthrough -> {
@@ -779,6 +785,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
                         }
                     }
                 }
+                sniffSNI = true
             }
             is FakeIpResolution.Resolved -> {
                 dstHost = resolution.domain
@@ -798,6 +805,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             dstPort = dstPort,
             configuration = connectionConfig,
             forceBypass = forceBypass,
+            sniffSNI = sniffSNI,
             lwipExecutor = lwipExecutor
         )
         tcpConnections[connId] = connection
