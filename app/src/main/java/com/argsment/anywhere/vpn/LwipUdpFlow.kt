@@ -141,12 +141,12 @@ class LwipUdpFlow(
         // Warn once per flow so users can tell they're losing packets, but
         // avoid flooding the log — matches iOS
         // LWIPUDPFlow.didWarnPendingOverflow gate.
-        if (pendingBufferSize + payload.size > MAX_UDP_BUFFER_SIZE) {
+        if (pendingBufferSize + payload.size > TunnelConstants.udpMaxBufferSize) {
             if (!didWarnPendingOverflow) {
                 didWarnPendingOverflow = true
                 logger.warning(
                     "[UDP] Pending buffer overflow for $flowKey " +
-                    "(${pendingBufferSize}+${payload.size} > $MAX_UDP_BUFFER_SIZE), dropping datagrams"
+                    "(${pendingBufferSize}+${payload.size} > ${TunnelConstants.udpMaxBufferSize}), dropping datagrams"
                 )
             }
             return
@@ -569,7 +569,5 @@ class LwipUdpFlow(
 
     companion object {
         private val logger = AnywhereLogger("LWIP-UDP")
-        /** Maximum buffer for queued datagrams (matches Xray-core DiscardOverflow 16KB). */
-        private const val MAX_UDP_BUFFER_SIZE = 16 * 1024  // 16 KB
     }
 }

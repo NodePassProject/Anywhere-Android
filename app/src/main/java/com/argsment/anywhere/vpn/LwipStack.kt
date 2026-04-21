@@ -77,10 +77,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     private var timeoutTimer: ScheduledFuture<*>? = null
     private var udpCleanupTimer: ScheduledFuture<*>? = null
 
-    // Restart throttling for handleNetworkPathChange (matches iOS 1s cooldown)
+    // Restart throttling for handleNetworkPathChange.
     private var lastRestartNanos: Long = 0
     private var deferredRestart: ScheduledFuture<*>? = null
-    private val restartThrottleNanos: Long = 1_000_000_000L // 1 second
+    private val restartThrottleNanos: Long = TunnelConstants.restartThrottleNanos
 
     /** GeoIP database for country-based bypass (loaded once, reused). */
     private var geoIpDatabase: GeoIpDatabase? = null
@@ -469,8 +469,8 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     /**
      * Tears down all connections and restarts the lwIP stack. Must be called on lwipExecutor.
      *
-     * Throttled to at most once per [restartThrottleNanos] (1s, matching iOS
-     * LWIPStack.restartThrottleInterval). When a restart is requested within the
+     * Throttled to at most once per [restartThrottleNanos] (2s, matching iOS
+     * TunnelConstants.restartThrottleInterval). When a restart is requested within the
      * cooldown window the request is deferred; only the last deferred request
      * executes (earlier ones are cancelled and replaced). All restart entry points
      * (handleNetworkPathChange, switchConfiguration, handleSettingsChanged,
@@ -567,7 +567,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
     @Volatile
     private var recentTunnelInterruption: RecentTunnelInterruption? = null
-    private val recentTunnelInterruptionWindowNanos: Long = 8_000_000_000L  // 8 seconds (TunnelConstants.recentTunnelInterruptionWindow)
+    private val recentTunnelInterruptionWindowNanos: Long = TunnelConstants.recentTunnelInterruptionWindowNanos
 
     fun noteRecentTunnelInterruption(summary: String, level: LogLevel) {
         recentTunnelInterruption = RecentTunnelInterruption(
@@ -1301,17 +1301,17 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             if (running) {
                 NativeBridge.nativeTimerPoll()
             }
-        }, 250, 250, TimeUnit.MILLISECONDS)
+        }, TunnelConstants.lwipTimeoutIntervalMs, TunnelConstants.lwipTimeoutIntervalMs, TimeUnit.MILLISECONDS)
     }
 
-    /** Starts the UDP flow cleanup timer (1-second interval, 60-second idle timeout). */
+    /** Starts the UDP flow cleanup timer. */
     private fun startUdpCleanupTimer() {
         udpCleanupTimer = lwipExecutor.scheduleAtFixedRate({
             if (!running) return@scheduleAtFixedRate
             val now = System.nanoTime() / 1_000_000_000.0
             val keysToRemove = mutableListOf<String>()
             for ((key, flow) in udpFlows) {
-                if (now - flow.lastActivity > UDP_IDLE_TIMEOUT_SEC) {
+                if (now - flow.lastActivity > TunnelConstants.udpIdleTimeoutSec) {
                     flow.close()
                     keysToRemove.add(key)
                 }
@@ -1319,7 +1319,7 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             for (key in keysToRemove) {
                 udpFlows.remove(key)
             }
-        }, 1, 1, TimeUnit.SECONDS)
+        }, TunnelConstants.udpCleanupIntervalSec, TunnelConstants.udpCleanupIntervalSec, TimeUnit.SECONDS)
     }
 
     // -- Connection Management --
@@ -1335,7 +1335,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         private const val MAX_INPUT_BATCH_SIZE = 64
         private const val MAX_TCP_CONNECTIONS = 128
         private const val MAX_UDP_FLOWS = 200
-        private const val UDP_IDLE_TIMEOUT_SEC = 60.0
 
         /** Singleton for callback access. */
         @Volatile

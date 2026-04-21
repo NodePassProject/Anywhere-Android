@@ -1,5 +1,6 @@
 package com.argsment.anywhere.vpn.util
 
+import com.argsment.anywhere.vpn.TunnelConstants
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.concurrent.locks.ReentrantLock
@@ -8,16 +9,14 @@ import kotlin.concurrent.withLock
 /**
  * Thread-safe ring buffer for user-facing logs forwarded from [AnywhereLogger.logSink].
  *
- * Mirrors iOS `LWIPStack` log buffer: entries older than [RETENTION_SECONDS]
- * are evicted on every write, and the buffer is capped at [MAX_ENTRIES].
+ * Mirrors iOS `LWIPStack` log buffer: entries older than
+ * [TunnelConstants.logRetentionIntervalSec] are evicted on every write,
+ * and the buffer is capped at [TunnelConstants.logMaxEntries].
  */
 object LogBuffer {
 
-    /** Retention window in seconds; matches iOS `TunnelConstants.logRetentionInterval`. */
-    private const val RETENTION_SECONDS = 300L
-
-    /** Maximum entries; matches iOS `TunnelConstants.logMaxEntries`. */
-    private const val MAX_ENTRIES = 50
+    private val RETENTION_SECONDS = TunnelConstants.logRetentionIntervalSec
+    private val MAX_ENTRIES = TunnelConstants.logMaxEntries
 
     data class Entry(
         val timestamp: Long,  // epoch milliseconds

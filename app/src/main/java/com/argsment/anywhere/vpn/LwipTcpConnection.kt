@@ -93,20 +93,29 @@ class LwipTcpConnection(
         if (sniffSNI) TlsClientHelloSniffer() else null
 
     /**
-     * Fires if the sniff phase doesn't resolve within [SNIFF_DEADLINE_MS]
+     * Fires if the sniff phase doesn't resolve within [TunnelConstants.sniffDeadlineMs]
      * — commits the IP-based route so server-speaks-first protocols
      * (SSH, SMTP, FTP) don't stall waiting for a ClientHello. Mirrors
      * iOS `LWIPTCPConnection.sniffDeadline`.
      */
     private var sniffDeadline: ScheduledFuture<*>? = null
 
-    // -- Backpressure State --
+    // -- Downlink Backlog State --
 
-    /** Data that couldn't fit in lwIP's TCP send buffer. */
-    private var overflowBuffer = ByteArrayOutputStream()
+    /**
+     * Downlink bytes received from the proxy that haven't been pushed into
+     * lwIP's TCP send buffer yet. Mirrors iOS `LWIPTCPConnection.pendingWrite`.
+     * Holds ALL outstanding downlink bytes — a concurrently prefetched
+     * receive appends here without racing the ongoing drain.
+     */
+    private var pendingWrite = ByteArrayOutputStream()
 
-    /** Whether the receive loop is paused due to a full lwIP send buffer. */
-    private var receivePaused = false
+    /**
+     * True while a proxy receive is in flight. Guards against issuing a
+     * parallel receive on top of an existing one. Mirrors iOS
+     * `LWIPTCPConnection.receiveInFlight`.
+     */
+    private var receiveInFlight = false
 
     // -- Activity Timeout (matches Xray-core policy defaults) --
 
@@ -126,7 +135,7 @@ class LwipTcpConnection(
                 logger.error("[TCP] Handshake timeout during $phase: $dstHost:$dstPort")
                 abort()
             }
-        }, HANDSHAKE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }, TunnelConstants.handshakeTimeoutMs, TimeUnit.MILLISECONDS)
 
         // If we're sniffing, wait for the first ClientHello bytes in
         // handleReceivedData before choosing a route. Otherwise commit
@@ -136,14 +145,14 @@ class LwipTcpConnection(
         } else {
             // Safety net: non-TLS protocols where the server speaks first
             // (SSH, SMTP, FTP) never send client bytes of their own accord.
-            // If we haven't decided by SNIFF_DEADLINE_MS, commit the IP-
+            // If we haven't decided by TunnelConstants.sniffDeadlineMs, commit the IP-
             // based route and proceed.
             sniffDeadline = lwipExecutor.schedule({
                 if (!closed && sniffer != null) {
                     sniffer = null
                     beginConnecting()
                 }
-            }, SNIFF_DEADLINE_MS, TimeUnit.MILLISECONDS)
+            }, TunnelConstants.sniffDeadlineMs, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -158,16 +167,16 @@ class LwipTcpConnection(
     }
 
     /**
-     * Appends to `pendingData` and enforces [MAX_PENDING_DATA_SIZE].
+     * Appends to `pendingData` and enforces [TunnelConstants.tcpMaxPendingDataSize].
      * Aborts the connection if the cap would be exceeded and returns
      * `false` so callers can bail out early. Mirrors iOS
      * `LWIPTCPConnection.appendPendingData`.
      */
     private fun appendPendingData(data: ByteArray): Boolean {
-        if (pendingData.size() + data.size > MAX_PENDING_DATA_SIZE) {
+        if (pendingData.size() + data.size > TunnelConstants.tcpMaxPendingDataSize) {
             logger.warning(
                 "[TCP] pendingData cap exceeded for $dstHost:$dstPort " +
-                "(${pendingData.size()} + ${data.size} > $MAX_PENDING_DATA_SIZE), aborting"
+                "(${pendingData.size()} + ${data.size} > ${TunnelConstants.tcpMaxPendingDataSize}), aborting"
             )
             abort()
             return false
@@ -286,7 +295,7 @@ class LwipTcpConnection(
             // Coalesce segments: accumulate data and schedule a batched send
             // to reduce per-segment encryption overhead.
             val bufferedSize = coalesceBuffer?.size() ?: 0
-            if (bufferedSize + data.size > MAX_COALESCE_SIZE) {
+            if (bufferedSize + data.size > TunnelConstants.tcpMaxCoalesceSize) {
                 // Buffer would overflow — flush accumulated data first to
                 // maintain stream ordering, then fall back to per-segment sends.
                 if (bufferedSize > 0 && !coalesceFlushInFlight) {
@@ -330,7 +339,7 @@ class LwipTcpConnection(
      */
     fun handleSent(len: Int) {
         if (closed) return
-        drainOverflowBuffer()
+        drainPendingWrite()
     }
 
     /** Called when the local app closes its write side (TCP FIN from app). */
@@ -355,7 +364,7 @@ class LwipTcpConnection(
         if (downlinkDone) {
             close()
         } else {
-            activityTimer?.setTimeout(DOWNLINK_ONLY_TIMEOUT_MS)
+            activityTimer?.setTimeout(TunnelConstants.downlinkOnlyTimeoutMs)
         }
     }
 
@@ -436,7 +445,7 @@ class LwipTcpConnection(
 
                 handshakeTimer?.cancel(false)
                 handshakeTimer = null
-                activityTimer = ActivityTimer(lwipExecutor, CONNECTION_IDLE_TIMEOUT_MS) {
+                activityTimer = ActivityTimer(lwipExecutor, TunnelConstants.connectionIdleTimeoutMs) {
                     if (!closed) close()
                 }
 
@@ -476,7 +485,7 @@ class LwipTcpConnection(
                     }
                 }
 
-                requestNextReceive()
+                tryArmReceive()
             }
         }
     }
@@ -536,7 +545,7 @@ class LwipTcpConnection(
             vlessConnection = connection
             handshakeTimer?.cancel(false)
             handshakeTimer = null
-            activityTimer = ActivityTimer(lwipExecutor, CONNECTION_IDLE_TIMEOUT_MS) {
+            activityTimer = ActivityTimer(lwipExecutor, TunnelConstants.connectionIdleTimeoutMs) {
                 if (!closed) close()
             }
 
@@ -559,7 +568,7 @@ class LwipTcpConnection(
                 }
             }
 
-            requestNextReceive()
+            tryArmReceive()
         }
     }
 
@@ -716,7 +725,7 @@ class LwipTcpConnection(
                 }
                 if (sndbuf <= 0) break
             }
-            val chunkSize = minOf(sndbuf, count - offset, MAX_LWIP_WRITE_SIZE)
+            val chunkSize = minOf(sndbuf, count - offset, TunnelConstants.tcpMaxWriteSize)
             val err = NativeBridge.nativeTcpWrite(pcb, data, dataOffset + offset, chunkSize)
             if (err != 0) {
                 if (err == -1) break  // ERR_MEM: transient — remaining data goes to overflow
@@ -728,167 +737,142 @@ class LwipTcpConnection(
     }
 
     /**
-     * Writes data from the remote side to the lwIP TCP send buffer.
-     * Called from the receive loop when data arrives from VLESS/direct.
-     *
-     * If overflow buffer already has data, appends to preserve ordering.
-     * ERR_MEM from tcp_write is treated as transient (data goes to overflow),
-     * matching iOS behavior which avoids unnecessary RSTs under heavy load.
+     * Appends data received from the proxy onto [pendingWrite], then drains
+     * as much as lwIP will accept. All order-preservation lives in
+     * [pendingWrite], so a concurrently prefetched receive can land without
+     * racing ahead of the chunk currently being drained.
+     * Mirrors iOS `LWIPTCPConnection.writeToLWIP`.
      */
     fun writeToLwip(data: ByteArray) {
+        if (closed || data.isEmpty()) return
+        pendingWrite.write(data)
+        drainPendingWrite()
+    }
+
+    /**
+     * Drains [pendingWrite] into lwIP's TCP send buffer and, on progress,
+     * arms the next proxy receive if we've dropped below
+     * [TunnelConstants.drainLowWaterMark].
+     *
+     * Called from [handleSent] on every client ACK, from [writeToLwip]
+     * after new proxy data is appended, and from a [TunnelConstants.drainRetryDelayMs]
+     * fallback timer when `tcp_write` couldn't place any bytes (snd_buf
+     * full / zero window). Mirrors iOS `LWIPTCPConnection.drainPendingWrite`.
+     */
+    private fun drainPendingWrite() {
         if (closed) return
 
-        // If overflow already queued, append to preserve ordering (matching iOS).
-        if (overflowBuffer.size() > 0) {
-            overflowBuffer.write(data)
-            drainOverflowBuffer()
+        if (pendingWrite.size() > 0) {
+            val data = pendingWrite.backingArray()
+            val dataSize = pendingWrite.size()
+            val written = feedLwip(data, 0, dataSize, retryOnEmpty = true)
+            if (written == -1) {
+                val sndbuf = NativeBridge.nativeTcpSndbuf(pcb)
+                logger.error("[TCP] tcp_write fatal: $dstHost:$dstPort (pending=$dataSize, sndbuf=$sndbuf)")
+                abort()
+                return
+            }
             if (closed) return
-            if (overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE) {
-                requestNextReceive()
-            } else {
-                receivePaused = true
-            }
-            return
-        }
 
-        val written = feedLwip(data, 0, data.size, retryOnEmpty = true)
-        if (written == -1) {
-            logger.error("[TCP] Write failed: $dstHost:$dstPort")
-            abort()
-            return
-        }
-        if (written < data.size) {
-            overflowBuffer.write(data, written, data.size - written)
-        }
-
-        if (closed) return
-        NativeBridge.nativeTcpOutput(pcb)
-        // Drain immediately on the same lwIP cycle — LwipStack's batching
-        // path would otherwise defer the TUN write to the next executor
-        // tick. Mirrors iOS LWIPTCPConnection.swift:533
-        // (`LWIPStack.shared?.flushOutputInline()`).
-        LwipStack.instance?.flushOutputInline()
-
-        // Backpressure gate: if overflow has accumulated beyond the soft limit,
-        // pause receives so the remote side stops sending.
-        if (overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE) {
-            requestNextReceive()
-        } else {
-            receivePaused = true
-        }
-    }
-
-    /** Drains the overflow buffer into lwIP's TCP send buffer. */
-    private fun drainOverflowBuffer() {
-        if (closed || overflowBuffer.size() == 0) return
-
-        val data = overflowBuffer.backingArray()
-        val dataSize = overflowBuffer.size()
-        val written = feedLwip(data, 0, dataSize)
-        if (written == -1) {
-            logger.error("[TCP] Write failed: $dstHost:$dstPort")
-            abort()
-            return
-        }
-
-        if (closed) return
-
-        if (written > 0) {
-            if (written >= dataSize) {
-                overflowBuffer.reset()
-            } else {
-                overflowBuffer.consume(written)
-            }
-            NativeBridge.nativeTcpOutput(pcb)
-            // Mirrors iOS LWIPTCPConnection.swift:573 — flush the egress
-            // queue inline so freed pbufs leave the host within the same
-            // drain cycle that consumed them.
-            LwipStack.instance?.flushOutputInline()
-        } else if (overflowBuffer.size() > 0) {
-            // Nothing drained (ERR_MEM with empty send buffer) — no handleSent will
-            // fire for this connection, so schedule a delayed retry (matching iOS).
-            logger.warning(
-                "[TCP] Drain stalled (${overflowBuffer.size()} bytes pending), " +
-                "retrying in ${DRAIN_RETRY_DELAY_MS}ms: $dstHost:$dstPort"
-            )
-            lwipExecutor.schedule({ drainOverflowBuffer() }, DRAIN_RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
-            return
-        }
-
-        if (receivePaused && overflowBuffer.size() < MAX_OVERFLOW_BUFFER_SIZE) {
-            receivePaused = false
-            requestNextReceive()
-        }
-    }
-
-    /** Requests the next chunk of data from the protocol connection. */
-    private fun requestNextReceive() {
-        if (closed || receivePaused) return
-
-        if (directRelay != null) {
-            val relay = directRelay!!
-            scope.launch {
-                try {
-                    val data = relay.receive()
-                    lwipExecutor.execute {
-                        if (closed) return@execute
-                        if (data == null || data.isEmpty()) {
-                            // EOF
-                            downlinkDone = true
-                            if (uplinkDone) {
-                                close()
-                            } else {
-                                activityTimer?.setTimeout(UPLINK_ONLY_TIMEOUT_MS)
-                            }
-                        } else {
-                            activityTimer?.update()
-                            writeToLwip(data)
-                        }
-                    }
-                } catch (_: CancellationException) {
-                    // Scope cancelled during teardown — silently ignore
-                } catch (e: Exception) {
-                    if (!closed) logTransportFailure("Receive", e, LwipStack.LogLevel.WARNING)
-                    lwipExecutor.execute { abort() }
+            if (written > 0) {
+                if (written >= dataSize) {
+                    pendingWrite.reset()
+                } else {
+                    pendingWrite.consume(written)
                 }
+                NativeBridge.nativeTcpOutput(pcb)
+                // Flush the egress queue inline so freed pbufs leave the host
+                // within the same drain cycle that consumed them. Mirrors iOS
+                // `LWIPStack.flushOutputInline()`.
+                LwipStack.instance?.flushOutputInline()
+            } else {
+                // Nothing drained (ERR_MEM / zero window) — schedule a delayed
+                // retry. Skip `tryArmReceive` on purpose: piling more upstream
+                // bytes onto a stalled connection only grows `pendingWrite`.
+                // Once the retry makes progress, the tail call re-arms.
+                lwipExecutor.schedule(
+                    { if (!closed) drainPendingWrite() },
+                    TunnelConstants.drainRetryDelayMs,
+                    TimeUnit.MILLISECONDS
+                )
+                return
             }
-            return
         }
 
-        val connection = vlessConnection ?: return
+        // Made progress (or nothing was pending): prefetch the next chunk if
+        // the backlog is below the low-water mark.
+        tryArmReceive()
+    }
+
+    /**
+     * Issues the next proxy receive if the downlink backlog is below the
+     * low-water mark and no receive is already in flight.
+     *
+     * Overlapping the next receive with the ongoing drain keeps lwIP's send
+     * buffer saturated: by the time a client ACK frees space, a fresh chunk
+     * is already queued in [pendingWrite] ready to push. Without this
+     * overlap, a big receive (e.g. a speed-test server pushing >1 MB per
+     * read) forces stop-and-wait — the proxy socket's receive window stays
+     * closed for the entire drain, and upstream throttles.
+     *
+     * Backpressure still applies: when `pendingWrite.size()` is at or above
+     * [TunnelConstants.drainLowWaterMark], this is a no-op, so receives
+     * naturally pause whenever lwIP can't keep up. Mirrors iOS
+     * `LWIPTCPConnection.tryArmReceive`.
+     */
+    private fun tryArmReceive() {
+        if (closed || receiveInFlight) return
+        if (pendingWrite.size() >= TunnelConstants.drainLowWaterMark) return
+
+        val relay = directRelay
+        val connection = vlessConnection
+        if (relay == null && connection == null) return
+
+        receiveInFlight = true
         scope.launch {
+            var data: ByteArray? = null
+            var error: Throwable? = null
+            var cancelled = false
             try {
-                val data = connection.receive()
-                lwipExecutor.execute {
-                    if (closed) return@execute
-                    if (data == null || data.isEmpty()) {
-                        // EOF
-                        downlinkDone = true
-                        if (uplinkDone) {
-                            close()
-                        } else {
-                            activityTimer?.setTimeout(UPLINK_ONLY_TIMEOUT_MS)
-                        }
-                    } else {
-                        activityTimer?.update()
-                        writeToLwip(data)
-                    }
-                }
+                data = relay?.receive() ?: connection?.receive()
             } catch (_: CancellationException) {
-                // Scope cancelled during teardown — silently ignore
+                cancelled = true
             } catch (e: Exception) {
-                if (!closed) logTransportFailure("Receive", e, LwipStack.LogLevel.WARNING)
-                lwipExecutor.execute { abort() }
+                error = e
+            }
+
+            lwipExecutor.execute {
+                receiveInFlight = false
+                if (closed || cancelled) return@execute
+
+                if (error != null) {
+                    logTransportFailure("Receive", error, LwipStack.LogLevel.WARNING)
+                    abort()
+                    return@execute
+                }
+
+                if (data == null || data.isEmpty()) {
+                    downlinkDone = true
+                    if (uplinkDone) {
+                        close()
+                    } else {
+                        activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeoutMs)
+                    }
+                    return@execute
+                }
+
+                activityTimer?.update()
+                writeToLwip(data)
             }
         }
     }
 
     // -- Close / Abort --
 
-    /** Best-effort flush of overflow data into lwIP send buffer before close. */
-    private fun flushOverflowToLwip() {
-        if (overflowBuffer.size() == 0) return
-        val written = feedLwip(overflowBuffer.backingArray(), 0, overflowBuffer.size())
+    /** Best-effort flush of pending data into lwIP send buffer before close. */
+    private fun flushPendingToLwip() {
+        if (pendingWrite.size() == 0) return
+        val written = feedLwip(pendingWrite.backingArray(), 0, pendingWrite.size())
         if (written > 0) {
             NativeBridge.nativeTcpOutput(pcb)
         }
@@ -897,7 +881,7 @@ class LwipTcpConnection(
     fun close() {
         if (closed) return
         closed = true
-        flushOverflowToLwip()
+        flushPendingToLwip()
         NativeBridge.nativeTcpClose(pcb)
         releaseProtocol()
         LwipStack.instance?.removeConnection(connId)
@@ -954,44 +938,17 @@ class LwipTcpConnection(
         vlessConnecting = false
         directConnecting = false
         pendingData.reset()
-        overflowBuffer.reset()
+        pendingWrite.reset()
         coalesceBuffer = null
         coalesceScheduled = false
-        receivePaused = false
+        receiveInFlight = false
+
         relay?.cancel()
         connection?.cancel()
     }
 
     companion object {
         private val logger = AnywhereLogger("LWIP-TCP")
-        private const val CONNECTION_IDLE_TIMEOUT_MS = 300_000L  // 300s (Xray-core connIdle)
-        private const val DOWNLINK_ONLY_TIMEOUT_MS = 1_000L      // 1s (Xray-core downlinkOnly)
-        private const val UPLINK_ONLY_TIMEOUT_MS = 1_000L        // 1s (Xray-core uplinkOnly)
-        private const val HANDSHAKE_TIMEOUT_MS = 60_000L         // 60s (Xray-core Timeout.Handshake)
-        private const val MAX_OVERFLOW_BUFFER_SIZE = 2 * 1024 * 1024  // 2 MB (soft limit, increased from iOS's 512 KB)
-        private const val MAX_LWIP_WRITE_SIZE = 16 * 1024        // 16 KB per tcp_write (matching iOS, limits pbuf/segment pressure)
-        private const val MAX_COALESCE_SIZE = 65535              // UInt16 max (matching iOS, protocol framing limit)
-        private const val DRAIN_RETRY_DELAY_MS = 250L            // 250ms drain retry (matching iOS TunnelConstants.drainRetryDelayMs)
-
-        /**
-         * Maximum time to wait for a TLS ClientHello on a real-IP TCP
-         * connection before falling back to IP-based routing. Covers
-         * server-speaks-first protocols (SSH, SMTP, FTP) so they don't
-         * stall inside the sniff phase. TLS clients typically send
-         * ClientHello within a few ms of TCP accept. Matches iOS
-         * `TunnelConstants.sniffDeadline = 0.5`.
-         */
-        private const val SNIFF_DEADLINE_MS = 500L
-
-        /**
-         * Safety cap on per-connection `pendingData` (bytes accumulated
-         * while the sniff phase runs or the proxy is dialing). Bounded
-         * naturally by TCP_WND since we defer `tcp_recved` until the
-         * route is committed; this cap defends against pathological
-         * states where the window bookkeeping drifts. Matches iOS
-         * `TunnelConstants.tcpMaxPendingDataSize = 2 * 512 * 1360` bytes.
-         */
-        private const val MAX_PENDING_DATA_SIZE = 2 * 512 * 1360
     }
 }
 

@@ -738,15 +738,9 @@ class AnywhereVpnService : VpnService() {
         const val ACTION_SWITCH_CONFIG = "com.argsment.anywhere.SWITCH_CONFIG"
         const val EXTRA_CONFIG = "config"
 
-        /**
-         * Wake-from-sleep restart threshold. Mirrors iOS
-         * `PacketTunnelProvider.wakeRestartThreshold = 60`. Any sleep at
-         * least this long causes the lwIP stack to drop and rebuild
-         * connections on resume — long enough to filter out screen-off
-         * noise from interactive use, short enough to beat most carrier
-         * NAT mappings (which typically time out after 60–120 s).
-         */
-        private const val WAKE_RESTART_THRESHOLD_SECS: Long = 60L
+        /** Wake-from-sleep restart threshold. Mirrors iOS
+         *  `TunnelConstants.wakeRestartThreshold`. */
+        private val WAKE_RESTART_THRESHOLD_SECS: Long = TunnelConstants.wakeRestartThresholdSec
 
         // Private/local IPv4 ranges excluded from the VPN tunnel.
         // Mirrors iOS PacketTunnelProvider excludedRoutes.

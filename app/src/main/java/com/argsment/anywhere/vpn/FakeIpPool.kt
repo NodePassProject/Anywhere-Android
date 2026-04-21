@@ -7,7 +7,7 @@ package com.argsment.anywhere.vpn
  * connections to those fake IPs arrive later, the pool resolves them back to
  * the original domain and routing configuration.
  *
- * IPv4 range: 198.18.0.0/15 (offsets 1..131071)
+ * IPv4 range: 198.18.0.0/15 (offsets 1..[POOL_SIZE])
  * IPv6 range: fc00:: + offset (same offset range)
  *
  * Thread safety: every mutator/reader takes the intrinsic monitor on
@@ -22,7 +22,7 @@ class FakeIpPool {
         val domain: String
     )
 
-    // IPv4: 198.18.0.0/15 → offsets 1..131071
+    // IPv4: 198.18.0.0/15 → offsets 1..POOL_SIZE
     private val domainToOffset = HashMap<String, Int>()
     private val offsetToEntry = HashMap<Int, Entry>()
 
@@ -215,8 +215,8 @@ class FakeIpPool {
     }
 
     companion object {
-        private const val BASE_IPV4: Long = 0xC6120000L  // 198.18.0.0
-        const val POOL_SIZE = 131_071  // usable offsets
+        private val BASE_IPV4: Long = TunnelConstants.fakeIPPoolBaseIPv4
+        val POOL_SIZE: Int = TunnelConstants.fakeIPPoolSize
 
         /** Fast check: is this IP in the fake IPv4 (198.18.0.0/15) or IPv6 (fc00::/18) range? */
         fun isFakeIp(ip: String): Boolean =

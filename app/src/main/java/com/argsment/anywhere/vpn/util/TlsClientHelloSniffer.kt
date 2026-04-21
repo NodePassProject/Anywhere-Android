@@ -1,5 +1,7 @@
 package com.argsment.anywhere.vpn.util
 
+import com.argsment.anywhere.vpn.TunnelConstants
+
 /**
  * Incremental, bounds-checked parser that extracts the SNI hostname from
  * an inbound TLS ClientHello. Used by
@@ -18,7 +20,7 @@ package com.argsment.anywhere.vpn.util
  * `Anywhere Network Extension/TLSClientHelloSniffer.swift`.
  */
 class TlsClientHelloSniffer(
-    private val bufferLimit: Int = TLS_SNIFFER_BUFFER_LIMIT
+    private val bufferLimit: Int = TunnelConstants.tlsSnifferBufferLimit
 ) {
 
     sealed class State {
@@ -210,13 +212,4 @@ class TlsClientHelloSniffer(
         }
     }
 
-    companion object {
-        /**
-         * Maximum bytes buffered while parsing a TLS ClientHello for SNI.
-         * Typical ClientHellos fit in under 2 KB; post-quantum key shares
-         * push that to ~4 KB. 8 KB is a safe ceiling that still bounds
-         * memory. Matches iOS `TunnelConstants.tlsSnifferBufferLimit`.
-         */
-        const val TLS_SNIFFER_BUFFER_LIMIT = 8192
-    }
 }
