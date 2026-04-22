@@ -5,9 +5,13 @@ import android.util.Log
 /**
  * Unified logger for the Anywhere app, mirroring iOS `AnywhereLogger`.
  *
- * `info`, `warning`, and `error` write to android.util.Log and optionally
- * to a log sink (user-facing log viewer wired by the VPN service).
- * `debug` writes to android.util.Log only — use for verbose/internal diagnostics.
+ * `info`, `warning`, and `error` write to LogCat and optionally to a log
+ * sink (user-facing log viewer wired by the VPN service).
+ * `debug` writes to LogCat only — use for verbose/internal diagnostics.
+ *
+ * iOS `AnywhereLogger.debug` is `#if DEBUG`-gated. Android relies on LogCat's
+ * runtime log-level filter (`adb logcat *:I` suppresses debug) to achieve the
+ * same end result without a build-variant split.
  */
 class AnywhereLogger(private val category: String) {
 
@@ -28,7 +32,7 @@ class AnywhereLogger(private val category: String) {
         logSink?.invoke(message, Level.error)
     }
 
-    /** Logs to android.util.Log only. Not shown in the user-facing log viewer. */
+    /** Logs to LogCat only. Not shown in the user-facing log viewer. */
     fun debug(message: String) {
         Log.d(category, message)
     }

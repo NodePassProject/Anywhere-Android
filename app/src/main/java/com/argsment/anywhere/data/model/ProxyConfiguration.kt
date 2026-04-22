@@ -578,6 +578,7 @@ fun clampHysteriaUploadMbps(raw: Int): Int =
 @Serializable
 enum class OutboundProtocol {
     @SerialName("vless") VLESS,
+    @SerialName("trojan") TROJAN,
     @SerialName("shadowsocks") SHADOWSOCKS,
     @SerialName("socks5") SOCKS5,
     @SerialName("naive_http11") NAIVE_HTTP11,
@@ -589,6 +590,7 @@ enum class OutboundProtocol {
     val displayName: String
         get() = when (this) {
             VLESS -> "VLESS"
+            TROJAN -> "Trojan"
             SHADOWSOCKS -> "Shadowsocks"
             SOCKS5 -> "SOCKS5"
             NAIVE_HTTP11 -> "HTTPS"
@@ -642,6 +644,10 @@ data class ProxyConfiguration(
     /** Client's declared upload bandwidth in Mbit/s for Brutal congestion
      *  control. Clamped to 0…100 (matches iOS `HysteriaUploadMbpsRange`). */
     val hysteriaUploadMbps: Int? = null,
+    /** Trojan password (matches iOS `ProxyConfiguration.trojanPassword`). */
+    val trojanPassword: String? = null,
+    /** Trojan's mandatory TLS configuration (matches iOS `ProxyConfiguration.trojanTLS`). */
+    val trojanTls: TlsConfiguration? = null,
     val chain: List<ProxyConfiguration>? = null
 ) {
     val connectAddress: String get() = resolvedIP ?: serverAddress
@@ -677,6 +683,8 @@ data class ProxyConfiguration(
                 naiveProtocol == other.naiveProtocol &&
                 hysteriaPassword == other.hysteriaPassword &&
                 hysteriaUploadMbps == other.hysteriaUploadMbps &&
+                trojanPassword == other.trojanPassword &&
+                trojanTls == other.trojanTls &&
                 chain == other.chain
 
     fun withChain(chain: List<ProxyConfiguration>?): ProxyConfiguration = copy(chain = chain)
@@ -687,11 +695,31 @@ data class ProxyConfiguration(
 
     fun toUrl(): String = when (outboundProtocol) {
         OutboundProtocol.VLESS -> toVlessUrl()
+        OutboundProtocol.TROJAN -> toTrojanUrl()
         OutboundProtocol.SHADOWSOCKS -> toShadowsocksUrl()
         OutboundProtocol.SOCKS5 -> toSocks5Url()
         OutboundProtocol.NAIVE_HTTP11, OutboundProtocol.NAIVE_HTTP2 -> toNaiveUrl()
         OutboundProtocol.NAIVE_HTTP3 -> toQuicUrl()
         OutboundProtocol.HYSTERIA -> toHysteriaUrl()
+    }
+
+    private fun toTrojanUrl(): String {
+        // Matches iOS `ProxyConfiguration+URLExport.swift`: password in userinfo
+        // (whole chunk, no user:pass split), TLS sni/alpn/fp optional in query.
+        val password = java.net.URLEncoder.encode(trojanPassword ?: "", "UTF-8")
+        val params = mutableListOf<String>()
+        trojanTls?.let { tls ->
+            if (tls.serverName != serverAddress) params.add("sni=${tls.serverName}")
+            tls.alpn?.takeIf { it.isNotEmpty() }?.let {
+                params.add("alpn=${urlEncode(it.joinToString(","))}")
+            }
+            if (tls.fingerprint != TlsFingerprint.CHROME_133) {
+                params.add("fp=${tls.fingerprint.raw}")
+            }
+        }
+        val query = if (params.isEmpty()) "" else "?${params.joinToString("&")}"
+        val fragment = urlEncode(name)
+        return "trojan://$password@$bracketedServerAddress:$serverPort$query#$fragment"
     }
 
     private fun toHysteriaUrl(): String {
@@ -817,7 +845,7 @@ data class ProxyConfiguration(
         /** URL scheme prefixes [fromUrl] recognises — matches iOS
          *  `ProxyConfiguration.parsableURLPrefixes`. */
         val parsableUrlPrefixes = listOf(
-            "vless://", "hysteria2://", "hy2://", "ss://",
+            "vless://", "hysteria2://", "hy2://", "trojan://", "ss://",
             "socks5://", "socks://", "https://", "quic://"
         )
 
@@ -831,9 +859,75 @@ data class ProxyConfiguration(
             url.startsWith("https://") -> fromNaiveUrl(url, naiveProtocol)
             url.startsWith("quic://") -> fromQuicUrl(url)
             url.startsWith("vless://") -> fromVlessUrl(url)
+            url.startsWith("trojan://") -> fromTrojanUrl(url)
             url.startsWith("hy2://") || url.startsWith("hysteria2://") ->
                 fromHysteriaUrl(url)
-            else -> throw ProxyError.InvalidUrl("URL must start with vless://, ss://, socks5://, https://, quic://, or hy2://")
+            else -> throw ProxyError.InvalidUrl("URL must start with vless://, trojan://, ss://, socks5://, https://, quic://, or hy2://")
+        }
+
+        /**
+         * Parses a Trojan URL. Format:
+         * `trojan://password@host:port?sni=...&alpn=h2%2Chttp%2F1.1&fp=chrome_133#name`
+         * TLS is mandatory — there is no plaintext Trojan variant on the wire.
+         * Mirrors iOS `ProxyConfiguration.parseTrojan(url:)`.
+         */
+        private fun fromTrojanUrl(url: String): ProxyConfiguration {
+            var remaining = url.removePrefix("trojan://")
+
+            var fragmentName: String? = null
+            val hashIndex = remaining.lastIndexOf('#')
+            if (hashIndex >= 0) {
+                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
+                remaining = remaining.substring(0, hashIndex)
+            }
+
+            var queryString: String? = null
+            val qIndex = remaining.indexOf('?')
+            if (qIndex >= 0) {
+                queryString = remaining.substring(qIndex + 1)
+                remaining = remaining.substring(0, qIndex)
+            }
+
+            val atIndex = remaining.lastIndexOf('@')
+            if (atIndex < 0) throw ProxyError.InvalidUrl("Missing @ separator in trojan URL")
+
+            val userInfo = remaining.substring(0, atIndex)
+            var serverPart = remaining.substring(atIndex + 1)
+            if (serverPart.endsWith("/")) serverPart = serverPart.dropLast(1)
+            val slashIdx = serverPart.indexOf('/')
+            if (slashIdx >= 0) serverPart = serverPart.substring(0, slashIdx)
+
+            // Whole userinfo is the password (trojan-gfw spec — no user:pass split).
+            val password = percentDecode(userInfo)
+
+            val (host, port) = parseHostPort(serverPart)
+            val params = parseQueryParams(queryString)
+
+            val sni = params["sni"]?.takeIf { it.isNotEmpty() }
+                ?: params["peer"]?.takeIf { it.isNotEmpty() }
+                ?: host
+
+            val alpn = params["alpn"]?.takeIf { it.isNotEmpty() }?.split(",")
+            val fp = params["fp"] ?: "chrome_133"
+            val tls = TlsConfiguration(
+                serverName = sni,
+                alpn = alpn,
+                fingerprint = TlsFingerprint.fromRaw(fp)
+            )
+
+            return ProxyConfiguration(
+                name = fragmentName ?: "Untitled",
+                serverAddress = host,
+                serverPort = port,
+                uuid = UUID.randomUUID(), // placeholder, not used for Trojan
+                encryption = "none",
+                transport = "tcp",
+                security = "tls",
+                tls = tls,
+                outboundProtocol = OutboundProtocol.TROJAN,
+                trojanPassword = password,
+                trojanTls = tls
+            )
         }
 
         private fun fromHysteriaUrl(url: String): ProxyConfiguration {

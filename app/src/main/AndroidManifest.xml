@@ -18,6 +18,13 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.Anywhere">
+
+        <!-- ML Kit barcode scanner: auto-download the on-device model at
+             install time so the first scan doesn't hit a race where the
+             scanner is invoked before the model is ready. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -37,6 +44,9 @@
                 <data android:scheme="ss" />
                 <data android:scheme="socks5" />
                 <data android:scheme="socks" />
+                <data android:scheme="trojan" />
+                <data android:scheme="hysteria2" />
+                <data android:scheme="hy2" />
                 <data android:scheme="quic" />
             </intent-filter>
         </activity>

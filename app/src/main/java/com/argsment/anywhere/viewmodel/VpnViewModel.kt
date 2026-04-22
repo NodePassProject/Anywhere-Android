@@ -115,7 +115,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     com.argsment.anywhere.data.model.percentDecode(raw)
                 }.getOrDefault(raw)
             }
-            "vless", "ss", "socks5", "socks", "quic" -> {
+            "vless", "trojan", "ss", "socks5", "socks", "hysteria2", "hy2", "quic" -> {
                 _pendingDeepLinkUrl.value = uri.toString()
             }
             else -> {}
@@ -138,11 +138,19 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             vpnService = localBinder.service
             serviceBound = true
 
-            // Update status based on service state
+            // The binder is delivered after `onStartCommand` has returned,
+            // so `isRunning` reflects whether `startVpn` set up the TUN and
+            // lwIP stack successfully. Matches iOS, where `vpnStatus` only
+            // flips to `.connected` once `NEVPNStatusDidChange` fires with
+            // the system-confirmed connected state.
             if (localBinder.service.isRunning) {
                 _vpnStatus.value = VpnStatus.CONNECTED
                 startStatsPolling()
                 selectedConfiguration?.let { syncProxyServerAddresses(it) }
+            } else if (_vpnStatus.value == VpnStatus.CONNECTING) {
+                // Service bound but tunnel setup failed (e.g. TUN establish
+                // failed) — don't leave the UI stuck on the spinner.
+                _vpnStatus.value = VpnStatus.DISCONNECTED
             }
         }
 
@@ -290,10 +298,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
             try {
                 context.startForegroundService(intent)
-                // Bind to service for stats polling and config switching
+                // Bind to service for stats polling and config switching.
+                // Status stays at CONNECTING until the service binder confirms
+                // the tunnel is up via [serviceConnection.onServiceConnected]
+                // + `isRunning` — matching iOS, which waits for the
+                // `NEVPNStatusDidChange` notification before flipping to
+                // `.connected`.
                 bindToService()
-                _vpnStatus.value = VpnStatus.CONNECTED
-                startStatsPolling()
             } catch (e: Exception) {
                 logger.warning("Failed to send configuration to tunnel: ${e.message}")
                 _vpnStatus.value = VpnStatus.DISCONNECTED

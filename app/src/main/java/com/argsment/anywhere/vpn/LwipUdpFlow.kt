@@ -233,17 +233,11 @@ class LwipUdpFlow(
                             return@execute
                         }
 
-                        // Guard against session being closed by closeAll() during dispatch
-                        // (matching iOS post-dispatch session.closed check)
-                        if (session.closed) {
-                            releaseProtocol()
-                            LwipStack.instance?.udpFlows?.remove(flowKey)
-                            return@execute
-                        }
-
-                        muxSession = session
-
-                        // Set up receive handler
+                        // Set up handlers BEFORE checking closed state to
+                        // prevent a race where close fires between the
+                        // check and handler registration, which would leak
+                        // the flow. Mirrors iOS `LWIPUDPFlow.connectViaMux`
+                        // handler registration order.
                         session.dataHandler = { data ->
                             handleRemoteData(data)
                         }
@@ -253,6 +247,17 @@ class LwipUdpFlow(
                                 LwipStack.instance?.udpFlows?.remove(flowKey)
                             }
                         }
+
+                        // Guard against race: closeAll() may have already
+                        // closed the session (via receive-loop error) before
+                        // this handler ran.
+                        if (session.closed) {
+                            releaseProtocol()
+                            LwipStack.instance?.udpFlows?.remove(flowKey)
+                            return@execute
+                        }
+
+                        muxSession = session
 
                         // Send buffered raw payloads synchronously on the lwipExecutor.
                         // Using sendAsync avoids the race where closeAll() could run
@@ -316,26 +321,22 @@ class LwipUdpFlow(
                     vlessConnection = connection
 
                     if (pendingData.isNotEmpty()) {
-                        // Batch all pending payloads into a single sendRaw call (matching iOS)
-                        var totalSize = 0
-                        for (payload in pendingData) totalSize += 2 + payload.size
-                        val batched = ByteArray(totalSize)
-                        var offset = 0
-                        for (payload in pendingData) {
-                            batched[offset++] = (payload.size shr 8).toByte()
-                            batched[offset++] = (payload.size and 0xFF).toByte()
-                            System.arraycopy(payload, 0, batched, offset, payload.size)
-                            offset += payload.size
-                        }
+                        // Drain buffered payloads via per-packet `send` calls so
+                        // each protocol's UDP connection applies its own wire
+                        // framing (matches iOS LWIPUDPFlow drain loop).
+                        val buffered = pendingData.toList()
                         pendingData.clear()
                         pendingBufferSize = 0
 
                         scope.launch {
-                            try {
-                                connection.sendRaw(batched)
-                            } catch (_: CancellationException) {
-                            } catch (e: Exception) {
-                                if (!closed) logger.debug("[UDP] Chained initial send error for $flowKey: ${e.message}")
+                            for (payload in buffered) {
+                                try {
+                                    connection.send(payload)
+                                } catch (_: CancellationException) {
+                                    return@launch
+                                } catch (e: Exception) {
+                                    if (!closed) logger.debug("[UDP] Chained initial send error for $flowKey: ${e.message}")
+                                }
                             }
                         }
                     }
@@ -372,32 +373,30 @@ class LwipUdpFlow(
 
                     vlessConnection = connection
 
-                    // Send buffered raw payloads batched into a single sendRaw (matching iOS)
+                    // Drain buffered payloads via per-packet `send` calls so each
+                    // protocol's UDP connection applies its own wire framing
+                    // (matches iOS LWIPUDPFlow.connectProxy drain loop). A bulk
+                    // sendRaw with pre-inlined VLESS length prefixes would break
+                    // Trojan/Hysteria, whose UDP framings are not length-prefixed.
                     if (pendingData.isNotEmpty()) {
-                        var totalSize = 0
-                        for (payload in pendingData) totalSize += 2 + payload.size
-                        val batched = ByteArray(totalSize)
-                        var offset = 0
-                        for (payload in pendingData) {
-                            batched[offset++] = (payload.size shr 8).toByte()
-                            batched[offset++] = (payload.size and 0xFF).toByte()
-                            System.arraycopy(payload, 0, batched, offset, payload.size)
-                            offset += payload.size
-                        }
+                        val buffered = pendingData.toList()
                         pendingData.clear()
                         pendingBufferSize = 0
 
                         scope.launch {
-                            try {
-                                connection.sendRaw(batched)
-                            } catch (_: CancellationException) {
-                            } catch (e: Exception) {
-                                if (!closed) logger.debug("[UDP] VLESS initial send error for $flowKey: ${e.message}")
+                            for (payload in buffered) {
+                                try {
+                                    connection.send(payload)
+                                } catch (_: CancellationException) {
+                                    return@launch
+                                } catch (e: Exception) {
+                                    if (!closed) logger.debug("[UDP] initial send error for $flowKey: ${e.message}")
+                                }
                             }
                         }
                     }
 
-                    // Start receiving VLESS responses
+                    // Start receiving proxy responses
                     startVlessReceiving(connection)
                 }
             } catch (_: CancellationException) {

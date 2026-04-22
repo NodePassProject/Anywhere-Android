@@ -137,6 +137,17 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     }
 
     // -- Settings observation --
+    //
+    // Each signal type is coalesced through its own [SignalThrottler], matching iOS
+    // AWCore.postThrottled (throttleInterval = 1 s). On iOS the throttle is applied
+    // sender-side (app process posts Darwin notifications); on Android the app and
+    // VPN service share a process, so we apply it receiver-side on the prefs change
+    // listener. Effect is identical: at most one handler invocation per second per
+    // signal, with a trailing edge so the final state always propagates.
+    private val settingsThrottler = SignalThrottler(lwipExecutor, TunnelConstants.settingsThrottleNanos)
+    private val routingThrottler = SignalThrottler(lwipExecutor, TunnelConstants.settingsThrottleNanos)
+    private val certificateThrottler = SignalThrottler(lwipExecutor, TunnelConstants.settingsThrottleNanos)
+
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when (key) {
             "ipv6DnsEnabled",
@@ -144,14 +155,14 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             "encryptedDnsEnabled",
             "encryptedDnsProtocol",
             "encryptedDnsServer",
-            "proxyMode" -> handleSettingsChanged()
+            "proxyMode" -> settingsThrottler.submit(::handleSettingsChanged)
             // `routingChanged` reloads the DomainRouter in place without restarting the lwIP stack —
             // new connections see new rules, existing ones keep their dispatched path (matches iOS
             // LWIPStack+Lifecycle routingChanged handler).
-            "routingChanged" -> handleRoutingChanged()
+            "routingChanged" -> routingThrottler.submit(::handleRoutingChanged)
             // `certificatePolicyChanged` re-reads allowInsecure + trusted certs and reapplies to
             // live connections (matches iOS certificatePolicyChanged Darwin notification).
-            "certificatePolicyChanged" -> handleCertificatePolicyChanged()
+            "certificatePolicyChanged" -> certificateThrottler.submit(::handleCertificatePolicyChanged)
         }
     }
 
@@ -375,7 +386,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             if (!running) return@execute
             val config = configuration ?: return@execute
             logger.warning("[VPN] Restarting stack after $summary")
-            noteRecentTunnelInterruption(summary, LogLevel.WARNING)
             restartStack(config, ipv6DNSEnabled)
         }
     }
@@ -389,7 +399,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
     fun switchConfiguration(newConfig: ProxyConfiguration) {
         lwipExecutor.execute {
             logger.info("[VPN] Configuration switched; reconnecting active connections")
-            noteRecentTunnelInterruption("configuration switch", LogLevel.INFO)
             restartStack(newConfig, ipv6DNSEnabled)
         }
     }
@@ -537,20 +546,63 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
     private fun stopObservingSettings() {
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        settingsThrottler.reset()
+        routingThrottler.reset()
+        certificateThrottler.reset()
     }
 
-    // -- Tunnel-interruption attribution --
-    //
-    // Mirrors iOS LWIPStack.noteRecentTunnelInterruption / recentTunnelInterruptionContext.
-    // Records a recent tunnel-level interruption so connection errors that follow can be
-    // reclassified as VPN/path interruptions instead of generic socket failures. Used by
-    // LwipTcpConnection / LwipUdpFlow logTransportFailure paths to reduce log spam during
-    // network path flux.
+    /**
+     * Coalesces rapid bursts of signal notifications into at most one handler
+     * invocation per [intervalNanos], matching iOS `AWCore.postThrottled`
+     * (AWCore.swift throttleInterval = 1 s). Behaviour mirrors the Swift version:
+     * fire immediately if the interval has elapsed since the last fire, otherwise
+     * schedule a trailing-edge invocation so the most recent state always lands
+     * on the VPN service. A pending invocation is cancelled and replaced if a new
+     * signal arrives before it runs.
+     */
+    private class SignalThrottler(
+        private val scheduler: ScheduledExecutorService,
+        private val intervalNanos: Long,
+    ) {
+        private val lock = Any()
+        private var lastFireNanos: Long = Long.MIN_VALUE
+        private var pending: ScheduledFuture<*>? = null
+
+        fun submit(handler: () -> Unit) {
+            synchronized(lock) {
+                val now = System.nanoTime()
+                val elapsed = if (lastFireNanos == Long.MIN_VALUE) intervalNanos else now - lastFireNanos
+                pending?.cancel(false)
+                pending = null
+                if (elapsed >= intervalNanos) {
+                    lastFireNanos = now
+                    scheduler.execute { handler() }
+                } else {
+                    val delay = intervalNanos - elapsed
+                    pending = scheduler.schedule({
+                        synchronized(lock) {
+                            lastFireNanos = System.nanoTime()
+                            pending = null
+                        }
+                        handler()
+                    }, delay, TimeUnit.NANOSECONDS)
+                }
+            }
+        }
+
+        fun reset() {
+            synchronized(lock) {
+                pending?.cancel(false)
+                pending = null
+                lastFireNanos = Long.MIN_VALUE
+            }
+        }
+    }
 
     /**
      * Tunnel-event severity matching iOS `LWIPStack.LogLevel` exactly:
-     * INFO / WARNING / ERROR only. Used by `noteRecentTunnelInterruption`
-     * and `logTransportFailure` to classify follow-up errors.
+     * INFO / WARNING / ERROR only. Used by `logTransportFailure` to pick
+     * the log channel for a classified socket failure.
      *
      * Do not add a DEBUG case — the iOS [AnywhereLogger]'s `debug` channel
      * is intentionally separate from the user-facing buffer (see
@@ -558,39 +610,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
      * iOS `LWIPStack.LogLevel`.
      */
     enum class LogLevel { INFO, WARNING, ERROR }
-
-    data class RecentTunnelInterruption(
-        val timestampNanos: Long,
-        val level: LogLevel,
-        val summary: String
-    )
-
-    @Volatile
-    private var recentTunnelInterruption: RecentTunnelInterruption? = null
-    private val recentTunnelInterruptionWindowNanos: Long = TunnelConstants.recentTunnelInterruptionWindowNanos
-
-    fun noteRecentTunnelInterruption(summary: String, level: LogLevel) {
-        recentTunnelInterruption = RecentTunnelInterruption(
-            timestampNanos = System.nanoTime(),
-            level = level,
-            summary = summary
-        )
-    }
-
-    /** Returns the most recent tunnel interruption if it is still fresh enough
-     *  to explain follow-up socket failures. */
-    fun recentTunnelInterruptionContext(): RecentTunnelInterruption? {
-        val ctx = recentTunnelInterruption ?: return null
-        if (System.nanoTime() - ctx.timestampNanos > recentTunnelInterruptionWindowNanos) {
-            recentTunnelInterruption = null
-            return null
-        }
-        return ctx
-    }
-
-    fun clearRecentTunnelInterruption() {
-        recentTunnelInterruption = null
-    }
 
     // -- Log buffer note --
     //
@@ -648,7 +667,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             }
 
             logger.info("[VPN] Settings changed (bypass=${newBypass != 0}, ipv6dns=$newIpv6Dns, encryptedDns=$newEncryptedDnsEnabled); reconnecting active connections")
-            noteRecentTunnelInterruption("settings change", LogLevel.INFO)
             restartStack(config, newIpv6Dns)
         }
     }
@@ -658,7 +676,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             if (!running) return@execute
             val config = configuration ?: return@execute
             logger.info("[VPN] Routing changed; reconnecting active connections")
-            noteRecentTunnelInterruption("routing change", LogLevel.INFO)
             // Restart the stack: closes all connections using outdated proxy configurations,
             // rebuilds the FakeIPPool, and reloads DomainRouter rules from routing.json.
             // Matches iOS LWIPStack.handleRoutingChanged (LWIPStack+Lifecycle.swift:286).
@@ -681,7 +698,6 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             if (!running) return@execute
             val config = configuration ?: return@execute
             logger.info("[VPN] Certificate policy changed; reconnecting active connections")
-            noteRecentTunnelInterruption("certificate policy change", LogLevel.INFO)
             restartStack(config, ipv6DNSEnabled)
         }
     }
@@ -986,7 +1002,19 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         val domain = parsed.domain.lowercase()
         val qtype = parsed.qtype
 
-        // Block DDR when encrypted DNS is disabled
+        // Block DDR (Discovery of Designated Resolvers, RFC 9462) when encrypted DNS is
+        // disabled to prevent the system from auto-upgrading to DoH/DoT, which bypasses
+        // port-53 interception needed for fake-IP domain routing. Matches iOS
+        // LWIPStack+DNS.swift handleDNSQuery.
+        //
+        // Note on encrypted-DNS parity with iOS: iOS additionally declares the tunnel's
+        // DNS as DoH/DoT via NEDNSOverHTTPSSettings / NEDNSOverTLSSettings in
+        // PacketTunnelProvider.buildTunnelSettings. That is a NetworkExtension-only API;
+        // Android's VpnService has no counterpart, so there is nothing to declare. iOS
+        // itself does NOT perform userspace DoH/DoT resolution inside the tunnel
+        // (LWIPStack+DNS.swift goes straight to fake-IP for all A/AAAA queries, same as
+        // this handler), so skipping the OS-level declaration is the only functional
+        // difference — and it cannot be closed from a Kotlin VpnService.
         if (!encryptedDnsEnabled && domain == "_dns.resolver.arpa") {
             return sendNodata(payload, srcIp, srcPort, dstIp, dstPort, isIpv6, qtype, "DDR")
         }

@@ -536,10 +536,6 @@ class AnywhereVpnService : VpnService() {
                 when (intent.action) {
                     Intent.ACTION_SCREEN_OFF -> {
                         sleepTimestampMillis = System.currentTimeMillis()
-                        logger.warning("[VPN] Device going to sleep; active connections may pause")
-                        lwipStack?.noteRecentTunnelInterruption(
-                            "device sleep", LwipStack.LogLevel.WARNING
-                        )
                     }
                     Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> {
                         if (sleepTimestampMillis == 0L) return
@@ -576,21 +572,6 @@ class AnywhereVpnService : VpnService() {
         screenStateReceiver = null
         sleepTimestampMillis = 0L
         try { unregisterReceiver(r) } catch (_: Throwable) {}
-    }
-
-    /**
-     * Logs a low-memory event so a follow-up TCP/UDP failure can be
-     * attributed to memory pressure instead of network trouble. Mirrors
-     * iOS `didReceiveMemoryWarning`-style hooks.
-     */
-    override fun onTrimMemory(level: Int) {
-        super.onTrimMemory(level)
-        if (level >= TRIM_MEMORY_RUNNING_LOW) {
-            logger.warning("[VPN] Memory pressure level=$level")
-            lwipStack?.noteRecentTunnelInterruption(
-                "memory pressure", LwipStack.LogLevel.WARNING
-            )
-        }
     }
 
     /**

@@ -81,3 +81,15 @@
 -dontwarn javax.crypto.KEM$Decapsulator
 -dontwarn javax.crypto.KEM$Encapsulator
 -dontwarn javax.crypto.KEM$Encapsulated
+
+# ============================================================================
+# ML Kit barcode scanner. The AAR ships consumer ProGuard rules, but the
+# Play-Services variant loads internal GMS classes by reflected name at
+# runtime. Explicit keeps defend against the scanner crashing with
+# `NoClassDefFoundError` / `ClassNotFoundException` on release builds.
+# ============================================================================
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_** { *; }
+-keep class com.google.android.gms.vision.** { *; }
+-dontwarn com.google.mlkit.**
+-dontwarn com.google.android.gms.internal.mlkit_**

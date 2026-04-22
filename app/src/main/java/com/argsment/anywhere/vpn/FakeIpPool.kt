@@ -1,5 +1,9 @@
 package com.argsment.anywhere.vpn
 
+import com.argsment.anywhere.vpn.util.AnywhereLogger
+
+private val logger = AnywhereLogger("FakeIPPool")
+
 /**
  * Manages a pool of synthetic ("fake") IP addresses mapped to domain names.
  *
@@ -187,7 +191,13 @@ class FakeIpPool {
     }
 
     private fun evictLru(): Int {
-        val tail = lruTail ?: error("evictLru called on empty list")
+        // Should never happen — pool is full so the LRU list cannot be
+        // empty. Fall back to offset 1 rather than crashing. Mirrors iOS
+        // `FakeIPPool.evictLRU`.
+        val tail = lruTail ?: run {
+            logger.debug("[FakeIPPool] evictLru called on empty list, falling back to offset 1")
+            return 1
+        }
         val offset = tail.offset
         removeNode(tail)
         offsetToNode.remove(offset)

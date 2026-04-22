@@ -44,12 +44,24 @@ object TransportErrorLogger {
     /**
      * Matches strerror outputs for errors that only occur after the peer
      * has already dropped — secondary to an earlier RST/EOF, no new
-     * information.
+     * information. Mirrors iOS `TransportErrorLogger` `EPIPE` demotion to
+     * `.cascade`.
      */
     private fun isPeerGoneCascade(description: String): Boolean =
-        description == "Broken pipe" ||
-        description.contains("Broken pipe", ignoreCase = true) ||
-        description.contains("Connection reset by peer", ignoreCase = true)
+        description == "Broken pipe"
+
+    /**
+     * Matches strerror outputs for a peer-initiated RST — normal
+     * termination from the remote's side, not a failure of ours. Mirrors
+     * iOS `TransportErrorLogger` `ECONNRESET` demotion to `.reset` so
+     * peer resets stay visible in the log viewer but out of the error
+     * stream. iOS uses `SocketError.posixErrno == ECONNRESET`; Android
+     * matches against the localized description the kernel surfaces
+     * through `ErrnoException` / `IOException`.
+     */
+    private fun isPeerReset(description: String): Boolean =
+        description == "Connection reset by peer" ||
+            description == "Connection reset"
 
     // -- lwIP Error Codes --
 
@@ -89,13 +101,12 @@ object TransportErrorLogger {
      * 1. [Http2Error] is downgraded to `debug` — GOAWAY / stream reset
      *    is normal churn in a long-lived h2 tunnel and doesn't indicate
      *    a user-visible problem.
-     * 2. "Broken pipe" / "Connection reset by peer" on send is demoted —
-     *    by definition a cascade behind an earlier receive error or RST.
-     *    Logging it would double-report.
-     * 3. If a recent tunnel interruption is in the attribution window,
-     *    the failure is logged at the interruption's level and clearly
-     *    attributes cause ("after device sleep", "after network path
-     *    change", …).
+     * 2. "Broken pipe" on send is demoted to `debug` — by definition a
+     *    cascade behind an earlier receive error or RST. Logging it
+     *    would double-report.
+     * 3. "Connection reset by peer" is demoted to `info` — expected
+     *    termination from the remote's side, not our failure. Matches
+     *    iOS `ECONNRESET` → `.reset` demotion.
      * 4. Otherwise the failure logs at [defaultLevel].
      */
     fun log(
@@ -118,13 +129,8 @@ object TransportErrorLogger {
             return
         }
 
-        val interruption = LwipStack.instance?.recentTunnelInterruptionContext()
-        if (interruption != null) {
-            if (interruption.level == LwipStack.LogLevel.INFO) {
-                logger.debug("$prefix $operation ended after ${interruption.summary}: $endpoint: $errorDescription")
-            } else {
-                logger.warning("$prefix $operation interrupted after ${interruption.summary}: $endpoint ($errorDescription)")
-            }
+        if (isPeerReset(errorDescription)) {
+            logger.info("$prefix $operation failed: $endpoint: $errorDescription")
             return
         }
 

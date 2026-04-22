@@ -376,13 +376,10 @@ class LwipTcpConnection(
      */
     fun handleError(err: Int) {
         val reason = TransportErrorLogger.describeLwIPError(err)
-        val interruption = LwipStack.instance?.recentTunnelInterruptionContext()
-        when {
-            err == -15 ->  // ERR_CLSD — orderly close, not a failure
+        when (err) {
+            -15 ->  // ERR_CLSD — orderly close, not a failure
                 logger.debug("[TCP] lwIP closed connection: $endpointDescription: $reason")
-            interruption != null ->
-                logger.warning("[TCP] lwIP aborted after ${interruption.summary}: $endpointDescription: $reason")
-            err == -14 ->  // ERR_RST — always local-app-initiated in TUN mode
+            -14 ->  // ERR_RST — always local-app-initiated in TUN mode
                 logger.debug("[TCP] lwIP peer reset: $endpointDescription: $reason")
             else ->
                 logger.warning("[TCP] lwIP aborted connection: $endpointDescription: $reason")

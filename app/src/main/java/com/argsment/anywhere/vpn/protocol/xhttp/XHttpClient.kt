@@ -56,7 +56,7 @@ class TransportClosures(
 // =============================================================================
 
 /**
- * XHTTP connection implementing both packet-up and stream-one modes.
+ * XHTTP connection implementing packet-up, stream-up, and stream-one modes.
  *
  * Uses the same transport abstraction as [com.argsment.anywhere.vpn.protocol.websocket.WebSocketConnection]
  * and [com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection].

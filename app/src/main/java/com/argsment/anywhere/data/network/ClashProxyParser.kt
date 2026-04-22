@@ -61,6 +61,7 @@ object ClashProxyParser {
         val proxyType = node.optString("type")
         if (proxyType == "ss") return parseShadowsocksProxy(node)
         if (proxyType == "socks5" || proxyType == "socks") return parseSocks5Proxy(node)
+        if (proxyType == "trojan") return parseTrojanProxy(node)
         if (proxyType != "vless") return null
 
         val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
@@ -282,6 +283,61 @@ object ClashProxyParser {
             outboundProtocol = OutboundProtocol.SHADOWSOCKS,
             ssPassword = password,
             ssMethod = cipher
+        )
+    }
+
+    /**
+     * Parses a Clash `type: trojan` node into a TROJAN outbound. Mirrors iOS
+     * `ClashProxyParser.parseTrojanProxy`: Reality, ECH, gRPC, the Trojan-Go
+     * SS layer, and any transport other than bare TCP cause the node to be
+     * skipped rather than silently downgraded to a different wire format.
+     */
+    private fun parseTrojanProxy(node: JSONObject): ProxyConfiguration? {
+        val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
+        val server = node.optString("server").takeIf { it.isNotEmpty() } ?: return null
+        val password = node.optString("password").takeIf { it.isNotEmpty() } ?: return null
+
+        val portInt = node.optInt("port", -1)
+        if (portInt <= 0 || portInt > UShort.MAX_VALUE.toInt()) return null
+        val port = portInt.toUShort()
+
+        val network = node.optString("network", "tcp")
+        if (network != "tcp") return null
+
+        if (node.optJSONObject("reality-opts") != null) return null
+        if (node.optJSONObject("ech-opts") != null) return null
+        if (node.optJSONObject("grpc-opts") != null) return null
+        node.optJSONObject("ss-opts")?.let {
+            if (it.optBoolean("enabled", false)) return null
+        }
+
+        val sni = node.optString("servername", "").takeIf { it.isNotEmpty() }
+            ?: node.optString("sni", "").takeIf { it.isNotEmpty() }
+            ?: server
+        val alpn = node.optJSONArray("alpn")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }
+        }?.takeIf { it.isNotEmpty() }
+        val clientFP = node.optString("client-fingerprint", "").takeIf { it.isNotEmpty() }
+        val fingerprint = TlsFingerprint.fromRaw(mapFingerprint(clientFP))
+
+        val tls = TlsConfiguration(
+            serverName = sni,
+            alpn = alpn,
+            fingerprint = fingerprint
+        )
+
+        return ProxyConfiguration(
+            name = name,
+            serverAddress = server,
+            serverPort = port,
+            uuid = UUID.randomUUID(), // placeholder, not used for Trojan
+            encryption = "none",
+            transport = "tcp",
+            security = "tls",
+            tls = tls,
+            outboundProtocol = OutboundProtocol.TROJAN,
+            trojanPassword = password,
+            trojanTls = tls
         )
     }
 

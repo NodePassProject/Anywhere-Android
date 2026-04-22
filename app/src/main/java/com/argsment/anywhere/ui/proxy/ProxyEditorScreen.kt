@@ -124,10 +124,15 @@ fun ProxyEditorScreen(
     var hysteriaPassword by remember { mutableStateOf("") }
     var hysteriaUploadMbpsText by remember { mutableStateOf(HysteriaUploadMbpsDefault.toString()) }
 
+    // Trojan fields (TLS knobs reuse the VLESS tlsSNI/tlsALPN/fingerprint state,
+    // matching iOS ProxyEditorView).
+    var trojanPassword by remember { mutableStateOf("") }
+
     val isShadowsocks = selectedProtocol == OutboundProtocol.SHADOWSOCKS
     val isSocks5 = selectedProtocol == OutboundProtocol.SOCKS5
     val isNaive = selectedProtocol.isNaive
     val isHysteria = selectedProtocol == OutboundProtocol.HYSTERIA
+    val isTrojan = selectedProtocol == OutboundProtocol.TROJAN
     val isReality = security == "reality"
     val isTLS = security == "tls"
 
@@ -141,6 +146,7 @@ fun ProxyEditorScreen(
                 isHysteria -> hysteriaPassword.isNotEmpty() &&
                         (hysteriaUploadMbpsText.toIntOrNull()
                             ?.let { it in HysteriaUploadMbpsRange } == true)
+                isTrojan -> trojanPassword.isNotEmpty()
                 else -> runCatching { UUID.fromString(uuid) }.isSuccess &&
                         (!isReality || (sni.isNotEmpty() && publicKey.isNotEmpty()))
             }
@@ -195,6 +201,14 @@ fun ProxyEditorScreen(
             hysteriaPassword = config.hysteriaPassword ?: ""
             hysteriaUploadMbpsText =
                 (config.hysteriaUploadMbps ?: HysteriaUploadMbpsDefault).toString()
+            // Trojan state mirrors iOS: the password lives on trojanPassword and
+            // the TLS knobs reuse the shared tlsSNI/tlsALPN/fingerprint state.
+            trojanPassword = config.trojanPassword ?: ""
+            config.trojanTls?.let {
+                tlsSNI = it.serverName
+                tlsALPN = it.alpn?.joinToString(",") ?: ""
+                fingerprint = it.fingerprint
+            }
         }
     }
 
@@ -216,7 +230,7 @@ fun ProxyEditorScreen(
                     IconButton(onClick = {
                         val port = serverPort.toUShortOrNull() ?: return@IconButton
                         val needsUuid =
-                            !(isShadowsocks || isNaive || isSocks5 || isHysteria)
+                            !(isShadowsocks || isNaive || isSocks5 || isHysteria || isTrojan)
                         val parsedUUID = if (!needsUuid) {
                             configuration?.uuid ?: UUID.randomUUID()
                         } else {
@@ -245,8 +259,22 @@ fun ProxyEditorScreen(
                             tlsConfiguration = configuration?.tls
                         }
 
+                        // Trojan: TLS is mandatory. Build from the shared tlsSNI/
+                        // tlsALPN/fingerprint state (matching iOS ProxyEditorView).
+                        var trojanTlsConfiguration: TlsConfiguration? = null
+                        if (isTrojan) {
+                            val resolvedSni = tlsSNI.ifEmpty { serverAddress }
+                            val alpn = tlsALPN.takeIf { it.isNotEmpty() }?.split(",")
+                            trojanTlsConfiguration = TlsConfiguration(
+                                serverName = resolvedSni,
+                                alpn = alpn,
+                                fingerprint = fingerprint
+                            )
+                            tlsConfiguration = trojanTlsConfiguration
+                        }
+
                         var realityConfiguration: RealityConfiguration? = null
-                        if (isReality && !isNaive && !isShadowsocks && !isSocks5 && !isHysteria) {
+                        if (isReality && !isNaive && !isShadowsocks && !isSocks5 && !isHysteria && !isTrojan) {
                             val pk = publicKey.base64UrlToByteArrayOrNull() ?: return@IconButton
                             val sid = shortId.hexToByteArrayOrNull() ?: byteArrayOf()
                             realityConfiguration = RealityConfiguration(
@@ -258,19 +286,19 @@ fun ProxyEditorScreen(
                         }
 
                         var wsConfiguration: WebSocketConfiguration? = null
-                        if (transport == "ws" && !isNaive && !isSocks5 && !isHysteria) {
+                        if (transport == "ws" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
                             val host = wsHost.ifEmpty { serverAddress }
                             wsConfiguration = WebSocketConfiguration(host = host, path = wsPath)
                         }
 
                         var httpUpgradeConfiguration: HttpUpgradeConfiguration? = null
-                        if (transport == "httpupgrade" && !isNaive && !isSocks5 && !isHysteria) {
+                        if (transport == "httpupgrade" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
                             val host = httpUpgradeHost.ifEmpty { serverAddress }
                             httpUpgradeConfiguration = HttpUpgradeConfiguration(host = host, path = httpUpgradePath)
                         }
 
                         var xhttpConfiguration: XHttpConfiguration? = null
-                        if (transport == "xhttp" && !isNaive && !isSocks5 && !isHysteria) {
+                        if (transport == "xhttp" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
                             val host = xhttpHost.ifEmpty { serverAddress }
                             val mode = XHttpMode.fromRaw(xhttpMode)
                             xhttpConfiguration = XHttpConfiguration.fromExtraJson(
@@ -294,23 +322,29 @@ fun ProxyEditorScreen(
                             )
                         } else null
 
+                        val nonVless = isShadowsocks || isNaive || isSocks5 || isHysteria || isTrojan
+
                         val config = ProxyConfiguration(
                             id = configuration?.id ?: UUID.randomUUID(),
                             name = name,
                             serverAddress = bareAddress,
                             serverPort = port,
                             uuid = parsedUUID,
-                            encryption = if (isShadowsocks || isNaive || isSocks5 || isHysteria) "none" else encryption,
-                            transport = if (isNaive || isSocks5 || isHysteria) "tcp" else transport,
-                            flow = if (isShadowsocks || isNaive || isSocks5 || isHysteria) null else flow.ifEmpty { null },
-                            security = if (isNaive || isHysteria) "none" else security,
+                            encryption = if (nonVless) "none" else encryption,
+                            transport = if (isNaive || isSocks5 || isHysteria || isTrojan) "tcp" else transport,
+                            flow = if (nonVless) null else flow.ifEmpty { null },
+                            security = when {
+                                isNaive || isHysteria -> "none"
+                                isTrojan -> "tls"
+                                else -> security
+                            },
                             tls = tlsConfiguration,
                             reality = realityConfiguration,
                             websocket = wsConfiguration,
                             httpUpgrade = httpUpgradeConfiguration,
                             xhttp = xhttpConfiguration,
-                            muxEnabled = if (isShadowsocks || isNaive || isSocks5 || isHysteria) false else muxEnabled,
-                            xudpEnabled = if (isShadowsocks || isNaive || isSocks5 || isHysteria) false else xudpEnabled,
+                            muxEnabled = if (nonVless) false else muxEnabled,
+                            xudpEnabled = if (nonVless) false else xudpEnabled,
                             subscriptionId = configuration?.subscriptionId,
                             outboundProtocol = selectedProtocol,
                             ssPassword = if (isShadowsocks) ssPassword else null,
@@ -322,6 +356,8 @@ fun ProxyEditorScreen(
                             naiveProtocol = naiveProto,
                             hysteriaPassword = if (isHysteria) hysteriaPassword else null,
                             hysteriaUploadMbps = hysteriaMbps,
+                            trojanPassword = if (isTrojan) trojanPassword else null,
+                            trojanTls = if (isTrojan) trojanTlsConfiguration else null,
                             // Preserve the original testseed — matches iOS which reads
                             // self.configuration?.testseed rather than resetting to default.
                             testseed = configuration?.testseed ?: listOf(900u, 500u, 900u, 256u)
@@ -360,6 +396,7 @@ fun ProxyEditorScreen(
                 options = listOf(
                     OutboundProtocol.VLESS.name to "VLESS",
                     OutboundProtocol.HYSTERIA.name to "Hysteria",
+                    OutboundProtocol.TROJAN.name to "Trojan",
                     OutboundProtocol.SHADOWSOCKS.name to "Shadowsocks",
                     OutboundProtocol.SOCKS5.name to "SOCKS5",
                     OutboundProtocol.NAIVE_HTTP11.name to "HTTPS",
@@ -368,10 +405,11 @@ fun ProxyEditorScreen(
                 ),
                 onSelect = { value ->
                     selectedProtocol = OutboundProtocol.valueOf(value)
-                    if (isShadowsocks || isSocks5 || isHysteria || selectedProtocol.isNaive) {
+                    if (isShadowsocks || isSocks5 || isHysteria || isTrojan || selectedProtocol.isNaive) {
                         flow = ""
                         if (security == "reality") security = "none"
                     }
+                    if (isTrojan) security = "tls"
                 }
             )
 
@@ -472,6 +510,17 @@ fun ProxyEditorScreen(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                 )
+            } else if (isTrojan) {
+                // Matches iOS ProxyEditorView: Trojan exposes only a password;
+                // TLS SNI/ALPN/fingerprint live in the shared TLS section below.
+                OutlinedTextField(
+                    value = trojanPassword,
+                    onValueChange = { trojanPassword = it },
+                    label = { Text(stringResource(R.string.password)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation()
+                )
             } else {
                 // VLESS fields
                 OutlinedTextField(
@@ -489,9 +538,12 @@ fun ProxyEditorScreen(
                 )
             }
 
-            // Transport section (not for Naive, SOCKS5, or Hysteria — Hysteria
-            // always runs over QUIC with no user-selectable transport.)
-            if (!isNaive && !isSocks5 && !isHysteria) {
+            // Transport section: only VLESS exposes a user-selectable transport
+            // (matches iOS `if isVLESS { Section("Transport") }`). Trojan
+            // mandates TCP+TLS, Hysteria runs over QUIC, Naive/SOCKS5/Shadowsocks
+            // have no transport knob on iOS either.
+            val isVless = selectedProtocol == OutboundProtocol.VLESS
+            if (isVless) {
                 SectionHeader(stringResource(R.string.transport))
                 DropdownField(
                     label = stringResource(R.string.transport),
@@ -612,25 +664,30 @@ fun ProxyEditorScreen(
             // for the user to configure here.)
             if (!isNaive && !isSocks5 && !isHysteria) {
                 SectionHeader("TLS")
-                DropdownField(
-                    label = stringResource(R.string.security),
-                    selectedValue = security,
-                    options = if (isShadowsocks) {
-                        listOf(
-                            "none" to stringResource(R.string.none),
-                            "tls" to "TLS"
-                        )
-                    } else {
-                        listOf(
-                            "none" to stringResource(R.string.none),
-                            "tls" to "TLS",
-                            "reality" to "Reality"
-                        )
-                    },
-                    onSelect = { security = it }
-                )
+                // For Trojan the TLS layer is mandatory: don't show the
+                // none/TLS/Reality picker, just render the TLS fields
+                // directly (matches iOS ProxyEditorView).
+                if (!isTrojan) {
+                    DropdownField(
+                        label = stringResource(R.string.security),
+                        selectedValue = security,
+                        options = if (isShadowsocks) {
+                            listOf(
+                                "none" to stringResource(R.string.none),
+                                "tls" to "TLS"
+                            )
+                        } else {
+                            listOf(
+                                "none" to stringResource(R.string.none),
+                                "tls" to "TLS",
+                                "reality" to "Reality"
+                            )
+                        },
+                        onSelect = { security = it }
+                    )
+                }
 
-                if (isTLS) {
+                if (isTLS || isTrojan) {
                     OutlinedTextField(
                         value = tlsSNI,
                         onValueChange = { tlsSNI = it },
@@ -646,39 +703,43 @@ fun ProxyEditorScreen(
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
-                    SwitchRow(
-                        label = stringResource(R.string.allow_insecure),
-                        checked = tlsAllowInsecure,
-                        onCheckedChange = { tlsAllowInsecure = it }
-                    )
+                    if (!isTrojan) {
+                        SwitchRow(
+                            label = stringResource(R.string.allow_insecure),
+                            checked = tlsAllowInsecure,
+                            onCheckedChange = { tlsAllowInsecure = it }
+                        )
+                    }
                     FingerprintDropdown(
                         selected = fingerprint,
                         onSelect = { fingerprint = it }
                     )
-                    DropdownField(
-                        label = "Min Version",
-                        selectedValue = tlsMinVersion?.name ?: "ANY",
-                        options = listOf(
-                            "ANY" to "Any",
-                            TlsVersion.TLS12.name to "TLS 1.2",
-                            TlsVersion.TLS13.name to "TLS 1.3"
-                        ),
-                        onSelect = { value ->
-                            tlsMinVersion = if (value == "ANY") null else TlsVersion.valueOf(value)
-                        }
-                    )
-                    DropdownField(
-                        label = "Max Version",
-                        selectedValue = tlsMaxVersion?.name ?: "ANY",
-                        options = listOf(
-                            "ANY" to "Any",
-                            TlsVersion.TLS12.name to "TLS 1.2",
-                            TlsVersion.TLS13.name to "TLS 1.3"
-                        ),
-                        onSelect = { value ->
-                            tlsMaxVersion = if (value == "ANY") null else TlsVersion.valueOf(value)
-                        }
-                    )
+                    if (!isTrojan) {
+                        DropdownField(
+                            label = "Min Version",
+                            selectedValue = tlsMinVersion?.name ?: "ANY",
+                            options = listOf(
+                                "ANY" to "Any",
+                                TlsVersion.TLS12.name to "TLS 1.2",
+                                TlsVersion.TLS13.name to "TLS 1.3"
+                            ),
+                            onSelect = { value ->
+                                tlsMinVersion = if (value == "ANY") null else TlsVersion.valueOf(value)
+                            }
+                        )
+                        DropdownField(
+                            label = "Max Version",
+                            selectedValue = tlsMaxVersion?.name ?: "ANY",
+                            options = listOf(
+                                "ANY" to "Any",
+                                TlsVersion.TLS12.name to "TLS 1.2",
+                                TlsVersion.TLS13.name to "TLS 1.3"
+                            ),
+                            onSelect = { value ->
+                                tlsMaxVersion = if (value == "ANY") null else TlsVersion.valueOf(value)
+                            }
+                        )
+                    }
                 }
 
                 if (isReality) {

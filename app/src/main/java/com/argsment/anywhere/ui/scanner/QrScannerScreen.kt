@@ -8,6 +8,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -47,6 +49,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.argsment.anywhere.R
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
@@ -159,13 +162,30 @@ private fun CameraPreview(
     onQrCodeDetected: (String) -> Unit
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    // Use the hosting Activity's lifecycle (not the enclosing Dialog's
+    // sub-lifecycle). Inside a Compose `Dialog`, `LocalLifecycleOwner`
+    // resolves to a short-lived dialog-scoped owner whose state churns
+    // during the CAMERA permission prompt (RESUMED → STARTED → CREATED
+    // → STARTED → RESUMED). CameraX's `bindToLifecycle` can race that
+    // transition and throw `IllegalArgumentException: Trying to create
+    // use case with a LifecycleOwner that is in DESTROYED state`.
+    // The Activity's lifecycle is stable for the duration of the scan.
+    val lifecycleOwner = (context as? androidx.lifecycle.LifecycleOwner)
+        ?: androidx.lifecycle.compose.LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
     val hasDetected = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     val disposed = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
 
     val previewView = remember { PreviewView(context) }
-    val barcodeScanner = remember { BarcodeScanning.getClient() }
+    // Narrow the scanner to QR codes only — cuts ML Kit model surface,
+    // speeds up first-scan initialization, and avoids matching the
+    // protocol QR against irrelevant formats like PDF417 or Aztec.
+    val barcodeScanner = remember {
+        val options = BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .build()
+        BarcodeScanning.getClient(options)
+    }
     val cameraProviderFutureRef = remember {
         androidx.compose.runtime.mutableStateOf<com.google.common.util.concurrent.ListenableFuture<ProcessCameraProvider>?>(null)
     }
@@ -201,8 +221,17 @@ private fun CameraPreview(
                 it.surfaceProvider = previewView.surfaceProvider
             }
 
+            val resolutionSelector = ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(1280, 720),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                    )
+                )
+                .build()
+
             val imageAnalysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(1280, 720))
+                .setResolutionSelector(resolutionSelector)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
                 .also { analysis ->
@@ -216,16 +245,39 @@ private fun CameraPreview(
                             imageProxy.close()
                             return@analyzerLoop
                         }
-                        val inputImage = InputImage.fromMediaImage(
-                            mediaImage,
-                            imageProxy.imageInfo.rotationDegrees
-                        )
-                        barcodeScanner.process(inputImage)
+                        // Anything that throws between here and the
+                        // `process()` call would leak the `ImageProxy`
+                        // and stall CameraX (the pipeline waits for the
+                        // frame to close). A hardware-specific rotation
+                        // value or a malformed YUV plane can make
+                        // `InputImage.fromMediaImage` throw; guard it.
+                        val inputImage = try {
+                            InputImage.fromMediaImage(
+                                mediaImage,
+                                imageProxy.imageInfo.rotationDegrees
+                            )
+                        } catch (e: Exception) {
+                            logger.debug("InputImage.fromMediaImage failed: ${e.message}")
+                            imageProxy.close()
+                            return@analyzerLoop
+                        }
+                        val task = try {
+                            barcodeScanner.process(inputImage)
+                        } catch (e: Exception) {
+                            // `process()` synchronously throws when the
+                            // scanner has already been closed (dispose
+                            // racing the analyzer thread).
+                            logger.debug("Barcode process rejected: ${e.message}")
+                            imageProxy.close()
+                            return@analyzerLoop
+                        }
+                        task
                             .addOnSuccessListener { barcodes ->
                                 if (disposed.get()) return@addOnSuccessListener
                                 for (barcode in barcodes) {
                                     if (barcode.valueType == Barcode.TYPE_TEXT ||
-                                        barcode.valueType == Barcode.TYPE_URL) {
+                                        barcode.valueType == Barcode.TYPE_URL ||
+                                        barcode.valueType == Barcode.TYPE_UNKNOWN) {
                                         val value = barcode.rawValue
                                         if (value != null && hasDetected.compareAndSet(false, true)) {
                                             onQrCodeDetected(value)

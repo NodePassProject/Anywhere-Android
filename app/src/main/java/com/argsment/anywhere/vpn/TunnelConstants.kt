@@ -83,9 +83,6 @@ object TunnelConstants {
     /** Maximum number of log entries in the buffer. */
     const val logMaxEntries: Int = 50
 
-    /** Time window to attribute connection errors to a recent tunnel interruption. */
-    const val recentTunnelInterruptionWindowNanos: Long = 8_000_000_000L
-
     // -- Timer Intervals --
 
     /** lwIP periodic timeout interval (milliseconds). */
@@ -113,6 +110,13 @@ object TunnelConstants {
      * back-to-back (e.g., user toggling a setting while Wi-Fi is handing off).
      */
     const val restartThrottleNanos: Long = 2_000_000_000L
+
+    /**
+     * Minimum interval between prefs-observer signal handler invocations (nanoseconds).
+     * 1s matches iOS `AWCore.throttleInterval` so coalesced tunnel-settings, routing,
+     * and certificate-policy signals land on the VPN service at the same cadence.
+     */
+    const val settingsThrottleNanos: Long = 1_000_000_000L
 
     // -- TLS Sniffer --
 
