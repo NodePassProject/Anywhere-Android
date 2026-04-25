@@ -12,6 +12,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Shield
@@ -89,6 +90,7 @@ private fun AdvancedSettingsRoot(
     onOpenLogs: () -> Unit
 ) {
     var experimentalEnabled by remember { mutableStateOf(viewModel.experimentalEnabled) }
+    var remnawaveHWIDEnabled by remember { mutableStateOf(viewModel.remnawaveHWIDEnabled) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -131,6 +133,20 @@ private fun AdvancedSettingsRoot(
                 iconTint = Color(0xFF607D8B),
                 label = stringResource(R.string.logs),
                 onClick = onOpenLogs
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            SectionHeader(stringResource(R.string.other))
+            SettingsSwitch(
+                icon = Icons.Filled.Fingerprint,
+                iconTint = Color(0xFF795548),
+                label = stringResource(R.string.remnawave_hwid),
+                checked = remnawaveHWIDEnabled,
+                onCheckedChange = {
+                    remnawaveHWIDEnabled = it
+                    viewModel.remnawaveHWIDEnabled = it
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))

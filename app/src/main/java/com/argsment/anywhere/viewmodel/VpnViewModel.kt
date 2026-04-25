@@ -815,6 +815,29 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         set(value) = prefs.edit().putBoolean("experimentalEnabled", value).apply()
 
     /**
+     * Toggle for Remnawave-panel subscriptions that require an `x-hwid` header keyed
+     * to this install. Mirrors iOS `AWCore.getRemnawaveHWIDEnabled()`. Off by default
+     * so the identifier is never sent unless the user opts in.
+     */
+    var remnawaveHWIDEnabled: Boolean
+        get() = prefs.getBoolean("remnawaveHWIDEnabled", false)
+        set(value) = prefs.edit().putBoolean("remnawaveHWIDEnabled", value).apply()
+
+    /**
+     * Persistent per-install identifier used as the `x-hwid` header value for
+     * Remnawave subscriptions. Mirrors iOS `AWCore.getIdentifier()`, which generates
+     * a UUID on first read and reuses it thereafter. Stored in the same shared
+     * preferences file as other app settings.
+     */
+    val deviceIdentifier: String
+        get() {
+            prefs.getString("identifier", null)?.let { return it }
+            val generated = java.util.UUID.randomUUID().toString()
+            prefs.edit().putString("identifier", generated).apply()
+            return generated
+        }
+
+    /**
      * Fires the Android-side equivalent of iOS's `certificatePolicyChanged` Darwin
      * notification. LwipStack observes this key and tears down active connections.
      */

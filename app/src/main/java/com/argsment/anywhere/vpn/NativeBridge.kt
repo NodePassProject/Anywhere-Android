@@ -20,6 +20,23 @@ object NativeBridge {
     interface LwipCallback {
         fun onOutput(packet: ByteArray, length: Int, isIpv6: Boolean)
         fun onTcpAccept(srcIp: ByteArray, srcPort: Int, dstIp: ByteArray, dstPort: Int, isIpv6: Boolean, pcb: Long): Long
+
+        /**
+         * Pre-accept hook fired in tcp_listen_input before SYN-ACK is enqueued.
+         * Implementations must fill [outResult]:
+         *   outResult[0] = decision: 0 (ALLOW) / 1 (DEFER) / 2 (REJECT)
+         *   outResult[1] = connId (only meaningful when decision is ALLOW or DEFER)
+         *
+         * Mirrors iOS [lwip_tcp_pre_accept_fn]; see lwip/ANYWHERE_PATCHES.md
+         * "deferred SYN-ACK".
+         */
+        fun onTcpPreAccept(
+            srcIp: ByteArray, srcPort: Int,
+            dstIp: ByteArray, dstPort: Int,
+            isIpv6: Boolean, pcb: Long,
+            outResult: LongArray
+        )
+
         fun onTcpRecv(connId: Long, data: ByteArray?)
         fun onTcpSent(connId: Long, length: Int)
         fun onTcpErr(connId: Long, err: Int)
@@ -38,6 +55,25 @@ object NativeBridge {
     @JvmStatic
     fun onTcpAccept(srcIp: ByteArray, srcPort: Int, dstIp: ByteArray, dstPort: Int, isIpv6: Boolean, pcb: Long): Long {
         return callback?.onTcpAccept(srcIp, srcPort, dstIp, dstPort, isIpv6, pcb) ?: 0L
+    }
+
+    @JvmStatic
+    fun onTcpPreAccept(
+        srcIp: ByteArray, srcPort: Int,
+        dstIp: ByteArray, dstPort: Int,
+        isIpv6: Boolean, pcb: Long,
+        outResult: LongArray
+    ) {
+        // JNI pre-fills outResult with REJECT defaults; only the callback
+        // can override. If no callback is registered, fall through to the
+        // legacy late-accept path (decision = ALLOW, conn = NULL — C-side
+        // converts the missing conn to REJECT).
+        val cb = callback ?: run {
+            outResult[0] = 0L  // ALLOW (legacy path picks up via onTcpAccept)
+            outResult[1] = 0L
+            return
+        }
+        cb.onTcpPreAccept(srcIp, srcPort, dstIp, dstPort, isIpv6, pcb, outResult)
     }
 
     @JvmStatic
@@ -76,6 +112,14 @@ object NativeBridge {
     @JvmStatic
     external fun nativeTimerPoll()
 
+    /**
+     * Abort every active TCP PCB without tearing down the netif or
+     * listeners. Used on device wake / underlying-network change to
+     * invalidate outbound proxy sockets the kernel killed during sleep.
+     */
+    @JvmStatic
+    external fun nativeAbortAllTcp()
+
     /** Shut down the lwIP stack and clean up. */
     @JvmStatic
     external fun nativeShutdown()
@@ -107,6 +151,26 @@ object NativeBridge {
     /** Get available send buffer space for a TCP connection. */
     @JvmStatic
     external fun nativeTcpSndbuf(pcb: Long): Int
+
+    /** Get the number of segments queued on a TCP connection. */
+    @JvmStatic
+    external fun nativeTcpSndQueuelen(pcb: Long): Int
+
+    /**
+     * Release a deferred SYN-ACK after the upstream dial has succeeded.
+     * Must be called on the lwIP executor thread before any tcp_write.
+     * See lwip/ANYWHERE_PATCHES.md "deferred SYN-ACK".
+     */
+    @JvmStatic
+    external fun nativeTcpCompleteAccept(pcb: Long)
+
+    /**
+     * Abandon a deferred PCB with RST after the upstream dial has failed.
+     * The local app sees ECONNREFUSED on connect(2). Must be called on
+     * the lwIP executor thread.
+     */
+    @JvmStatic
+    external fun nativeTcpRejectAccept(pcb: Long)
 
     // =========================================================================
     // lwIP — UDP Operations

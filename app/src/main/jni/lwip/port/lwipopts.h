@@ -77,9 +77,18 @@
 #define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 8))
 #define TCP_MAXRTX                      8
 #define TCP_SYNMAXRTX                   3
+/* Backstop timeout for SYN_RCVD PCBs whose SYN-ACK we deferred while dialing
+ * upstream. Must exceed TunnelConstants.handshakeTimeoutMs (60 s) so the
+ * Kotlin handshake timer fires first and tears the connection down through
+ * our own path; otherwise lwIP's tcp_slowtmr would purge the PCB with
+ * ERR_ABRT and fire tcp_err out from under an in-flight dial. See
+ * ANYWHERE_PATCHES.md "deferred SYN-ACK". */
+#define TCP_SYN_RCVD_TIMEOUT            75000 /* ms */
 #define LWIP_TCP_TIMESTAMPS             0
-#define LWIP_TCP_SACK_OUT               1
-#define LWIP_TCP_MAX_SACK_NUM           8
+/* SACK output is dead code on the in-memory TUN flow — the Android kernel
+ * peer never reorders or drops packets, so cumulative ACKs are always
+ * sufficient. Disabled to match iOS. */
+#define LWIP_TCP_SACK_OUT               0
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(32U * (mss)))
 
 #define TCP_LISTEN_BACKLOG              0

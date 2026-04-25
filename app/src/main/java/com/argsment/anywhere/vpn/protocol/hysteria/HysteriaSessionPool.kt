@@ -71,4 +71,18 @@ object HysteriaSessionPool {
         }
         return session
     }
+
+    /** Cancels every cached session and clears the pool. Called on stack
+     *  shutdown / restart / device wake — the underlying QUIC sockets the
+     *  kernel kept open are stale once we're invalidating outbound state. */
+    fun closeAll() {
+        val snapshot = synchronized(lock) {
+            val copy = sessions.values.toList()
+            sessions.clear()
+            copy
+        }
+        for (session in snapshot) {
+            try { session.close() } catch (_: Throwable) {}
+        }
+    }
 }

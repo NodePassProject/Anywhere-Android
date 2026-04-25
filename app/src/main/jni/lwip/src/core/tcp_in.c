@@ -731,6 +731,43 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     }
 #endif
 
+    /* --- BEGIN Anywhere Patch: deferred SYN-ACK for outbound dial gating ---
+     *
+     * Hand the new SYN_RCVD PCB to the bridge before we send SYN-ACK so the
+     * Kotlin side can decide whether to:
+     *   0 (ALLOW)  — proceed with the normal SYN-ACK now (legacy / sniff path)
+     *   1 (DEFER)  — hold; lwip_bridge_tcp_complete_accept(npcb) will be called
+     *                later when the upstream dial succeeds, or
+     *                lwip_bridge_tcp_reject_accept(npcb) on failure
+     *   2 (REJECT) — abandon now with RST (used for routing rule rejects)
+     *
+     * Without this hook, every accepted TUN connection completes the inner
+     * 3-way handshake before we know whether upstream is reachable. Subsequent
+     * upstream connect failures then surface to the local app as a mid-stream
+     * RST, which TLS/HTTP clients interpret as transient and retry against —
+     * defeating routing rules and amplifying log noise (see speedtest case).
+     * Deferring SYN-ACK lets a connect failure surface as a proper SYN-time
+     * RST, which is delivered as ECONNREFUSED to the local app's connect(2).
+     */
+    {
+      extern int lwip_bridge_handle_pre_accept(struct tcp_pcb *npcb);
+      int decision = lwip_bridge_handle_pre_accept(npcb);
+      if (decision == 2) {
+        /* REJECT: send RST in response to the SYN, free PCB. */
+        tcp_abandon(npcb, 1);
+        return;
+      }
+      if (decision == 1) {
+        /* DEFER: skip SYN-ACK. PCB stays in SYN_RCVD with empty queues.
+         * Bridge code is responsible for eventually calling
+         * lwip_bridge_tcp_complete_accept or lwip_bridge_tcp_reject_accept.
+         * lwIP's tcp_slowtmr enforces TCP_SYN_RCVD_TIMEOUT as a backstop. */
+        return;
+      }
+      /* decision == 0 (ALLOW): fall through to the normal SYN-ACK below. */
+    }
+    /* --- END Anywhere Patch --- */
+
     /* Send a SYN|ACK together with the MSS option. */
     rc = tcp_enqueue_flags(npcb, TCP_SYN | TCP_ACK);
     if (rc != ERR_OK) {

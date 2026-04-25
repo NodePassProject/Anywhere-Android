@@ -45,7 +45,9 @@ import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.data.model.Subscription
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.data.network.SubscriptionDomainHelper
 import com.argsment.anywhere.data.network.SubscriptionFetcher
+import com.argsment.anywhere.viewmodel.VpnViewModel
 import kotlinx.coroutines.launch
 import java.net.URL
 
@@ -64,6 +66,7 @@ private enum class LinkType(val titleResId: Int) {
 
 @Composable
 fun AddProxyScreen(
+    viewModel: VpnViewModel,
     onDismiss: () -> Unit,
     onShowManualAdd: () -> Unit,
     onImport: (ProxyConfiguration) -> Unit,
@@ -81,6 +84,8 @@ fun AddProxyScreen(
     var showLinkError by remember { mutableStateOf(false) }
     var linkErrorMessage by remember { mutableStateOf("") }
     var showQrScanner by remember { mutableStateOf(false) }
+    var showRemnawaveHWIDAlert by remember { mutableStateOf(false) }
+    var pendingSubscriptionURL by remember { mutableStateOf("") }
 
     val isContinueDisabled = when (selectedMethod) {
         ImportMethod.LINK -> linkURL.isBlank() || isLoading
@@ -98,6 +103,33 @@ fun AddProxyScreen(
             if (clip != null && (ProxyConfiguration.canParseUrl(clip) || clip.startsWith("http://"))) {
                 linkURL = clip
             }
+        }
+    }
+
+    fun fetchSubscription(url: String, withRemnawaveHWID: Boolean) {
+        isLoading = true
+        scope.launch {
+            try {
+                val hwid = if (withRemnawaveHWID) viewModel.deviceIdentifier else null
+                val result = SubscriptionFetcher.fetch(url, remnawaveHWID = hwid)
+                val name = result.name
+                    ?: runCatching { URL(url).host }.getOrNull()
+                    ?: context.getString(R.string.subscription)
+                val subscription = Subscription(
+                    name = name,
+                    url = url,
+                    lastUpdate = System.currentTimeMillis(),
+                    upload = result.upload,
+                    download = result.download,
+                    total = result.total,
+                    expire = result.expire
+                )
+                onSubscriptionImport(result.configurations, subscription)
+            } catch (e: Exception) {
+                linkErrorMessage = e.message ?: context.getString(R.string.import_failed)
+                showLinkError = true
+            }
+            isLoading = false
         }
     }
 
@@ -131,29 +163,15 @@ fun AddProxyScreen(
                 showLinkError = true
             }
         } else {
-            isLoading = true
-            scope.launch {
-                try {
-                    val result = SubscriptionFetcher.fetch(trimmed)
-                    val name = result.name
-                        ?: runCatching { URL(trimmed).host }.getOrNull()
-                        ?: context.getString(R.string.subscription)
-                    val subscription = Subscription(
-                        name = name,
-                        url = trimmed,
-                        lastUpdate = System.currentTimeMillis(),
-                        upload = result.upload,
-                        download = result.download,
-                        total = result.total,
-                        expire = result.expire
-                    )
-                    onSubscriptionImport(result.configurations, subscription)
-                } catch (e: Exception) {
-                    linkErrorMessage = e.message ?: context.getString(R.string.import_failed)
-                    showLinkError = true
-                }
-                isLoading = false
+            // Treat as subscription URL. Some panels require the HWID header to
+            // release configs — prompt the user to enable it first if needed.
+            val requiresRemnawaveHWID = SubscriptionDomainHelper.shouldRequireRemnawaveHWID(trimmed)
+            if (requiresRemnawaveHWID && !viewModel.remnawaveHWIDEnabled) {
+                pendingSubscriptionURL = trimmed
+                showRemnawaveHWIDAlert = true
+                return
             }
+            fetchSubscription(trimmed, withRemnawaveHWID = requiresRemnawaveHWID)
         }
     }
 
@@ -302,6 +320,29 @@ fun AddProxyScreen(
             confirmButton = {
                 TextButton(onClick = { showLinkError = false }) {
                     Text(stringResource(R.string.ok))
+                }
+            }
+        )
+    }
+
+    // Remnawave HWID opt-in prompt — mirrors iOS AddProxyView's alert for
+    // subscription URLs that require a device-bound `x-hwid` header.
+    if (showRemnawaveHWIDAlert) {
+        AlertDialog(
+            onDismissRequest = { showRemnawaveHWIDAlert = false },
+            title = { Text(stringResource(R.string.remnawave_hwid)) },
+            text = { Text(stringResource(R.string.remnawave_hwid_prompt)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRemnawaveHWIDAlert = false
+                    fetchSubscription(pendingSubscriptionURL, withRemnawaveHWID = true)
+                }) {
+                    Text(stringResource(R.string.enable))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRemnawaveHWIDAlert = false }) {
+                    Text(stringResource(R.string.cancel))
                 }
             }
         )

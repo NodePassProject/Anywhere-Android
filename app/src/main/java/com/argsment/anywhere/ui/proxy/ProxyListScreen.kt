@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.Subscription
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.data.network.SubscriptionDomainHelper
 import com.argsment.anywhere.ui.components.ProxyCardContent
 import com.argsment.anywhere.viewmodel.VpnViewModel
 import kotlinx.coroutines.launch
@@ -174,6 +175,10 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                 // Subscription groups
                 subscribedGroups.forEach { (subscription, configs) ->
                     val isCollapsed = collapsedSubscriptions.contains(subscription.id)
+                    // Locked subscriptions (managed panels) hide the edit/delete
+                    // menu entries — users should re-subscribe rather than edit
+                    // individual proxies. Mirrors iOS `SubscriptionDomainHelper`.
+                    val editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(subscription.url)
                     item(key = "header_${subscription.id}") {
                         SubscriptionHeader(
                             subscription = subscription,
@@ -211,6 +216,7 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                                 configuration = config,
                                 isSelected = config.id == selectedConfigId,
                                 latency = latencyResults[config.id],
+                                editingDisabled = editingDisabled,
                                 onSelect = { viewModel.setSelectedConfiguration(config) },
                                 onEdit = { configurationToEdit = config },
                                 onDelete = { viewModel.deleteConfiguration(config) },
@@ -233,6 +239,7 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ) {
             AddProxyScreen(
+                viewModel = viewModel,
                 initialLink = deepLinkPrefill,
                 onDismiss = {
                     showingAddSheet = false
@@ -438,7 +445,8 @@ private fun ConfigurationRow(
     onSelect: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    onTestLatency: () -> Unit
+    onTestLatency: () -> Unit,
+    editingDisabled: Boolean = false
 ) {
     val context = LocalContext.current
     var showMenu by remember { mutableStateOf(false) }
@@ -480,22 +488,24 @@ private fun ConfigurationRow(
                     clipboard.setPrimaryClip(ClipData.newPlainText("proxy_url", configuration.toUrl()))
                 }
             )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.edit)) },
-                onClick = {
-                    showMenu = false
-                    onEdit()
-                },
-                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) }
-            )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error) },
-                onClick = {
-                    showMenu = false
-                    onDelete()
-                },
-                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) }
-            )
+            if (!editingDisabled) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.edit)) },
+                    onClick = {
+                        showMenu = false
+                        onEdit()
+                    },
+                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) }
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error) },
+                    onClick = {
+                        showMenu = false
+                        onDelete()
+                    },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) }
+                )
+            }
         }
     }
 }

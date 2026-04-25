@@ -13,6 +13,9 @@ import com.argsment.anywhere.data.model.XHttpMode
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.TunneledTransport
+import com.argsment.anywhere.vpn.protocol.grpc.GrpcClient
+import com.argsment.anywhere.vpn.protocol.grpc.GrpcConfiguration
+import com.argsment.anywhere.vpn.protocol.grpc.GrpcConnection
 import com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection
 import com.argsment.anywhere.vpn.protocol.reality.RealityClient
 import com.argsment.anywhere.vpn.protocol.tls.TlsClient
@@ -49,6 +52,7 @@ class VlessClient(
     private var webSocketConnection: WebSocketConnection? = null
     private var httpUpgradeConnection: HttpUpgradeConnection? = null
     private var xhttpConnection: XHttpConnection? = null
+    private var grpcConnection: GrpcConnection? = null
 
     companion object {
         /** Retry configuration matching Xray-core: ExponentialBackoff(5, 200) */
@@ -131,6 +135,8 @@ class VlessClient(
 
     /** Cleans up resources from a failed retry attempt before the next one. */
     private fun cleanupRetryResources() {
+        grpcConnection?.cancel()
+        grpcConnection = null
         xhttpConnection?.cancel()
         xhttpConnection = null
         httpUpgradeConnection?.cancel()
@@ -154,6 +160,8 @@ class VlessClient(
      * Cancels the connection and releases all resources.
      */
     fun cancel() {
+        grpcConnection?.cancel()
+        grpcConnection = null
         xhttpConnection?.cancel()
         xhttpConnection = null
         httpUpgradeConnection?.cancel()
@@ -242,6 +250,14 @@ class VlessClient(
                     throw ProxyError.ProtocolError("Vision flow is not supported over XHTTP transport")
                 }
                 connectWithXHttp(command, destinationHost, destinationPort, initialData)
+            }
+
+            "grpc" -> {
+                // Vision over gRPC is not supported
+                if (isVisionFlow) {
+                    throw ProxyError.ProtocolError("Vision flow is not supported over gRPC transport")
+                }
+                connectWithGrpc(command, destinationHost, destinationPort, initialData)
             }
 
             else -> {
@@ -1309,5 +1325,224 @@ class VlessClient(
         val uuidBytes = VlessProtocol.uuidToBytes(configuration.uuid)
         val testseed = configuration.testseed.map { it.toInt() }.toIntArray()
         return VlessVisionConnection(connection, uuidBytes, testseed)
+    }
+
+    // =========================================================================
+    // gRPC Connection
+    // =========================================================================
+
+    /**
+     * Connects to the VLESS server using gRPC transport (bidirectional HTTP/2 stream).
+     *
+     * Mirrors iOS `ProxyClient.connectWithGRPC`. Routes through Reality, TLS, or plain
+     * TCP based on the configuration; when TLS is used, ALPN is forced to `h2`.
+     */
+    private suspend fun connectWithGrpc(
+        command: VlessCommand,
+        destinationHost: String,
+        destinationPort: Int,
+        initialData: ByteArray?
+    ): VlessConnection {
+        val grpcConfig = configuration.grpc
+            ?: throw ProxyError.ConnectionFailed("gRPC transport specified but no gRPC configuration")
+
+        val authority = GrpcClient.resolveAuthority(grpcConfig, configuration)
+
+        return when {
+            configuration.reality != null -> connectGrpcRealityWithRetry(
+                configuration.reality, grpcConfig, authority,
+                command, destinationHost, destinationPort, initialData
+            )
+
+            configuration.tls != null -> connectGrpcsWithRetry(
+                configuration.tls, grpcConfig, authority,
+                command, destinationHost, destinationPort, initialData
+            )
+
+            else -> connectGrpcPlainWithRetry(
+                grpcConfig, authority,
+                command, destinationHost, destinationPort, initialData
+            )
+        }
+    }
+
+    // -- Plain gRPC (TCP -> gRPC -> VLESS) --
+
+    private suspend fun connectGrpcPlainWithRetry(
+        grpcConfig: GrpcConfiguration,
+        authority: String,
+        command: VlessCommand,
+        destinationHost: String,
+        destinationPort: Int,
+        initialData: ByteArray?
+    ): VlessConnection {
+        var lastError: Exception? = null
+
+        for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
+            if (attempt > 0) {
+                cleanupRetryResources()
+                delay(RETRY_BASE_DELAY_MS * attempt)
+            }
+
+            try {
+                val grpcConn = if (tunnel != null) {
+                    GrpcConnection(requireTunnelTransport(), grpcConfig, authority)
+                } else {
+                    val socket = NioSocket()
+                    this.connection = socket
+                    socket.connect(configuration.serverAddress, configuration.serverPort.toInt())
+                    GrpcConnection(socket, grpcConfig, authority)
+                }
+                this.grpcConnection = grpcConn
+
+                grpcConn.performSetup()
+
+                return performGrpcHandshake(
+                    grpcConn, command, destinationHost, destinationPort, initialData
+                )
+            } catch (e: Exception) {
+                logger.debug("gRPC attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
+                lastError = e
+            }
+        }
+
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
+    }
+
+    // -- gRPC over TLS (TCP -> TLS h2 -> gRPC -> VLESS) --
+
+    private suspend fun connectGrpcsWithRetry(
+        baseTlsConfig: TlsConfiguration,
+        grpcConfig: GrpcConfiguration,
+        authority: String,
+        command: VlessCommand,
+        destinationHost: String,
+        destinationPort: Int,
+        initialData: ByteArray?
+    ): VlessConnection {
+        var lastError: Exception? = null
+
+        for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
+            if (attempt > 0) {
+                cleanupRetryResources()
+                delay(RETRY_BASE_DELAY_MS * attempt)
+            }
+
+            try {
+                // gRPC requires HTTP/2 — force ALPN to h2 (matches iOS sanitizedGRPCTLSConfiguration).
+                val tlsConfig = GrpcClient.sanitizedTlsConfiguration(baseTlsConfig)
+                val tlsClient = TlsClient(tlsConfig)
+                val tlsConn = if (tunnel != null) {
+                    tlsClient.connect(requireTunnelTransport())
+                } else {
+                    tlsClient.connect(configuration.serverAddress, configuration.serverPort.toInt())
+                }
+                this.tlsClient = tlsClient
+                this.tlsConnection = tlsConn
+
+                val grpcConn = GrpcConnection(tlsConn, grpcConfig, authority)
+                this.grpcConnection = grpcConn
+
+                grpcConn.performSetup()
+
+                return performGrpcHandshake(
+                    grpcConn, command, destinationHost, destinationPort, initialData
+                )
+            } catch (e: Exception) {
+                logger.debug("gRPC+TLS attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
+                lastError = e
+            }
+        }
+
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
+    }
+
+    // -- gRPC over Reality (TCP -> Reality -> gRPC -> VLESS) --
+
+    private suspend fun connectGrpcRealityWithRetry(
+        realityConfig: RealityConfiguration,
+        grpcConfig: GrpcConfiguration,
+        authority: String,
+        command: VlessCommand,
+        destinationHost: String,
+        destinationPort: Int,
+        initialData: ByteArray?
+    ): VlessConnection {
+        var lastError: Exception? = null
+
+        for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
+            if (tunnel != null && attempt > 0) break
+            if (attempt > 0) {
+                cleanupRetryResources()
+                delay(RETRY_BASE_DELAY_MS * attempt)
+            }
+
+            try {
+                // Reality handles its own ALPN internally (matches iOS).
+                val realityClientLocal = RealityClient(realityConfig)
+                val realityConn = if (tunnel != null) {
+                    realityClientLocal.connect(requireTunnelTransport())
+                } else {
+                    realityClientLocal.connect(
+                        configuration.serverAddress, configuration.serverPort.toInt()
+                    )
+                }
+                this.realityClient = realityClientLocal
+                this.realityConnection = realityConn
+
+                val grpcConn = GrpcConnection(realityConn, grpcConfig, authority)
+                this.grpcConnection = grpcConn
+
+                grpcConn.performSetup()
+
+                return performGrpcHandshake(
+                    grpcConn, command, destinationHost, destinationPort, initialData
+                )
+            } catch (e: Exception) {
+                logger.debug("gRPC+Reality attempt ${attempt + 1}/$MAX_RETRY_ATTEMPTS failed: ${e.message}")
+                if (e is TlsError.CertificateValidationFailed) throw e
+                lastError = e
+            }
+        }
+
+        throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
+    }
+
+    // -- gRPC VLESS Handshake --
+
+    /**
+     * Performs the VLESS handshake over an established gRPC bidirectional stream.
+     * Vision is rejected before reaching here (gRPC is HTTP/2-framed, not a clean TLS stream).
+     */
+    private suspend fun performGrpcHandshake(
+        grpcConn: GrpcConnection,
+        command: VlessCommand,
+        destinationHost: String,
+        destinationPort: Int,
+        initialData: ByteArray?
+    ): VlessConnection {
+        var requestData = VlessProtocol.encodeRequestHeader(
+            uuid = configuration.uuid,
+            command = command,
+            destinationAddress = destinationHost,
+            destinationPort = destinationPort,
+            flow = null  // Vision is rejected before reaching here
+        )
+
+        if (initialData != null) {
+            requestData = requestData + initialData
+        }
+
+        grpcConn.send(requestData)
+
+        return if (command == VlessCommand.UDP) {
+            VlessGrpcUdpConnection(grpcConn)
+        } else {
+            VlessGrpcConnection(grpcConn)
+        }
     }
 }

@@ -34,8 +34,21 @@ class LwipTcpConnection(
     configuration: ProxyConfiguration,
     forceBypass: Boolean,
     sniffSNI: Boolean,
+    deferredAccept: Boolean = false,
     private val lwipExecutor: ScheduledExecutorService
 ) {
+    /**
+     * True when the inner SYN-ACK was held back in `tcp_listen_input`
+     * (see lwip/ANYWHERE_PATCHES.md "deferred SYN-ACK"). The first
+     * successful upstream connect must call
+     * [NativeBridge.nativeTcpCompleteAccept] to release it; a connect
+     * failure must call [NativeBridge.nativeTcpRejectAccept]. Flips to
+     * false once the SYN-ACK has been emitted, after which behavior
+     * matches the legacy ALLOW path (failures abort the live PCB).
+     * Mirrors iOS `LWIPTCPConnection.deferredAccept`.
+     */
+    private var deferredAccept: Boolean = deferredAccept
+
     /**
      * Destination the proxy will be asked to connect to. Initialized from
      * the tcp_accept signal and may be replaced with the SNI hostname
@@ -376,11 +389,17 @@ class LwipTcpConnection(
      */
     fun handleError(err: Int) {
         val reason = TransportErrorLogger.describeLwIPError(err)
-        when (err) {
-            -15 ->  // ERR_CLSD — orderly close, not a failure
+        when {
+            err == -15 ->  // ERR_CLSD — orderly close, not a failure
                 logger.debug("[TCP] lwIP closed connection: $endpointDescription: $reason")
-            -14 ->  // ERR_RST — always local-app-initiated in TUN mode
+            err == -14 ->  // ERR_RST — always local-app-initiated in TUN mode
                 logger.debug("[TCP] lwIP peer reset: $endpointDescription: $reason")
+            err == -13 && LwipStack.instance?.isTearingDown == true ->
+                // ERR_ABRT during a deliberate stack teardown
+                // (shutdown/restart/wake). Outside teardown, ERR_ABRT
+                // indicates lwIP's own pressure aborts (tcp_kill_prio /
+                // tcp_kill_timewait) — those stay at warning below.
+                logger.debug("[TCP] lwIP aborted connection (tunnel teardown): $endpointDescription: $reason")
             else ->
                 logger.warning("[TCP] lwIP aborted connection: $endpointDescription: $reason")
         }
@@ -440,6 +459,7 @@ class LwipTcpConnection(
                 directConnecting = false
                 if (closed) return@execute
 
+                emitDeferredSynAck()
                 handshakeTimer?.cancel(false)
                 handshakeTimer = null
                 activityTimer = ActivityTimer(lwipExecutor, TunnelConstants.connectionIdleTimeoutMs) {
@@ -540,6 +560,7 @@ class LwipTcpConnection(
             }
 
             vlessConnection = connection
+            emitDeferredSynAck()
             handshakeTimer?.cancel(false)
             handshakeTimer = null
             activityTimer = ActivityTimer(lwipExecutor, TunnelConstants.connectionIdleTimeoutMs) {
@@ -910,10 +931,31 @@ class LwipTcpConnection(
         close()
     }
 
+    /**
+     * Releases the SYN-ACK we held back in `tcp_listen_input`. No-op in
+     * the legacy ALLOW path (where [deferredAccept] was never set). Must
+     * be called on the lwIP executor before any tcp_write so lwIP enqueues
+     * SYN-ACK ahead of the first data segment. Mirrors iOS
+     * `LWIPTCPConnection.emitDeferredSynAck`.
+     */
+    private fun emitDeferredSynAck() {
+        if (!deferredAccept || closed) return
+        deferredAccept = false
+        NativeBridge.nativeTcpCompleteAccept(pcb)
+    }
+
     fun abort() {
         if (closed) return
         closed = true
-        NativeBridge.nativeTcpAbort(pcb)
+        if (deferredAccept) {
+            // SYN-ACK was never emitted — answer the held SYN with a RST
+            // so the local app's connect(2) sees ECONNREFUSED instead of
+            // a mid-stream reset.
+            deferredAccept = false
+            NativeBridge.nativeTcpRejectAccept(pcb)
+        } else {
+            NativeBridge.nativeTcpAbort(pcb)
+        }
         releaseProtocol()
         LwipStack.instance?.removeConnection(connId)
     }

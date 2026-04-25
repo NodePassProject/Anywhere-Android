@@ -20,19 +20,21 @@ static os_log_t s_log = NULL;
  *  Registered callbacks (set by Swift)
  * ======================================================================== */
 
-static lwip_output_fn     s_output_fn     = NULL;
-static lwip_tcp_accept_fn s_tcp_accept_fn = NULL;
-static lwip_tcp_recv_fn   s_tcp_recv_fn   = NULL;
-static lwip_tcp_sent_fn   s_tcp_sent_fn   = NULL;
-static lwip_tcp_err_fn    s_tcp_err_fn    = NULL;
-static lwip_udp_recv_fn   s_udp_recv_fn   = NULL;
+static lwip_output_fn         s_output_fn         = NULL;
+static lwip_tcp_accept_fn     s_tcp_accept_fn     = NULL;
+static lwip_tcp_pre_accept_fn s_tcp_pre_accept_fn = NULL;
+static lwip_tcp_recv_fn       s_tcp_recv_fn       = NULL;
+static lwip_tcp_sent_fn       s_tcp_sent_fn       = NULL;
+static lwip_tcp_err_fn        s_tcp_err_fn        = NULL;
+static lwip_udp_recv_fn       s_udp_recv_fn       = NULL;
 
-void lwip_bridge_set_output_fn(lwip_output_fn fn)     { s_output_fn = fn; }
-void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn) { s_tcp_accept_fn = fn; }
-void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn)   { s_tcp_recv_fn = fn; }
-void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn)   { s_tcp_sent_fn = fn; }
-void lwip_bridge_set_tcp_err_fn(lwip_tcp_err_fn fn)     { s_tcp_err_fn = fn; }
-void lwip_bridge_set_udp_recv_fn(lwip_udp_recv_fn fn)   { s_udp_recv_fn = fn; }
+void lwip_bridge_set_output_fn(lwip_output_fn fn)             { s_output_fn = fn; }
+void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn)     { s_tcp_accept_fn = fn; }
+void lwip_bridge_set_tcp_pre_accept_fn(lwip_tcp_pre_accept_fn fn) { s_tcp_pre_accept_fn = fn; }
+void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn)         { s_tcp_recv_fn = fn; }
+void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn)         { s_tcp_sent_fn = fn; }
+void lwip_bridge_set_tcp_err_fn(lwip_tcp_err_fn fn)           { s_tcp_err_fn = fn; }
+void lwip_bridge_set_udp_recv_fn(lwip_udp_recv_fn fn)         { s_udp_recv_fn = fn; }
 
 /* ========================================================================
  *  Network interface
@@ -125,10 +127,69 @@ static err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t 
 static err_t tcp_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len);
 static void  tcp_err_cb(void *arg, err_t err);
 
+/* Wire callbacks + Nagle on a fresh PCB. Shared between the pre-accept hook
+ * (which fires in tcp_listen_input) and the legacy late tcp_accept_cb path. */
+static void bind_pcb_to_conn(struct tcp_pcb *npcb, void *conn) {
+    tcp_arg(npcb, conn);
+    tcp_recv(npcb, tcp_recv_cb);
+    tcp_sent(npcb, tcp_sent_cb);
+    tcp_err(npcb, tcp_err_cb);
+
+    /* The lwIP ↔ local-app leg rides over TUN with no real loss or congestion.
+     * Nagle coalescing only adds latency for small writes (HTTP/2 frames,
+     * WebSocket pings, interactive SSH). Upload coalescing already happens in
+     * LwipTcpConnection before handing bytes to lwIP. */
+    tcp_nagle_disable(npcb);
+}
+
+/* Called from the patched tcp_listen_input (see ANYWHERE_PATCHES.md
+ * "deferred SYN-ACK"). Returns one of {0=ALLOW, 1=DEFER, 2=REJECT}. */
+int lwip_bridge_handle_pre_accept(struct tcp_pcb *npcb) {
+    if (!npcb) return 2;
+
+    /* No pre-accept handler registered: fall back to legacy ALLOW so the
+     * existing late tcp_accept_cb takes over. */
+    if (!s_tcp_pre_accept_fn) return 0;
+
+    uint8_t src_bytes[16], dst_bytes[16];
+    int is_ipv6 = 0;
+    ip_addr_to_bytes(&npcb->remote_ip, src_bytes, &is_ipv6);
+    ip_addr_to_bytes(&npcb->local_ip,  dst_bytes, &is_ipv6);
+
+    int   decision = 2;        /* default to REJECT if Kotlin forgets to set */
+    void *conn     = NULL;
+    s_tcp_pre_accept_fn(src_bytes, npcb->remote_port,
+                        dst_bytes, npcb->local_port,
+                        is_ipv6, npcb, &decision, &conn);
+
+    if (decision == 0 || decision == 1) {
+        if (!conn) {
+            os_log_error(s_log,
+                "[Bridge] pre_accept returned %d but no conn; rejecting", decision);
+            return 2;
+        }
+        bind_pcb_to_conn(npcb, conn);
+    }
+    return decision;
+}
+
 static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
-    (void)arg; (void)err;
-    if (!s_tcp_accept_fn || !newpcb) {
-        os_log_error(s_log, "[Bridge] tcp_accept_cb: no accept fn or no pcb");
+    (void)err;
+    if (!newpcb) {
+        os_log_error(s_log, "[Bridge] tcp_accept_cb: no pcb");
+        return ERR_ABRT;
+    }
+
+    /* If a pre-accept handler already wired callbacks for this PCB, lwIP just
+     * needs ERR_OK to promote SYN_RCVD → ESTABLISHED. */
+    if (arg) {
+        return ERR_OK;
+    }
+
+    /* Legacy path: no pre-accept registered. Kotlin's tcp_accept_fn alone
+     * decides, after the inner 3-way handshake has already completed. */
+    if (!s_tcp_accept_fn) {
+        os_log_error(s_log, "[Bridge] tcp_accept_cb: no accept fn");
         return ERR_ABRT;
     }
 
@@ -141,16 +202,12 @@ static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
                                   dst_bytes, newpcb->local_port,
                                   is_ipv6, newpcb);
     if (!conn) {
-        os_log_error(s_log, "[Bridge] tcp_accept_cb: Swift returned NULL conn, aborting");
+        os_log_error(s_log, "[Bridge] tcp_accept_cb: Kotlin returned NULL conn, aborting");
         tcp_abort(newpcb);
         return ERR_ABRT;
     }
 
-    tcp_arg(newpcb, conn);
-    tcp_recv(newpcb, tcp_recv_cb);
-    tcp_sent(newpcb, tcp_sent_cb);
-    tcp_err(newpcb, tcp_err_cb);
-
+    bind_pcb_to_conn(newpcb, conn);
     return ERR_OK;
 }
 
@@ -340,25 +397,29 @@ void lwip_bridge_init(void) {
 
 }
 
-void lwip_bridge_shutdown(void) {
+void lwip_bridge_abort_all_tcp(void) {
     /* Abort all active TCP connections.
      * Keep callbacks intact so tcp_abort() fires the err callback, which
-     * notifies the Swift LWIPTCPConnection (sets closed=true, cancels VLESS,
-     * balances Unmanaged retain via takeRetainedValue in the callback).
+     * notifies the Kotlin LwipTcpConnection (sets closed=true, cancels the
+     * proxy connection, releases the JNI global ref in the callback).
      * tcp_abort() removes the PCB from tcp_active_pcbs, so we always grab
      * the new list head each iteration. */
     while (tcp_active_pcbs != NULL) {
         tcp_abort(tcp_active_pcbs);
     }
 
-    /* Clean up TIME_WAIT PCBs. These have no active Swift connection (the
-     * LWIPTCPConnection was already released during normal close), so we
+    /* Clean up TIME_WAIT PCBs. These have no active Kotlin connection (the
+     * LwipTcpConnection was already released during normal close), so we
      * just remove and free without firing callbacks. */
     while (tcp_tw_pcbs != NULL) {
         struct tcp_pcb *pcb = tcp_tw_pcbs;
         tcp_pcb_remove(&tcp_tw_pcbs, pcb);
         tcp_free(pcb);
     }
+}
+
+void lwip_bridge_shutdown(void) {
+    lwip_bridge_abort_all_tcp();
 
     if (tcp_listen_pcb_v4) { tcp_close(tcp_listen_pcb_v4); tcp_listen_pcb_v4 = NULL; }
     if (tcp_listen_pcb_v6) { tcp_close(tcp_listen_pcb_v6); tcp_listen_pcb_v6 = NULL; }
@@ -463,6 +524,44 @@ void lwip_bridge_tcp_abort(void *pcb) {
 
 int lwip_bridge_tcp_sndbuf(void *pcb) {
     return (int)tcp_sndbuf((struct tcp_pcb *)pcb);
+}
+
+int lwip_bridge_tcp_snd_queuelen(void *pcb) {
+    return (int)((struct tcp_pcb *)pcb)->snd_queuelen;
+}
+
+/* Deferred-accept completion: the Kotlin side dialed upstream, succeeded, and
+ * is now ready to talk. Enqueue the SYN-ACK we held back in tcp_listen_input
+ * and push it out. The PCB is still in SYN_RCVD here; it'll move to
+ * ESTABLISHED once the local app's ACK comes back through tcp_process. */
+void lwip_bridge_tcp_complete_accept(void *pcb) {
+    struct tcp_pcb *tpcb = (struct tcp_pcb *)pcb;
+    if (!tpcb) return;
+    err_t rc = tcp_enqueue_flags(tpcb, TCP_SYN | TCP_ACK);
+    if (rc != ERR_OK) {
+        os_log_error(s_log, "[Bridge] complete_accept: tcp_enqueue_flags err=%d", (int)rc);
+        /* Leave callbacks attached so tcp_abandon's TCP_EVENT_ERR fires our
+         * tcp_err_cb. Without this, the Kotlin LwipTcpConnection stays alive
+         * with a dangling pcb pointer — subsequent tcp_write on that pcb
+         * lands on a freed/reused PCB and reports tcp_write fatal. */
+        tcp_abandon(tpcb, 1);
+        return;
+    }
+    tcp_output(tpcb);
+}
+
+/* Deferred-accept rejection: upstream dial failed. Detach Kotlin callbacks
+ * (the LwipTcpConnection has already torn itself down) and abandon with RST.
+ * Because we never sent SYN-ACK, the local app's TCP is still in SYN_SENT,
+ * so the RST surfaces as ECONNREFUSED on connect(2). */
+void lwip_bridge_tcp_reject_accept(void *pcb) {
+    struct tcp_pcb *tpcb = (struct tcp_pcb *)pcb;
+    if (!tpcb) return;
+    tcp_arg(tpcb, NULL);
+    tcp_recv(tpcb, NULL);
+    tcp_sent(tpcb, NULL);
+    tcp_err(tpcb, NULL);
+    tcp_abandon(tpcb, 1);
 }
 
 /* ========================================================================

@@ -386,6 +386,7 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ) {
             AddProxyScreen(
+                viewModel = viewModel,
                 onDismiss = { showingAddSheet = false },
                 onShowManualAdd = {
                     showingAddSheet = false

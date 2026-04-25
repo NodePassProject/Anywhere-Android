@@ -134,6 +134,10 @@
     <string name="experimental">Experimental</string>
     <string name="experimental_features">Experimental Features</string>
     <string name="experimental_footer">Enables in-development features such as creating custom routing rule sets.</string>
+    <string name="other">Other</string>
+    <string name="remnawave_hwid">Remnawave HWID</string>
+    <string name="remnawave_hwid_prompt">Enable Remnawave HWID to continue.</string>
+    <string name="enable">Enable</string>
 
     <!-- Custom Rule Set -->
     <string name="custom">Custom</string>
@@ -185,6 +189,9 @@
     <string name="upload_mbps">Upload (Mbps)</string>
     <string name="username">Username</string>
     <string name="method">Method</string>
+    <string name="grpc_service_name">Service Name</string>
+    <string name="grpc_authority">Authority</string>
+    <string name="user_agent">User Agent</string>
 
     <!-- Phase 9: Proxy List -->
     <string name="copy_link">Copy Link</string>

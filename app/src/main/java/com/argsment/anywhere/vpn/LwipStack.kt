@@ -8,6 +8,7 @@ import com.argsment.anywhere.vpn.protocol.tls.CertificatePolicy
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import com.argsment.anywhere.vpn.protocol.hysteria.HysteriaSessionPool
 import com.argsment.anywhere.vpn.protocol.mux.MuxManager
 import kotlinx.coroutines.asCoroutineDispatcher
 import org.json.JSONArray
@@ -99,6 +100,17 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
 
     /** Mux manager for multiplexing UDP flows (created when Vision+Mux is active). */
     var muxManager: MuxManager? = null
+
+    /**
+     * True while a deliberate TCP teardown is in progress (stack shutdown,
+     * restart, or wake handling). Set around [NativeBridge.nativeAbortAllTcp]
+     * calls so [LwipTcpConnection.handleError] can demote the resulting
+     * ERR_ABRT flood to debug — while still surfacing lwIP's own internal
+     * aborts (e.g. tcp_kill_prio under PCB pool exhaustion) as warnings.
+     * Mirrors iOS `LWIPStack.isTearingDown`.
+     */
+    @Volatile
+    var isTearingDown: Boolean = false
 
     /** Active UDP flows keyed by 5-tuple string. */
     val udpFlows = ConcurrentHashMap<String, LwipUdpFlow>()
@@ -390,6 +402,60 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         }
     }
 
+    /**
+     * Invalidates outbound proxy state after the device wakes from sleep.
+     *
+     * The lwIP netif, listeners, timers, and routing state all survive
+     * suspension intact — they live in our own memory, not the kernel's.
+     * What the kernel does tear down is outbound sockets: the Vision mux's
+     * long-lived TCP, per-flow UDP proxy connections, and the transport
+     * sockets held by each [LwipTcpConnection]. Those are what this method
+     * invalidates, leaving the rest of the stack running so idle flows and
+     * the FakeIP pool are preserved.
+     *
+     * TCP flows are aborted via [NativeBridge.nativeAbortAllTcp] so each
+     * PCB's err callback releases its Kotlin side (which closes the
+     * now-dead proxy socket). The netif and listener PCBs stay up, so new
+     * client activity is served without waiting on a netif rebuild.
+     *
+     * Mirrors iOS `LWIPStack.handleWake()`.
+     */
+    fun handleWake() {
+        lwipExecutor.execute {
+            if (!running) return@execute
+            val config = configuration ?: return@execute
+            logger.info("[VPN] Device wake: invalidating outbound proxy state")
+
+            muxManager?.closeAll()
+            // Recreate MuxManager when Vision+Mux is active (VLESS only). Mirrors
+            // the gate in start()/restartStackNow().
+            muxManager = if (
+                config.outboundProtocol == com.argsment.anywhere.data.model.OutboundProtocol.VLESS &&
+                config.muxEnabled &&
+                (config.flow == "xtls-rprx-vision" || config.flow == "xtls-rprx-vision-udp443")
+            ) {
+                MuxManager(config, lwipExecutor.asCoroutineDispatcher())
+            } else {
+                null
+            }
+
+            HysteriaSessionPool.closeAll()
+            com.argsment.anywhere.vpn.protocol.naive.http3.Http3SessionPool.closeAll()
+
+            for (flow in udpFlows.values) {
+                flow.close()
+            }
+            udpFlows.clear()
+
+            isTearingDown = true
+            try {
+                NativeBridge.nativeAbortAllTcp()
+            } finally {
+                isTearingDown = false
+            }
+        }
+    }
+
     /** Switches to a new configuration, tearing down all active connections.
      *
      * Only restarts the lwIP stack — does NOT reapply tunnel network settings.
@@ -461,7 +527,12 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         // silently swallowing the error.  While proxy cleanup still happened via
         // releaseProtocol(), the FIN packets were never flushed to TUN before
         // the stack was torn down, leaving apps hanging on dead connections.
-        NativeBridge.nativeShutdown()
+        isTearingDown = true
+        try {
+            NativeBridge.nativeShutdown()
+        } finally {
+            isTearingDown = false
+        }
 
         // Clean up any connections that weren't in tcp_active_pcbs (e.g. still
         // connecting) and therefore didn't receive an error callback.
@@ -755,21 +826,32 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
         dstIp: ByteArray, dstPort: Int,
         isIpv6: Boolean, pcb: Long
     ): Long {
+        // Pre-accept handles all live connections; this legacy hook only
+        // fires when no pre-accept handler is registered. Returning 0 here
+        // signals C-side abort. Mirrors iOS — pre-accept is the canonical
+        // path; the late accept callback exists only as a safety net.
+        logger.debug("[LWIPStack] tcp_accept (legacy fallback) reached; aborting")
+        return 0L
+    }
+
+    override fun onTcpPreAccept(
+        srcIp: ByteArray, srcPort: Int,
+        dstIp: ByteArray, dstPort: Int,
+        isIpv6: Boolean, pcb: Long,
+        outResult: LongArray
+    ) {
+        // outResult is JNI-pre-filled to [REJECT, 0]; only overwrite on success.
         val defaultConfig = configuration ?: run {
-            logger.debug("[LWIPStack] tcp_accept: no configuration")
-            return 0L
+            logger.debug("[LWIPStack] tcp_pre_accept: no configuration")
+            return
         }
 
-        if (isIpv6 && !ipv6DNSEnabled) {
-            return 0L
-        }
+        if (isIpv6 && !ipv6DNSEnabled) return
 
         // Prevent lwIP resource exhaustion (TCP segment pool, heap) under
-        // heavy load.  Rejected connections get RST; the app retries and
-        // succeeds once older connections close.
-        if (tcpConnections.size >= MAX_TCP_CONNECTIONS) {
-            return 0L
-        }
+        // heavy load. Rejected connections get RST at SYN time; the app
+        // retries and succeeds once older connections close.
+        if (tcpConnections.size >= MAX_TCP_CONNECTIONS) return
 
         val dstIpString = NativeBridge.nativeIpToString(dstIp, isIpv6) ?: "?"
         var dstHost = dstIpString
@@ -789,7 +871,10 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
                     domainRouter.matchIP(dstIpString)?.let { action ->
                         when (action) {
                             RouteAction.Direct -> forceBypass = true
-                            RouteAction.Reject -> return 0L
+                            RouteAction.Reject -> {
+                                logger.debug("[TCP] IP rejected by routing rule: $dstIpString:$dstPort")
+                                return
+                            }
                             is RouteAction.Proxy -> {
                                 val resolved = domainRouter.resolveConfiguration(action)
                                 if (resolved != null) {
@@ -810,8 +895,14 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
                     inheritChain(defaultConfig, it)
                 } ?: defaultConfig
             }
-            FakeIpResolution.Drop, FakeIpResolution.Unreachable -> return 0L
+            FakeIpResolution.Drop, FakeIpResolution.Unreachable -> return
         }
+
+        // SNI sniff requires bytes from the local app, which means we must
+        // accept the inner handshake first. Everything else has a fully
+        // determined route — defer the SYN-ACK so a connect failure can
+        // surface as a clean ECONNREFUSED.
+        val deferAccept = !sniffSNI
 
         val connId = nextConnId.getAndIncrement()
         val connection = LwipTcpConnection(
@@ -822,10 +913,12 @@ class LwipStack(private val context: Context) : NativeBridge.LwipCallback {
             configuration = connectionConfig,
             forceBypass = forceBypass,
             sniffSNI = sniffSNI,
+            deferredAccept = deferAccept,
             lwipExecutor = lwipExecutor
         )
         tcpConnections[connId] = connection
-        return connId
+        outResult[0] = if (deferAccept) 1L else 0L  // 1=DEFER, 0=ALLOW
+        outResult[1] = connId
     }
 
     override fun onTcpRecv(connId: Long, data: ByteArray?) {

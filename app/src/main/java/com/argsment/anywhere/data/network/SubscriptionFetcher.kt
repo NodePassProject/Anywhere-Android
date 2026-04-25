@@ -34,7 +34,8 @@ object SubscriptionFetcher {
 
     suspend fun fetch(
         urlString: String,
-        allowInsecure: Boolean = CertificatePolicy.allowInsecure
+        allowInsecure: Boolean = CertificatePolicy.allowInsecure,
+        remnawaveHWID: String? = null
     ): Result = withContext(Dispatchers.IO) {
         val url = runCatching { URL(urlString) }.getOrNull()
             ?: throw FetchError.InvalidUrl()
@@ -42,6 +43,9 @@ object SubscriptionFetcher {
         val connection = url.openConnection() as HttpURLConnection
         try {
             connection.setRequestProperty("User-Agent", "Anywhere")
+            if (remnawaveHWID != null) {
+                connection.setRequestProperty("x-hwid", remnawaveHWID)
+            }
             connection.connectTimeout = 30_000
             connection.readTimeout = 30_000
 
@@ -130,13 +134,18 @@ object SubscriptionFetcher {
 
     private fun parseProfileTitle(connection: HttpURLConnection): String? {
         val value = connection.getHeaderField("profile-title") ?: return null
-        if (value.startsWith("base64:")) {
+        val decoded = if (value.startsWith("base64:")) {
             val encoded = value.removePrefix("base64:")
-            return runCatching {
+            runCatching {
                 String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
             }.getOrNull()
+        } else {
+            value
         }
-        return value
+        // Servers commonly send an empty `Profile-Title: base64:` for unnamed
+        // subscriptions. Treat blank results as missing so the call site falls
+        // back to the URL host instead of an empty string.
+        return decoded?.takeIf { it.isNotBlank() }
     }
 
     data class UserInfo(

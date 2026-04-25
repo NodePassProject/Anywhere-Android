@@ -89,6 +89,10 @@ fun ProxyEditorScreen(
     var xhttpPath by remember { mutableStateOf("/") }
     var xhttpMode by remember { mutableStateOf("auto") }
     var xhttpExtra by remember { mutableStateOf("") }
+    var grpcServiceName by remember { mutableStateOf("") }
+    var grpcAuthority by remember { mutableStateOf("") }
+    var grpcMultiMode by remember { mutableStateOf(false) }
+    var grpcUserAgent by remember { mutableStateOf("") }
 
     // TLS fields
     var tlsSNI by remember { mutableStateOf("") }
@@ -175,6 +179,12 @@ fun ProxyEditorScreen(
                 xhttpPath = it.path
                 xhttpMode = it.mode.raw
                 xhttpExtra = it.toExtraJson()
+            }
+            config.grpc?.let {
+                grpcServiceName = it.serviceName
+                grpcAuthority = it.authority
+                grpcMultiMode = it.multiMode
+                grpcUserAgent = it.userAgent
             }
             muxEnabled = config.muxEnabled
             xudpEnabled = config.xudpEnabled
@@ -306,6 +316,16 @@ fun ProxyEditorScreen(
                             )
                         }
 
+                        var grpcConfiguration: com.argsment.anywhere.vpn.protocol.grpc.GrpcConfiguration? = null
+                        if (transport == "grpc" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
+                            grpcConfiguration = com.argsment.anywhere.vpn.protocol.grpc.GrpcConfiguration(
+                                serviceName = grpcServiceName,
+                                authority = grpcAuthority,
+                                multiMode = grpcMultiMode,
+                                userAgent = grpcUserAgent
+                            )
+                        }
+
                         val bareAddress = if (serverAddress.startsWith("[") && serverAddress.endsWith("]"))
                             serverAddress.drop(1).dropLast(1) else serverAddress
 
@@ -343,6 +363,7 @@ fun ProxyEditorScreen(
                             websocket = wsConfiguration,
                             httpUpgrade = httpUpgradeConfiguration,
                             xhttp = xhttpConfiguration,
+                            grpc = grpcConfiguration,
                             muxEnabled = if (nonVless) false else muxEnabled,
                             xudpEnabled = if (nonVless) false else xudpEnabled,
                             subscriptionId = configuration?.subscriptionId,
@@ -552,7 +573,8 @@ fun ProxyEditorScreen(
                         "tcp" to "TCP",
                         "ws" to "WebSocket",
                         "httpupgrade" to "HTTPUpgrade",
-                        "xhttp" to "XHTTP"
+                        "xhttp" to "XHTTP",
+                        "grpc" to "gRPC"
                     ),
                     onSelect = {
                         transport = it
@@ -627,6 +649,39 @@ fun ProxyEditorScreen(
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 2,
                         maxLines = 6
+                    )
+                }
+
+                if (transport == "grpc") {
+                    OutlinedTextField(
+                        value = grpcServiceName,
+                        onValueChange = { grpcServiceName = it },
+                        label = { Text(stringResource(R.string.grpc_service_name)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = grpcAuthority,
+                        onValueChange = { grpcAuthority = it },
+                        label = { Text(stringResource(R.string.grpc_authority)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    DropdownField(
+                        label = stringResource(R.string.mode),
+                        selectedValue = if (grpcMultiMode) "multi" else "gun",
+                        options = listOf(
+                            "gun" to "Gun",
+                            "multi" to "Multi"
+                        ),
+                        onSelect = { grpcMultiMode = (it == "multi") }
+                    )
+                    OutlinedTextField(
+                        value = grpcUserAgent,
+                        onValueChange = { grpcUserAgent = it },
+                        label = { Text(stringResource(R.string.user_agent)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
                     )
                 }
 

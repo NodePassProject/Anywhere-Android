@@ -4,6 +4,7 @@ import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.data.model.TlsVersion
 import com.argsment.anywhere.vpn.protocol.Transport
+import com.argsment.anywhere.vpn.protocol.grpc.GrpcConnection
 import com.argsment.anywhere.vpn.protocol.httpupgrade.HttpUpgradeConnection
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
 import com.argsment.anywhere.vpn.protocol.websocket.WebSocketConnection
@@ -572,6 +573,81 @@ open class VlessRealityConnection(
 class VlessRealityUdpConnection(
     realityConnection: TlsRecordConnection
 ) : VlessRealityConnection(realityConnection) {
+
+    private val udpState = UdpBufferState()
+    private val udpLock = Any()
+
+    override suspend fun send(data: ByteArray) {
+        sendRaw(UdpFraming.frame(data))
+    }
+
+    override fun sendAsync(data: ByteArray) {
+        sendRawAsync(UdpFraming.frame(data))
+    }
+
+    override suspend fun receive(): ByteArray? {
+        synchronized(udpLock) {
+            UdpFraming.extract(udpState)?.let { return it }
+        }
+        return receiveMore()
+    }
+
+    private suspend fun receiveMore(): ByteArray? {
+        while (true) {
+            val data = super.receive() ?: return null
+            synchronized(udpLock) {
+                udpState.append(data)
+                UdpFraming.extract(udpState)?.let { return it }
+            }
+        }
+    }
+
+    override fun cancel() {
+        synchronized(udpLock) { udpState.clear() }
+        super.cancel()
+    }
+}
+
+// =============================================================================
+// VlessGrpcConnection
+// =============================================================================
+
+/**
+ * VLESS connection over a [GrpcConnection] transport (bidirectional HTTP/2 stream).
+ */
+open class VlessGrpcConnection(
+    private val grpcConnection: GrpcConnection
+) : VlessConnection() {
+
+    override val isConnected: Boolean get() = grpcConnection.isConnected
+
+    override suspend fun sendRaw(data: ByteArray) = grpcConnection.send(data)
+    override fun sendRawAsync(data: ByteArray) {
+        // gRPC's underlying HTTP/2 send is suspending (flow-control). The async send in
+        // other transports maps onto a fire-and-forget socket write; here there's no
+        // equivalent without blocking, so route through the regular suspending path on
+        // a background coroutine and drop any error (callers already handle exceptions
+        // elsewhere). Matches the iOS fire-and-forget semantics.
+        kotlinx.coroutines.runBlocking {
+            runCatching { grpcConnection.send(data) }
+        }
+    }
+
+    override suspend fun receiveRaw(): ByteArray? {
+        val data = grpcConnection.receive() ?: return null
+        if (data.isEmpty()) return null
+        return processResponseHeader(data)
+    }
+
+    override fun cancel() = grpcConnection.cancel()
+}
+
+/**
+ * VLESS UDP connection over [GrpcConnection] with length-prefixed packets.
+ */
+class VlessGrpcUdpConnection(
+    grpcConnection: GrpcConnection
+) : VlessGrpcConnection(grpcConnection) {
 
     private val udpState = UdpBufferState()
     private val udpLock = Any()

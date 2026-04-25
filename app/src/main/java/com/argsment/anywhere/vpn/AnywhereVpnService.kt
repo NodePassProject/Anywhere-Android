@@ -544,11 +544,14 @@ class AnywhereVpnService : VpnService() {
                         logger.info("[VPN] Device woke up after ${sleepSecs}s")
                         if (sleepSecs >= WAKE_RESTART_THRESHOLD_SECS) {
                             logger.warning(
-                                "[VPN] Long sleep detected (${sleepSecs}s); restarting connections"
+                                "[VPN] Long sleep detected (${sleepSecs}s); invalidating outbound state"
                             )
-                            lwipStack?.handleNetworkPathChange(
-                                "device wake after ${sleepSecs}s sleep"
-                            )
+                            // Mirrors iOS PacketTunnelProvider.wake(): targeted
+                            // abort of outbound proxy state instead of a full
+                            // stack rebuild. The lwIP netif, listeners, FakeIP
+                            // pool, and routing all survive sleep — only the
+                            // kernel-killed outbound sockets need invalidating.
+                            lwipStack?.handleWake()
                         }
                     }
                 }

@@ -293,17 +293,20 @@ class RealityClient(
 
         // Key agreement: pure X25519 or X25519MLKEM768 hybrid depending on group negotiated.
         val sharedSecretData = if (serverKeyShare.size == 1120) {
-            // X25519MLKEM768: server key share = MLKEM_ciphertext(1088) + X25519_public_key(32)
+            // X25519MLKEM768: server key share = MLKEM_ciphertext(1088) + X25519_public_key(32).
+            // The server only commits to hybrid if our ClientHello advertised an
+            // ML-KEM encapsulation key, so mlkemPrivateKey must be set here. A
+            // decap failure produces the wrong shared secret — falling back to
+            // X25519-only would derive the wrong handshake keys and surface as
+            // a misleading authentication failure later. Fail fast instead,
+            // matching iOS RealityClient.swift:359 which propagates the error
+            // out of `decapsulateMLKEM`.
             val mlkemCt = serverKeyShare.copyOfRange(0, 1088)
             val x25519Key = serverKeyShare.copyOfRange(1088, 1120)
             val x25519Shared = NativeBridge.nativeX25519KeyAgreement(privateKey, x25519Key)
             val mlkemShared = mlkemDecapsulate(mlkemCt)
-            if (mlkemShared != null) {
-                mlkemShared + x25519Shared  // 64 bytes: MLKEM_shared || X25519_shared
-            } else {
-                logger.warning("[Reality] ML-KEM decapsulation failed, using X25519 only")
-                x25519Shared
-            }
+                ?: throw RealityError.HandshakeFailed("ML-KEM decapsulation failed")
+            mlkemShared + x25519Shared  // 64 bytes: MLKEM_shared || X25519_shared
         } else {
             // Pure X25519
             NativeBridge.nativeX25519KeyAgreement(privateKey, serverKeyShare)
@@ -436,6 +439,7 @@ class RealityClient(
                 val extDataLen = ((data[shOffset + 2].toInt() and 0xFF) shl 8) or
                         (data[shOffset + 3].toInt() and 0xFF)
                 shOffset += 4
+                val extDataStart = shOffset
 
                 if (extType == 0x0033) { // key_share
                     if (shOffset + 4 > data.size) return null
@@ -462,7 +466,11 @@ class RealityClient(
                     }
                 }
 
-                shOffset += extDataLen
+                // Advance to the next extension header. Anchor on extDataStart
+                // because the 0x0033 branch above may have consumed group+keyLen
+                // (4 bytes) without returning, leaving shOffset advanced past
+                // the start of extData.
+                shOffset = extDataStart + extDataLen
             }
 
             break
@@ -1107,7 +1115,9 @@ class RealityClient(
         keyDerivation = null
         handshakeSecret = null
         handshakeKeys = null
+        applicationKeys = null
         handshakeTranscript = null
+        serverHandshakeSeqNum = 0
         serverCertVerified = false
         mlkemEncapsulationKey = null
         mlkemPrivateKey = null

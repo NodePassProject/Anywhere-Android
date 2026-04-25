@@ -627,6 +627,7 @@ data class ProxyConfiguration(
     val websocket: WebSocketConfiguration? = null,
     val httpUpgrade: HttpUpgradeConfiguration? = null,
     val xhttp: XHttpConfiguration? = null,
+    val grpc: com.argsment.anywhere.vpn.protocol.grpc.GrpcConfiguration? = null,
     val testseed: List<UInt> = listOf(900u, 500u, 900u, 256u),
     val muxEnabled: Boolean = true,
     val xudpEnabled: Boolean = true,
@@ -670,6 +671,7 @@ data class ProxyConfiguration(
                 websocket == other.websocket &&
                 httpUpgrade == other.httpUpgrade &&
                 xhttp == other.xhttp &&
+                grpc == other.grpc &&
                 testseed == other.testseed &&
                 muxEnabled == other.muxEnabled &&
                 xudpEnabled == other.xudpEnabled &&
@@ -834,6 +836,11 @@ data class ProxyConfiguration(
             if (xhttp.host != serverAddress) params.add("host=${xhttp.host}")
             if (xhttp.path != "/") params.add("path=${urlEncode(xhttp.path)}")
             if (xhttp.mode != XHttpMode.AUTO) params.add("mode=${xhttp.mode.raw}")
+        }
+        if (transport == "grpc" && grpc != null) {
+            if (grpc.serviceName.isNotEmpty()) params.add("serviceName=${urlEncode(grpc.serviceName)}")
+            if (grpc.authority.isNotEmpty()) params.add("authority=${urlEncode(grpc.authority)}")
+            if (grpc.multiMode) params.add("mode=multi")
         }
     }
 
@@ -1052,6 +1059,9 @@ data class ProxyConfiguration(
                     ?: tlsConfig?.serverName ?: realityConfig?.serverName ?: host
                 XHttpConfiguration.parse(params + ("host" to xhttpHost), host)
             } else null
+            val grpcConfig = if (transport == "grpc") {
+                com.argsment.anywhere.vpn.protocol.grpc.GrpcConfiguration.parse(params)
+            } else null
 
             val muxEnabled = params["mux"]?.let { it != "false" && it != "0" } ?: true
             val xudpEnabled = params["xudp"]?.let { it != "false" && it != "0" } ?: true
@@ -1070,6 +1080,7 @@ data class ProxyConfiguration(
                 websocket = wsConfig,
                 httpUpgrade = httpUpgradeConfig,
                 xhttp = xhttpConfig,
+                grpc = grpcConfig,
                 testseed = testseed ?: listOf(900u, 500u, 900u, 256u),
                 muxEnabled = muxEnabled,
                 xudpEnabled = xudpEnabled
