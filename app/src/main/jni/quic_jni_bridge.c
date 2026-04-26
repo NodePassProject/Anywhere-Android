@@ -977,3 +977,22 @@ JNI_FN(nativeInstallApplicationKeys)(JNIEnv *env, jclass cls, jlong handle,
     (*env)->ReleaseByteArrayElements(env, txSecret, tx, JNI_ABORT);
     return (jint)rv;
 }
+
+/* Decodes the server's transport_parameters TLS extension (0x0039) and stores
+ * them on the connection. Mirrors iOS QUICTLSHandler.swift's
+ * ngtcp2_conn_decode_and_set_remote_transport_params call. Required: without
+ * it `conn->remote.transport_params` stays NULL and any post-handshake
+ * `ngtcp2_conn_get_idle_expiry` etc. crashes dereferencing it. */
+JNIEXPORT jint JNICALL
+JNI_FN(nativeSetRemoteTransportParams)(JNIEnv *env, jclass cls, jlong handle,
+                                       jbyteArray params) {
+    (void)cls;
+    AndroidQuicConn *c = (AndroidQuicConn *)(intptr_t)handle;
+    if (!c || !c->conn || !params) return -1;
+    jsize len = (*env)->GetArrayLength(env, params);
+    jbyte *buf = (*env)->GetByteArrayElements(env, params, NULL);
+    int rv = ngtcp2_conn_decode_and_set_remote_transport_params(
+        c->conn, (const uint8_t *)buf, (size_t)len);
+    (*env)->ReleaseByteArrayElements(env, params, buf, JNI_ABORT);
+    return (jint)rv;
+}

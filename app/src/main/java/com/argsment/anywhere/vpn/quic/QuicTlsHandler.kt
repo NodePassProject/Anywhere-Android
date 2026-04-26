@@ -1,5 +1,6 @@
 package com.argsment.anywhere.vpn.quic
 
+import com.argsment.anywhere.vpn.NativeBridge
 import com.argsment.anywhere.vpn.protocol.tls.Tls13KeyDerivation
 import com.argsment.anywhere.vpn.protocol.tls.TlsCipherSuite
 import com.argsment.anywhere.vpn.util.AnywhereLogger
@@ -8,10 +9,7 @@ import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.interfaces.ECPublicKey
-import java.security.interfaces.XECPublicKey
 import java.security.spec.ECGenParameterSpec
-import java.security.spec.NamedParameterSpec
-import java.security.spec.XECPublicKeySpec
 import javax.crypto.KeyAgreement
 import java.math.BigInteger
 import java.nio.ByteBuffer
@@ -47,9 +45,13 @@ class QuicTlsHandler(
     private val clientRandom = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
     // Offered key shares — X25519 and secp256r1.
-    private val x25519Pair: KeyPair
-    private val p256Pair: KeyPair
+    // X25519 uses our native (BoringSSL) implementation rather than JCE's `XDH`
+    // + `NamedParameterSpec`: that combo is missing or rejects the spec type
+    // on some vendor Conscrypt forks (throws "No AlgorithmParameterSpec
+    // classes are supported"). Native X25519 is portable across all API levels.
+    private val x25519PrivateKey: ByteArray
     private val x25519PublicBytes: ByteArray
+    private val p256Pair: KeyPair
     private val p256PublicBytes: ByteArray
 
     // Transcript: concatenation of all handshake messages exchanged.
@@ -70,11 +72,10 @@ class QuicTlsHandler(
     private val cryptoBuffer = java.io.ByteArrayOutputStream()
 
     init {
-        // X25519
-        val x25519Gen = KeyPairGenerator.getInstance("XDH")
-        x25519Gen.initialize(NamedParameterSpec("X25519"))
-        x25519Pair = x25519Gen.generateKeyPair()
-        x25519PublicBytes = extractX25519Public(x25519Pair.public as XECPublicKey)
+        // X25519 via native BoringSSL: returns 64 bytes = priv(32) || pub(32).
+        val x25519Pair = NativeBridge.nativeX25519GenerateKeyPair()
+        x25519PrivateKey = x25519Pair.copyOfRange(0, 32)
+        x25519PublicBytes = x25519Pair.copyOfRange(32, 64)
 
         // secp256r1 (P-256) uncompressed point 0x04 || X || Y
         val p256Gen = KeyPairGenerator.getInstance("EC")
@@ -141,7 +142,7 @@ class QuicTlsHandler(
     private fun processHandshakeMessage(msgType: Int, body: ByteArray, handle: Long): Int {
         return when (msgType) {
             2 -> processServerHello(body, handle)
-            8 -> processEncryptedExtensions(body)
+            8 -> processEncryptedExtensions(body, handle)
             11 -> 0 // Certificate — parsed but we rely on X509 cert validation only when needed; QUIC handshake completes without explicit chain validation in this port (allowInsecure by default for anti-censorship).
             15 -> 0 // CertificateVerify — same note as above
             20 -> processServerFinished(body, handle)
@@ -238,7 +239,7 @@ class QuicTlsHandler(
     //  EncryptedExtensions
     // ------------------------------------------------------------------
 
-    private fun processEncryptedExtensions(body: ByteArray): Int {
+    private fun processEncryptedExtensions(body: ByteArray, handle: Long): Int {
         if (body.size < 2) return 0
         val extLen = ((body[0].toInt() and 0xFF) shl 8) or (body[1].toInt() and 0xFF)
         var offset = 2
@@ -249,7 +250,16 @@ class QuicTlsHandler(
             offset += 4
             when (t) {
                 0x0039 -> if (offset + l <= body.size) {
-                    serverTransportParams = body.copyOfRange(offset, offset + l)
+                    val tp = body.copyOfRange(offset, offset + l)
+                    serverTransportParams = tp
+                    // Push the decoded params into ngtcp2 so `conn->remote.transport_params`
+                    // is non-NULL post-handshake. Mirrors iOS QUICTLSHandler.swift's
+                    // ngtcp2_conn_decode_and_set_remote_transport_params call.
+                    val rv = QuicBridge.nativeSetRemoteTransportParams(handle, tp)
+                    if (rv != 0) {
+                        logger.error("Failed to set remote transport params: $rv")
+                        return -1
+                    }
                 }
                 0x0010 -> if (l >= 3 && offset + l <= body.size) {
                     // list_len(2) + name_len(1) + name
@@ -325,19 +335,7 @@ class QuicTlsHandler(
      */
     private fun ecdheX25519(serverPubBytes: ByteArray): ByteArray? = runCatching {
         if (serverPubBytes.size != 32) return@runCatching null
-        // X25519 public key is little-endian. KeyFactory needs an XECPublicKeySpec
-        // with the u-coordinate as a BigInteger with top bit cleared.
-        val reversed = serverPubBytes.reversedArray().copyOf()
-        // Clear top bit per RFC 7748 §5 (decoding u — irrelevant for the KeyFactory but matches what X25519 implementations expect).
-        reversed[0] = (reversed[0].toInt() and 0x7F).toByte()
-        val u = BigInteger(1, reversed)
-        val spec = XECPublicKeySpec(NamedParameterSpec("X25519"), u)
-        val kf = java.security.KeyFactory.getInstance("XDH")
-        val pub = kf.generatePublic(spec)
-        val ka = KeyAgreement.getInstance("XDH")
-        ka.init(x25519Pair.private)
-        ka.doPhase(pub, true)
-        ka.generateSecret()
+        NativeBridge.nativeX25519KeyAgreement(x25519PrivateKey, serverPubBytes)
     }.getOrNull()
 
     /**
@@ -355,17 +353,6 @@ class QuicTlsHandler(
         ka.doPhase(pub, true)
         ka.generateSecret()
     }.getOrNull()
-
-    private fun extractX25519Public(pub: XECPublicKey): ByteArray {
-        // U-coordinate encoded little-endian, 32 bytes.
-        val u = pub.u
-        val bytes = u.toByteArray()
-        // BigInteger returns big-endian with possible sign byte; strip/trim.
-        val trimmed = if (bytes.size > 32) bytes.copyOfRange(bytes.size - 32, bytes.size) else bytes
-        val padded = ByteArray(32)
-        System.arraycopy(trimmed, 0, padded, 32 - trimmed.size, trimmed.size)
-        return padded.reversedArray()
-    }
 
     private fun extractP256Uncompressed(pub: ECPublicKey): ByteArray {
         val x = pub.w.affineX.toByteArray().let {
@@ -423,7 +410,11 @@ private fun buildQuicClientHello(
     // legacy_compression_methods
     body.write(1); body.write(0)
 
-    // extensions
+    // Extension order MUST match iOS `TLSClientHelloBuilder.buildQUICClientHello`
+    // byte-for-byte. Some Hysteria 2 servers (and any front-door that does
+    // uTLS-style fingerprint enforcement) accept the QUIC handshake but
+    // silently drop inner traffic when the JA3/JA4 hash doesn't match the
+    // expected client.
     val ext = java.io.ByteArrayOutputStream()
 
     // server_name (0x0000)
@@ -435,43 +426,24 @@ private fun buildQuicClientHello(
         sni.writeU16(name.size); sni.write(name)
         writeExt(ext, 0x0000, sni.toByteArray())
     }
-    // supported_versions (0x002B): TLS 1.3 only
-    run {
-        val sv = java.io.ByteArrayOutputStream()
-        sv.write(2); sv.write(0x03); sv.write(0x04)
-        writeExt(ext, 0x002B, sv.toByteArray())
-    }
     // supported_groups (0x000A): X25519, secp256r1
     run {
         val sg = java.io.ByteArrayOutputStream()
         sg.writeU16(4); sg.writeU16(0x001D); sg.writeU16(0x0017)
         writeExt(ext, 0x000A, sg.toByteArray())
     }
-    // signature_algorithms (0x000D): standard TLS 1.3 set
+    // signature_algorithms (0x000D): match iOS list and order exactly.
     run {
         val algos = intArrayOf(
-            0x0403, 0x0503, 0x0603,     // ECDSA w/ SHA-256/384/512
-            0x0804, 0x0805, 0x0806,     // RSA-PSS
-            0x0401, 0x0501, 0x0601      // RSA-PKCS1 (legacy)
+            0x0403, 0x0804, 0x0401,     // ECDSA-P256-SHA256, RSA-PSS-RSAE-SHA256, RSA-PKCS1-SHA256
+            0x0503, 0x0805, 0x0501,     // ECDSA-P384-SHA384, RSA-PSS-RSAE-SHA384, RSA-PKCS1-SHA384
+            0x0806, 0x0601,             // RSA-PSS-RSAE-SHA512, RSA-PKCS1-SHA512
+            0x0203, 0x0201              // ECDSA-SHA1, RSA-PKCS1-SHA1 (legacy)
         )
         val sa = java.io.ByteArrayOutputStream()
         sa.writeU16(algos.size * 2)
         for (a in algos) sa.writeU16(a)
         writeExt(ext, 0x000D, sa.toByteArray())
-    }
-    // key_share (0x0033)
-    run {
-        val ks = java.io.ByteArrayOutputStream()
-        val entries = java.io.ByteArrayOutputStream()
-        for ((group, pub) in keyShares) {
-            entries.writeU16(group); entries.writeU16(pub.size); entries.write(pub)
-        }
-        ks.writeU16(entries.size()); ks.write(entries.toByteArray())
-        writeExt(ext, 0x0033, ks.toByteArray())
-    }
-    // psk_key_exchange_modes (0x002D): psk_dhe_ke
-    run {
-        writeExt(ext, 0x002D, byteArrayOf(1, 1))
     }
     // ALPN (0x0010)
     if (alpn.isNotEmpty()) {
@@ -483,6 +455,26 @@ private fun buildQuicClientHello(
         }
         list.writeU16(entries.size()); list.write(entries.toByteArray())
         writeExt(ext, 0x0010, list.toByteArray())
+    }
+    // supported_versions (0x002B): TLS 1.3 only
+    run {
+        val sv = java.io.ByteArrayOutputStream()
+        sv.write(2); sv.write(0x03); sv.write(0x04)
+        writeExt(ext, 0x002B, sv.toByteArray())
+    }
+    // psk_key_exchange_modes (0x002D): psk_dhe_ke
+    run {
+        writeExt(ext, 0x002D, byteArrayOf(1, 1))
+    }
+    // key_share (0x0033)
+    run {
+        val ks = java.io.ByteArrayOutputStream()
+        val entries = java.io.ByteArrayOutputStream()
+        for ((group, pub) in keyShares) {
+            entries.writeU16(group); entries.writeU16(pub.size); entries.write(pub)
+        }
+        ks.writeU16(entries.size()); ks.write(entries.toByteArray())
+        writeExt(ext, 0x0033, ks.toByteArray())
     }
     // quic_transport_parameters (0x0039)
     writeExt(ext, 0x0039, quicTransportParams)

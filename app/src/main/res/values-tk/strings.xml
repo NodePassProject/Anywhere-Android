@@ -8,7 +8,6 @@
     <string name="add_a_configuration">Konfigurasiýa goşuň</string>
     <string name="address">Salgy</string>
     <string name="allow_insecure">Howpsuz däl</string>
-    <string name="always_on">Hemişe açyk</string>
     <string name="auto">Awto</string>
     <string name="cancel">Ýatyr</string>
     <string name="connected">Birikdirildi</string>
@@ -65,7 +64,6 @@
     <string name="unknown">Näbelli</string>
     <string name="update">Täzele</string>
     <string name="update_failed">Täzelemek şowsuz</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">VPN ýalňyşlygy</string>
     <string name="latency_ms">%d ms</string>
     <string name="routing_rules_reset">Aşakdaky ugratma düzgünleri tarapyndan ulanylýan proksi pozuldy. Olar Bellenen-e gaýtaryldy: %s</string>

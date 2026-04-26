@@ -8,7 +8,6 @@
     <string name="add_a_configuration">Добавьте конфигурацию</string>
     <string name="address">Адрес</string>
     <string name="allow_insecure">Небезопасное соединение</string>
-    <string name="always_on">Всегда включён</string>
     <string name="auto">Авто</string>
     <string name="cancel">Отмена</string>
     <string name="connected">Подключено</string>
@@ -65,7 +64,6 @@
     <string name="unknown">Неизвестно</string>
     <string name="update">Обновить</string>
     <string name="update_failed">Ошибка обновления</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">Ошибка VPN</string>
     <string name="latency_ms">%d мс</string>
     <string name="routing_rules_reset">Прокси, используемый следующими правилами маршрутизации, был удалён. Они сброшены на значение по умолчанию: %s</string>

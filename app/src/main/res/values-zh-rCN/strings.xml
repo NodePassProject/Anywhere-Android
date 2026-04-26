@@ -8,7 +8,6 @@
     <string name="add_a_configuration">添加配置</string>
     <string name="address">地址</string>
     <string name="allow_insecure">允许不安全</string>
-    <string name="always_on">始终开启</string>
     <string name="auto">自动</string>
     <string name="cancel">取消</string>
     <string name="connected">已连接</string>
@@ -65,7 +64,6 @@
     <string name="unknown">未知</string>
     <string name="update">更新</string>
     <string name="update_failed">更新失败</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">VPN 错误</string>
     <string name="latency_ms">%d 毫秒</string>
     <string name="routing_rules_reset">以下路由规则使用的代理已被删除，它们已重置为默认: %s</string>

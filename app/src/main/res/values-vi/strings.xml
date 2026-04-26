@@ -8,7 +8,6 @@
     <string name="add_a_configuration">Thêm cấu hình</string>
     <string name="address">Địa chỉ</string>
     <string name="allow_insecure">Cho phép không an toàn</string>
-    <string name="always_on">Luôn bật</string>
     <string name="auto">Tự động</string>
     <string name="cancel">Hủy bỏ</string>
     <string name="connected">Đã kết nối</string>
@@ -65,7 +64,6 @@
     <string name="unknown">Không xác định</string>
     <string name="update">Cập nhật</string>
     <string name="update_failed">Cập nhật thất bại</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">Lỗi VPN</string>
     <string name="latency_ms">%d ms</string>
     <string name="routing_rules_reset">Proxy được sử dụng bởi các quy tắc định tuyến sau đã bị xóa. Chúng đã được đặt lại về Mặc định: %s</string>

@@ -17,6 +17,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
+import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.network.LatencyResult
 
@@ -61,12 +62,18 @@ fun ProxyCardContent(
                     style = badgeStyle,
                     color = badgeColor
                 )
-                Text(text = dot, style = badgeStyle, color = badgeColor)
-                Text(
-                    text = configuration.transport.uppercase(),
-                    style = badgeStyle,
-                    color = badgeColor
-                )
+                // Transport is only meaningful for VLESS — every other
+                // protocol's `transport` field is just a "tcp" placeholder
+                // that doesn't reflect the actual wire (e.g. Hysteria runs
+                // over QUIC/UDP, not TCP). Mirrors iOS ProxyListView.swift.
+                if (configuration.outboundProtocol == OutboundProtocol.VLESS) {
+                    Text(text = dot, style = badgeStyle, color = badgeColor)
+                    Text(
+                        text = configuration.transport.uppercase(),
+                        style = badgeStyle,
+                        color = badgeColor
+                    )
+                }
                 val security = configuration.security.uppercase()
                 if (security != "NONE") {
                     Text(text = dot, style = badgeStyle, color = badgeColor)

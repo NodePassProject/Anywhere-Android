@@ -72,13 +72,34 @@ class QuicConnection(
     private var socket: DatagramSocket? = null
     private var hostAddr: InetAddress? = null
 
-    /** Dedicated single-thread dispatcher so all ngtcp2 calls are serialized. */
+    /** Dedicated single-thread dispatcher for coroutines that mutate
+     *  Kotlin-side state (timer scheduling, write coalescing, etc.). */
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "quic-$host:$port").apply { isDaemon = true }
     }
     private val dispatcher: CoroutineDispatcher =
         executor.asCoroutineDispatcher()
     private val scope = CoroutineScope(dispatcher)
+
+    /**
+     * ngtcp2 is not thread-safe, so every `ngtcp2_conn_*` call must be
+     * serialized. We use a plain lock rather than dispatching to the
+     * `executor`: the reader coroutine runs on `executor` and parks on a
+     * blocking `DatagramSocket.receive` syscall with no coroutine
+     * suspension points, so an `executor.submit { … }.get()` from another
+     * thread would queue behind the reader and never run. With a lock the
+     * reader holds it only during `nativeReadPacket` + the trailing
+     * `flushOutgoing`, releasing it between iterations so external callers
+     * (e.g. `HysteriaSession.openHttp3Control()` from `Dispatchers.IO`) can
+     * acquire it between packets. iOS's serial GCD queue already yields
+     * around `NWConnection.receive` callbacks; on Android the equivalent
+     * is this lock.
+     */
+    private val ngtcp2Lock = Any()
+
+    private fun <T> runOnQuicThread(block: () -> T): T? = try {
+        synchronized(ngtcp2Lock) { block() }
+    } catch (_: Throwable) { null }
 
     /** Per-packet TLS handshaker. Exposes keys via install* callbacks. */
     private val tls = QuicTlsHandler(sni, alpn, onHandshakeKeys = ::installHandshakeKeys,
@@ -228,7 +249,15 @@ class QuicConnection(
     }
 
     private fun startReader() {
-        readerJob = scope.launch {
+        // The reader parks in `DatagramSocket.receive` — a blocking syscall
+        // with no coroutine suspension points. If we let this coroutine run
+        // on the QUIC executor (a single-thread dispatcher), the reader
+        // would monopolize the only thread and every other `scope.launch`
+        // (writes, timer, shutdown, close) would starve. ngtcp2 itself is
+        // serialized by `ngtcp2Lock`, so we only need the executor for
+        // ordering Kotlin-side coroutines, not for the read loop. Run it
+        // on `Dispatchers.IO` instead, where blocking I/O belongs.
+        readerJob = scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val buf = ByteArray(2048)
             val pkt = DatagramPacket(buf, buf.size)
             val s = socket ?: return@launch
@@ -242,7 +271,9 @@ class QuicConnection(
                     break
                 }
                 val data = buf.copyOfRange(0, pkt.length)
-                val rv = QuicBridge.nativeReadPacket(handle, data)
+                val rv = synchronized(ngtcp2Lock) {
+                    if (handle == 0L) 0 else QuicBridge.nativeReadPacket(handle, data)
+                }
                 if (rv != 0) {
                     val err = when (rv) {
                         NGTCP2_ERR_DRAINING, NGTCP2_ERR_CLOSING -> QuicError.Closed()
@@ -269,38 +300,42 @@ class QuicConnection(
         }
     }
 
-    fun openBidiStream(): Long? {
-        if (state != State.CONNECTED) return null
-        val sid = QuicBridge.nativeOpenBidiStream(handle)
-        return if (sid < 0) null else sid
+    fun openBidiStream(): Long? = runOnQuicThread {
+        if (state != State.CONNECTED || handle == 0L) null
+        else QuicBridge.nativeOpenBidiStream(handle).takeIf { it >= 0 }
     }
 
-    fun openUniStream(): Long? {
-        if (state != State.CONNECTED) return null
-        val sid = QuicBridge.nativeOpenUniStream(handle)
-        return if (sid < 0) null else sid
+    fun openUniStream(): Long? = runOnQuicThread {
+        if (state != State.CONNECTED || handle == 0L) null
+        else QuicBridge.nativeOpenUniStream(handle).takeIf { it >= 0 }
     }
 
     fun extendStreamOffset(streamId: Long, count: Int) {
         if (count <= 0) return
         scope.launch {
-            if (handle != 0L) QuicBridge.nativeExtendStreamOffset(handle, streamId, count.toLong())
+            synchronized(ngtcp2Lock) {
+                if (handle != 0L) QuicBridge.nativeExtendStreamOffset(handle, streamId, count.toLong())
+            }
         }
     }
 
     fun shutdownStream(streamId: Long, appErrorCode: Long = 0x0100L) {
         scope.launch {
-            if (handle != 0L) {
-                QuicBridge.nativeShutdownStream(handle, streamId, appErrorCode)
-                flushOutgoing(streamId = -1, data = null, fin = false)
+            val needsFlush = synchronized(ngtcp2Lock) {
+                if (handle == 0L) false
+                else {
+                    QuicBridge.nativeShutdownStream(handle, streamId, appErrorCode)
+                    true
+                }
             }
+            if (needsFlush) flushOutgoing(streamId = -1, data = null, fin = false)
         }
     }
 
-    fun writeDatagram(data: ByteArray): Int {
-        if (state != State.CONNECTED) return -1
-        return QuicBridge.nativeWriteDatagram(handle, data)
-    }
+    fun writeDatagram(data: ByteArray): Int = runOnQuicThread {
+        if (state != State.CONNECTED || handle == 0L) -1
+        else QuicBridge.nativeWriteDatagram(handle, data)
+    } ?: -1
 
     /**
      * Updates the Hysteria Brutal target send rate (bytes/sec). No-op
@@ -315,15 +350,21 @@ class QuicConnection(
     }
 
     val maxDatagramPayloadSize: Int
-        get() = if (handle == 0L) 0 else QuicBridge.nativeMaxDatagramPayload(handle).toInt()
+        get() = runOnQuicThread {
+            if (handle == 0L) 0 else QuicBridge.nativeMaxDatagramPayload(handle).toInt()
+        } ?: 0
 
     private fun flushOutgoing(streamId: Long, data: ByteArray?, fin: Boolean) {
-        if (handle == 0L) return
-        QuicBridge.nativeWriteLoop(handle, streamId, data, fin)
-        rescheduleTimer()
+        synchronized(ngtcp2Lock) {
+            if (handle == 0L) return
+            QuicBridge.nativeWriteLoop(handle, streamId, data, fin)
+            rescheduleTimer()
+        }
     }
 
+    /** Caller must hold [ngtcp2Lock]. */
     private fun rescheduleTimer() {
+        if (handle == 0L) { timerJob?.cancel(); timerJob = null; return }
         val expiry = QuicBridge.nativeGetExpiry(handle)
         if (expiry < 0) { timerJob?.cancel(); timerJob = null; return }
         val nowNs = System.nanoTime()
@@ -332,7 +373,9 @@ class QuicConnection(
         timerJob = scope.launch {
             delay(delayNs / 1_000_000L + 1)
             if (!isActive || state == State.CLOSED) return@launch
-            val rv = QuicBridge.nativeHandleExpiry(handle)
+            val rv = synchronized(ngtcp2Lock) {
+                if (handle == 0L) 0 else QuicBridge.nativeHandleExpiry(handle)
+            }
             if (rv != 0) {
                 val err = QuicError.ConnectionFailed("expiry error: $rv")
                 connectDeferred?.completeExceptionally(err)
@@ -355,11 +398,13 @@ class QuicConnection(
         timerJob?.cancel(); timerJob = null
         readerJob?.cancel(); readerJob = null
         socket?.close(); socket = null
-        if (handle != 0L) {
-            // `nativeDestroy` removes the Brutal registry entry before
-            // freeing `conn->cc`, so no explicit tear-down here.
-            QuicBridge.nativeDestroy(handle)
-            handle = 0L
+        synchronized(ngtcp2Lock) {
+            if (handle != 0L) {
+                // `nativeDestroy` removes the Brutal registry entry before
+                // freeing `conn->cc`, so no explicit tear-down here.
+                QuicBridge.nativeDestroy(handle)
+                handle = 0L
+            }
         }
         brutalCC = null
         val e = error ?: QuicError.Closed()

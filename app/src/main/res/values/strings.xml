@@ -10,7 +10,6 @@
     <string name="add_a_configuration">Add a Configuration</string>
     <string name="address">Address</string>
     <string name="allow_insecure">Allow Insecure</string>
-    <string name="always_on">Always On</string>
     <string name="auto">Auto</string>
     <string name="cancel">Cancel</string>
     <string name="connected">Connected</string>
@@ -94,7 +93,6 @@
     <string name="unknown">Unknown</string>
     <string name="update">Update</string>
     <string name="update_failed">Update Failed</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">VPN Error</string>
     <string name="upload">Upload</string>
     <string name="download">Download</string>

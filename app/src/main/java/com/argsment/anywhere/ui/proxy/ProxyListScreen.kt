@@ -114,7 +114,17 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
             TopAppBar(
                 title = { Text(stringResource(R.string.proxies)) },
                 actions = {
-                    IconButton(onClick = { viewModel.testAllLatencies() }) {
+                    IconButton(onClick = {
+                        // Mirrors iOS: only test what's currently visible
+                        // — standalone proxies plus configurations from
+                        // expanded (non-collapsed) subscriptions. Skipping
+                        // collapsed subscriptions keeps the test run focused
+                        // on what the user is actually looking at.
+                        val visible = standaloneConfigs + subscribedGroups
+                            .filter { it.first.id !in collapsedSubscriptions }
+                            .flatMap { it.second }
+                        viewModel.testLatencies(forConfigs = visible)
+                    }) {
                         Icon(
                             imageVector = Icons.Default.Speed,
                             contentDescription = stringResource(R.string.test_all)
@@ -207,7 +217,8 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                                 }
                             },
                             onDelete = { viewModel.deleteSubscription(subscription) },
-                            onRename = { subscriptionToRename = subscription }
+                            onRename = { subscriptionToRename = subscription },
+                            onTestLatency = { viewModel.testLatencies(forConfigs = configs) }
                         )
                     }
                     if (!isCollapsed) {
@@ -354,7 +365,8 @@ private fun SubscriptionHeader(
     onToggleCollapse: () -> Unit,
     onUpdate: () -> Unit,
     onDelete: () -> Unit,
-    onRename: () -> Unit
+    onRename: () -> Unit,
+    onTestLatency: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val chevronRotation by animateFloatAsState(
@@ -407,12 +419,12 @@ private fun SubscriptionHeader(
             }
             DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                 DropdownMenuItem(
-                    text = { Text(stringResource(R.string.update)) },
+                    text = { Text(stringResource(R.string.test_latency)) },
                     onClick = {
                         showMenu = false
-                        onUpdate()
+                        onTestLatency()
                     },
-                    leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) }
+                    leadingIcon = { Icon(Icons.Default.Speed, contentDescription = null) }
                 )
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.rename)) },
@@ -421,6 +433,14 @@ private fun SubscriptionHeader(
                         onRename()
                     },
                     leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) }
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.update)) },
+                    onClick = {
+                        showMenu = false
+                        onUpdate()
+                    },
+                    leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) }
                 )
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error) },

@@ -8,7 +8,6 @@
     <string name="add_a_configuration">إضافة تكوين</string>
     <string name="address">العنوان</string>
     <string name="allow_insecure">السماح بغير الآمن</string>
-    <string name="always_on">التشغيل الدائم</string>
     <string name="auto">تلقائي</string>
     <string name="cancel">إلغاء</string>
     <string name="connected">متصل</string>
@@ -65,7 +64,6 @@
     <string name="unknown">غير معروف</string>
     <string name="update">تحديث</string>
     <string name="update_failed">فشل التحديث</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">خطأ VPN</string>
     <string name="latency_ms">%d مللي ثانية</string>
     <string name="routing_rules_reset">تم حذف البروكسي المستخدم في قواعد التوجيه التالية. تمت إعادة تعيينها إلى الافتراضي: %s</string>

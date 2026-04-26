@@ -598,6 +598,22 @@ enum class OutboundProtocol {
             NAIVE_HTTP3 -> "QUIC"
             HYSTERIA -> "Hysteria"
         }
+
+    /**
+     * Whether this protocol can embed the caller's first bytes inside its
+     * outbound handshake. Only VLESS does — every other protocol opens the
+     * tunnel first and the LWIP layer must forward the buffered first bytes
+     * via a separate `connection.send` after connect (and ACK them back to
+     * lwIP via `nativeTcpRecved`).
+     *
+     * Mirrors iOS `OutboundProtocol.handshakeCarriesInitialData`. Getting
+     * this wrong silently swallows the caller's first bytes for non-VLESS
+     * protocols (e.g. Hysteria) — the bytes are sent over the wire but
+     * lwIP never ACKs them back to the local app, the app times out and
+     * sends RST.
+     */
+    val handshakeCarriesInitialData: Boolean
+        get() = this == VLESS
 }
 
 @Serializable

@@ -8,7 +8,6 @@
     <string name="add_a_configuration">Agregar una configuración</string>
     <string name="address">Dirección</string>
     <string name="allow_insecure">Permitir inseguro</string>
-    <string name="always_on">Siempre activo</string>
     <string name="auto">Automático</string>
     <string name="cancel">Cancelar</string>
     <string name="connected">Conectado</string>
@@ -65,7 +64,6 @@
     <string name="unknown">Desconocido</string>
     <string name="update">Actualizar</string>
     <string name="update_failed">Error de actualización</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">Error de VPN</string>
     <string name="latency_ms">%d ms</string>
     <string name="routing_rules_reset">Se eliminó el proxy utilizado por las siguientes reglas de enrutamiento. Se han restablecido a Predeterminado: %s</string>

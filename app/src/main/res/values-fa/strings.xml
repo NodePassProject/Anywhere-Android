@@ -8,7 +8,6 @@
     <string name="add_a_configuration">افزودن پیکربندی</string>
     <string name="address">آدرس</string>
     <string name="allow_insecure">اجازه ناامن</string>
-    <string name="always_on">همیشه روشن</string>
     <string name="auto">خودکار</string>
     <string name="cancel">لغو</string>
     <string name="connected">متصل</string>
@@ -65,7 +64,6 @@
     <string name="unknown">نامشخص</string>
     <string name="update">به‌روزرسانی</string>
     <string name="update_failed">به‌روزرسانی ناموفق بود</string>
-    <string name="vpn">VPN</string>
     <string name="vpn_error">خطای VPN</string>
     <string name="latency_ms">%d میلی‌ثانیه</string>
     <string name="routing_rules_reset">پروکسی استفاده‌شده در قوانین مسیریابی زیر حذف شد. آن‌ها به پیش‌فرض بازنشانی شده‌اند: %s</string>

@@ -603,14 +603,17 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun testAllLatencies() {
-        val configs = configRepository.getAll()
-        syncProxyServerAddresses(configs)
-        configs.forEach { config ->
+    /** Tests latency for a specific set of configurations. Mirrors iOS
+     *  `ProxyListViewModel.testLatencies(for:)`. The caller filters out
+     *  collapsed subscriptions before invoking — we don't filter here. */
+    fun testLatencies(forConfigs: List<ProxyConfiguration>) {
+        if (forConfigs.isEmpty()) return
+        syncProxyServerAddresses(forConfigs)
+        forConfigs.forEach { config ->
             _latencyResults.value = _latencyResults.value + (config.id to LatencyResult.Testing)
         }
         viewModelScope.launch {
-            LatencyTester.testAll(configs.map { applyGlobalAllowInsecure(it) }).collect { (id, result) ->
+            LatencyTester.testAll(forConfigs.map { applyGlobalAllowInsecure(it) }).collect { (id, result) ->
                 _latencyResults.value = _latencyResults.value + (id to result)
             }
         }
@@ -757,10 +760,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // =========================================================================
     // Settings
     // =========================================================================
-
-    var alwaysOnEnabled: Boolean
-        get() = prefs.getBoolean("alwaysOnEnabled", false)
-        set(value) = prefs.edit().putBoolean("alwaysOnEnabled", value).apply()
 
     /** "rule" (default) applies routing rules per-destination; "global" routes everything through the proxy. Mirrors iOS. */
     var proxyMode: String

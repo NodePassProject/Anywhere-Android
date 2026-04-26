@@ -23,7 +23,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.CallMerge
 import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Tune
@@ -73,7 +72,6 @@ fun SettingsScreen(viewModel: VpnViewModel) {
     var showAdvancedSettings by remember { mutableStateOf(false) }
     var showInsecureAlert by remember { mutableStateOf(false) }
 
-    var alwaysOn by remember { mutableStateOf(viewModel.alwaysOnEnabled) }
     var globalMode by remember { mutableStateOf(viewModel.proxyMode == "global") }
     var bypassCountryCode by remember { mutableStateOf(viewModel.bypassCountryCode) }
     var allowInsecure by remember { mutableStateOf(viewModel.allowInsecure) }
@@ -120,13 +118,6 @@ fun SettingsScreen(viewModel: VpnViewModel) {
                 onBack = { showAdvancedSettings = false }
             )
             else -> SettingsRoot(
-                alwaysOn = alwaysOn,
-                onAlwaysOnChange = {
-                    alwaysOn = it
-                    viewModel.alwaysOnEnabled = it
-                    // Mirror iOS: reconnect so the new always-on state takes effect immediately.
-                    viewModel.reconnect()
-                },
                 globalMode = globalMode,
                 onGlobalModeChange = { globalMode = it; viewModel.proxyMode = if (it) "global" else "rule" },
                 bypassCountryCode = bypassCountryCode,
@@ -196,8 +187,6 @@ fun SettingsScreen(viewModel: VpnViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsRoot(
-    alwaysOn: Boolean,
-    onAlwaysOnChange: (Boolean) -> Unit,
     globalMode: Boolean,
     onGlobalModeChange: (Boolean) -> Unit,
     bypassCountryCode: String,
@@ -226,18 +215,6 @@ private fun SettingsRoot(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // VPN section
-            SectionHeader(stringResource(R.string.vpn))
-            SettingsSwitch(
-                icon = Icons.Filled.Lock,
-                iconTint = Color(0xFF2196F3),
-                label = stringResource(R.string.always_on),
-                checked = alwaysOn,
-                onCheckedChange = onAlwaysOnChange
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
             // Routing section
             SectionHeader(stringResource(R.string.routing))
             SettingsSwitch(

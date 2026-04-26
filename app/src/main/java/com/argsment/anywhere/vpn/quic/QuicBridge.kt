@@ -79,6 +79,15 @@ object QuicBridge {
     @JvmStatic external fun nativeInstallApplicationKeys(handle: Long, rxSecret: ByteArray, txSecret: ByteArray): Int
 
     /**
+     * Decodes the server's QUIC transport parameters (TLS extension 0x0039 inside
+     * EncryptedExtensions) and stores them on the connection. Without this,
+     * `conn->remote.transport_params` stays NULL and any post-handshake call into
+     * ngtcp2 (e.g. `ngtcp2_conn_get_idle_expiry`) will deref NULL and crash.
+     * Returns 0 on success.
+     */
+    @JvmStatic external fun nativeSetRemoteTransportParams(handle: Long, params: ByteArray): Int
+
+    /**
      * Overwrites the connection's CC callback table with Hysteria Brutal
      * trampolines. Must be called after [nativeCreate] and before any
      * ACK/loss has been processed. Returns 0 on failure, non-zero on

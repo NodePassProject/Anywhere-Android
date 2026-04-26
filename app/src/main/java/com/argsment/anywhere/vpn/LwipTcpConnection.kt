@@ -517,8 +517,19 @@ class LwipTcpConnection(
         if (vlessConnecting || vlessConnection != null || closed) return
         vlessConnecting = true
 
-        val initialData = if (pendingData.size() > 0) pendingData.toByteArray() else null
-        if (initialData != null) pendingData.reset()
+        // Only protocols that embed the first bytes inside their handshake
+        // (VLESS + transports) consume `pendingData` here. For everything
+        // else (Hysteria, Trojan, Shadowsocks, SOCKS5, NaiveProxy), leave
+        // `pendingData` intact — `onProxyConnected` will forward it via the
+        // proxy connection AND ACK it back to lwIP via `nativeTcpRecved`.
+        // Mirrors iOS `LWIPTCPConnection.connectProxy`'s
+        // `handshakeCarriesInitialData` branch.
+        val initialData = if (configuration.outboundProtocol.handshakeCarriesInitialData
+            && pendingData.size() > 0) {
+            val data = pendingData.toByteArray()
+            pendingData.reset()
+            data
+        } else null
 
         // If config has a chain, build chained connections first
         val chain = configuration.chain
