@@ -1,8 +1,8 @@
 package com.argsment.anywhere.vpn.protocol.trojan
 
 import com.argsment.anywhere.data.model.TlsVersion
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 
 private val logger = AnywhereLogger("Trojan-UDP")
@@ -13,26 +13,20 @@ private val logger = AnywhereLogger("Trojan-UDP")
  * Each outgoing datagram is framed as `addr:port + length + CRLF + payload`
  * on top of the Trojan UDP request header (sent once). The inbound side
  * buffers stream bytes from TLS and emits one payload per `receiveRaw` call,
- * silently dropping the per-packet header — the upper layer only sees raw
- * UDP payloads addressed to the destination it originally requested.
+ * silently dropping the per-packet header.
  */
 class TrojanUdpConnection(
     private val tlsConnection: TlsRecordConnection,
     password: String,
     private val dstHost: String,
     private val dstPort: Int
-) : VlessConnection() {
+) : ProxyConnection() {
 
     private val passwordKey: ByteArray = TrojanProtocol.passwordKey(password)
 
     private var headerSent = false
-    /** Accumulates TLS stream bytes across receives. */
     private var receiveBuffer: ByteArray = ByteArray(0)
     private val lock = Any()
-
-    init {
-        responseHeaderReceived = true
-    }
 
     override val isConnected: Boolean get() = true
     override val outerTlsVersion: TlsVersion?
@@ -57,8 +51,6 @@ class TrojanUdpConnection(
         tlsConnection.cancel()
     }
 
-    // -- Framing --
-
     /** Prepends the one-shot request header (first call only) to a framed UDP packet. */
     private fun frame(payload: ByteArray): ByteArray {
         val packet = TrojanProtocol.encodeUDPPacket(dstHost, dstPort, payload)
@@ -77,7 +69,6 @@ class TrojanUdpConnection(
         return packet
     }
 
-    /** Tries to decode one complete packet; reads more bytes when buffer is short. */
     private suspend fun deliverNextPacket(): ByteArray? {
         while (true) {
             val parsed = synchronized(lock) {

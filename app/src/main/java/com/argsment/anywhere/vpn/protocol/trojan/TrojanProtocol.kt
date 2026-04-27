@@ -13,16 +13,13 @@ import java.security.MessageDigest
  *                   + cmd(1) + ATYP(1) + address(var) + port(2 BE) + CRLF
  * UDP packet format: ATYP(1) + address(var) + port(2 BE) + length(2 BE) + CRLF + payload
  * Address encoding matches SOCKS5 / Shadowsocks: ATYP 0x01 IPv4, 0x03 domain, 0x04 IPv6.
- *
- * Cross-ref: Xray-core/proxy/trojan/protocol.go
  */
 object TrojanProtocol {
 
-    /** Command byte values on the wire. */
     const val COMMAND_TCP: Byte = 0x01
     const val COMMAND_UDP: Byte = 0x03
 
-    /** Max per-packet payload size accepted by upstream Trojan servers. Matches Xray-core. */
+    /** Max per-packet payload size accepted by upstream Trojan servers. */
     const val MAX_UDP_PAYLOAD_LENGTH: Int = 8192
 
     private const val ATYP_IPV4: Byte = 0x01
@@ -46,9 +43,6 @@ object TrojanProtocol {
         return out
     }
 
-    /**
-     * Builds the Trojan TCP/UDP request header that precedes the first payload.
-     */
     fun buildRequestHeader(
         passwordKey: ByteArray,
         command: Byte,
@@ -66,7 +60,6 @@ object TrojanProtocol {
         return out
     }
 
-    /** Encodes ATYP + address + 2-byte big-endian port. */
     fun encodeAddressPort(host: String, port: Int): ByteArray {
         val ipv4 = parseIPv4(host)
         val ipv6 = if (ipv4 == null) parseIPv6(host) else null
@@ -87,7 +80,6 @@ object TrojanProtocol {
         return out
     }
 
-    /** Wraps a single UDP datagram: ATYP/addr/port + length + CRLF + payload. */
     fun encodeUDPPacket(host: String, port: Int, payload: ByteArray): ByteArray {
         val addr = encodeAddressPort(host, port)
         val length = minOf(payload.size, MAX_UDP_PAYLOAD_LENGTH)
@@ -143,8 +135,6 @@ object TrojanProtocol {
     }
 
     data class DecodedPacket(val payload: ByteArray, val consumed: Int)
-
-    // -- IP Parsing --
 
     private val IPV4_REGEX = Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$""")
 

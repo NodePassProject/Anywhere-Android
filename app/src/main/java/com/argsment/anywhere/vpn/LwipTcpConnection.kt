@@ -5,9 +5,8 @@ import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.TlsClientHelloSniffer
 import com.argsment.anywhere.vpn.util.TransportErrorLogger
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.direct.DirectTcpRelay
-import com.argsment.anywhere.vpn.protocol.vless.VlessClient
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -34,26 +33,12 @@ class LwipTcpConnection(
     configuration: ProxyConfiguration,
     forceBypass: Boolean,
     sniffSNI: Boolean,
-    deferredAccept: Boolean = false,
     private val lwipExecutor: ScheduledExecutorService
 ) {
     /**
-     * True when the inner SYN-ACK was held back in `tcp_listen_input`
-     * (see lwip/ANYWHERE_PATCHES.md "deferred SYN-ACK"). The first
-     * successful upstream connect must call
-     * [NativeBridge.nativeTcpCompleteAccept] to release it; a connect
-     * failure must call [NativeBridge.nativeTcpRejectAccept]. Flips to
-     * false once the SYN-ACK has been emitted, after which behavior
-     * matches the legacy ALLOW path (failures abort the live PCB).
-     * Mirrors iOS `LWIPTCPConnection.deferredAccept`.
-     */
-    private var deferredAccept: Boolean = deferredAccept
-
-    /**
      * Destination the proxy will be asked to connect to. Initialized from
      * the tcp_accept signal and may be replaced with the SNI hostname
-     * once sniffing resolves. Mirrors iOS
-     * `LWIPTCPConnection.dstHost`.
+     * once sniffing resolves.
      */
     var dstHost: String = dstHost
         private set
@@ -61,7 +46,7 @@ class LwipTcpConnection(
     /**
      * Routing configuration for this connection. Mutable because a
      * successful SNI sniff can re-match a domain rule that points to a
-     * different proxy. Mirrors iOS `LWIPTCPConnection.configuration`.
+     * different proxy.
      */
     var configuration: ProxyConfiguration = configuration
         private set
@@ -71,7 +56,7 @@ class LwipTcpConnection(
     private val scope = CoroutineScope(lwipExecutor.asCoroutineDispatcher() + scopeJob)
 
     // Connection paths (mutually exclusive)
-    private var vlessConnection: VlessConnection? = null
+    private var vlessConnection: ProxyConnection? = null
     private var directRelay: DirectTcpRelay? = null
 
     private var vlessConnecting = false
@@ -94,43 +79,34 @@ class LwipTcpConnection(
     var closed = false
         private set
 
-    // -- SNI Sniffing --
-    //
     // When present, the connection is in the "sniff" phase: inbound bytes
     // are buffered (in `pendingData`) and fed to the sniffer before the
     // proxy is dialed. The first terminal state (Found / NotTls /
     // Unavailable) commits the route and kicks off the proxy connect.
-    // Cleared to null once the route is committed. Mirrors iOS
-    // `LWIPTCPConnection.sniffer`.
+    // Cleared to null once the route is committed.
     private var sniffer: TlsClientHelloSniffer? =
         if (sniffSNI) TlsClientHelloSniffer() else null
 
     /**
      * Fires if the sniff phase doesn't resolve within [TunnelConstants.sniffDeadlineMs]
      * — commits the IP-based route so server-speaks-first protocols
-     * (SSH, SMTP, FTP) don't stall waiting for a ClientHello. Mirrors
-     * iOS `LWIPTCPConnection.sniffDeadline`.
+     * (SSH, SMTP, FTP) don't stall waiting for a ClientHello.
      */
     private var sniffDeadline: ScheduledFuture<*>? = null
 
-    // -- Downlink Backlog State --
-
     /**
      * Downlink bytes received from the proxy that haven't been pushed into
-     * lwIP's TCP send buffer yet. Mirrors iOS `LWIPTCPConnection.pendingWrite`.
-     * Holds ALL outstanding downlink bytes — a concurrently prefetched
-     * receive appends here without racing the ongoing drain.
+     * lwIP's TCP send buffer yet. Holds ALL outstanding downlink bytes —
+     * a concurrently prefetched receive appends here without racing the
+     * ongoing drain.
      */
     private var pendingWrite = ByteArrayOutputStream()
 
     /**
      * True while a proxy receive is in flight. Guards against issuing a
-     * parallel receive on top of an existing one. Mirrors iOS
-     * `LWIPTCPConnection.receiveInFlight`.
+     * parallel receive on top of an existing one.
      */
     private var receiveInFlight = false
-
-    // -- Activity Timeout (matches Xray-core policy defaults) --
 
     private var activityTimer: ActivityTimer? = null
     private var handshakeTimer: ScheduledFuture<*>? = null
@@ -140,8 +116,7 @@ class LwipTcpConnection(
     init {
         // Handshake timeout (60s) — covers both the SNI-sniff wait and the
         // proxy dial, so a stalled client can't hold a connection open
-        // indefinitely before we ever call connect. Mirrors iOS
-        // LWIPTCPConnection handshakeTimer.
+        // indefinitely before we ever call connect.
         handshakeTimer = lwipExecutor.schedule({
             if (!closed && isEstablishing) {
                 val phase = if (sniffer != null) "TLS ClientHello sniff" else "proxy dial"
@@ -182,8 +157,7 @@ class LwipTcpConnection(
     /**
      * Appends to `pendingData` and enforces [TunnelConstants.tcpMaxPendingDataSize].
      * Aborts the connection if the cap would be exceeded and returns
-     * `false` so callers can bail out early. Mirrors iOS
-     * `LWIPTCPConnection.appendPendingData`.
+     * `false` so callers can bail out early.
      */
     private fun appendPendingData(data: ByteArray): Boolean {
         if (pendingData.size() + data.size > TunnelConstants.tcpMaxPendingDataSize) {
@@ -201,8 +175,7 @@ class LwipTcpConnection(
     /**
      * Kicks off the outbound connection using the currently committed
      * routing (configuration, bypass, dstHost). Idempotent — no-op once
-     * the connect has started or completed. Mirrors iOS
-     * `LWIPTCPConnection.beginConnecting`.
+     * the connect has started or completed.
      */
     private fun beginConnecting() {
         if (closed || vlessConnecting || directConnecting) return
@@ -213,10 +186,8 @@ class LwipTcpConnection(
     /**
      * Re-evaluates routing using the hostname extracted from the TLS
      * ClientHello. Updates [dstHost], [configuration], and [bypass] in
-     * place so the subsequent [beginConnecting] sees the SNI-based
-     * decision.
+     * place so the subsequent [beginConnecting] sees the SNI-based decision.
      *
-     * Behavior mirrors iOS `LWIPTCPConnection.applySNI`:
      *   - Found a matching domain rule: apply it (may switch proxy, flip
      *     bypass, or reject the connection) and swap [dstHost] to the SNI
      *     so the new route resolves the name itself.
@@ -262,8 +233,6 @@ class LwipTcpConnection(
         }
     }
 
-    // -- lwIP Callbacks (called on lwIP thread) --
-
     /** Handles data received from the local app via lwIP. */
     fun handleReceivedData(data: ByteArray) {
         if (closed) return
@@ -272,8 +241,7 @@ class LwipTcpConnection(
         // SNI sniff phase: buffer bytes and feed the sniffer before
         // dialing. Once a terminal state is reached we re-evaluate
         // routing (if SNI was found) and then kick off the proxy /
-        // direct connect. Mirrors iOS LWIPTCPConnection.handleReceivedData
-        // sniff branch.
+        // direct connect.
         val snifferRef = sniffer
         if (snifferRef != null) {
             val state = snifferRef.feed(data)
@@ -305,32 +273,16 @@ class LwipTcpConnection(
         }
 
         if (directRelay != null || vlessConnection != null) {
-            // Coalesce segments: accumulate data and schedule a batched send
-            // to reduce per-segment encryption overhead.
-            val bufferedSize = coalesceBuffer?.size() ?: 0
-            if (bufferedSize + data.size > TunnelConstants.tcpMaxCoalesceSize) {
-                // Buffer would overflow — flush accumulated data first to
-                // maintain stream ordering, then fall back to per-segment sends.
-                if (bufferedSize > 0 && !coalesceFlushInFlight) {
-                    flushCoalesceBuffer()
-                }
-                val nowBuffered = coalesceBuffer?.size() ?: 0
-                if (nowBuffered == 0) {
-                    // Buffer is empty (was empty or just flushed) — safe to
-                    // send per-segment for backpressure without reordering.
-                    sendSegmentDirect(data)
-                } else {
-                    // A flush is in-flight and the buffer still has unsent data.
-                    // Coalesce to preserve ordering; the chain-flush on
-                    // completion will send it after the in-flight data.
-                    coalesceBuffer!!.write(data)
-                }
-                return
-            }
-
-            // Always coalesce — even while a flush is in-flight. This matches
-            // Xray-core's buffered-pipe design where data accumulates during the
+            // Always coalesce — even while a flush is in-flight. This is a
+            // buffered-pipe design where data accumulates during the
             // scMinPostsIntervalMs sleep and is sent as one large POST.
+            //
+            // Strict single-flight: every byte for this connection flows
+            // through the same `flushCoalesceBuffer` coroutine chain. Concurrent
+            // `connection.send()` calls would interleave inside protocols
+            // whose framing can't tolerate it (Vision/HTTP-2/gRPC), so we
+            // never spawn a parallel send. Mirrors iOS `UploadPipeline`'s
+            // `sendInFlight` invariant in LWIPTCPConnection.swift:71-95.
             if (coalesceBuffer == null) coalesceBuffer = ByteArrayOutputStream()
             coalesceBuffer!!.write(data)
 
@@ -362,7 +314,7 @@ class LwipTcpConnection(
         // Client FIN'd before we finished sniffing. If we never received
         // any bytes, there's nothing to forward — drop the connection.
         // Otherwise commit the tentative IP-based route and forward what
-        // we have. Mirrors iOS LWIPTCPConnection.handleRemoteClose.
+        // we have.
         if (sniffer != null) {
             sniffer = null
             cancelSniffDeadline()
@@ -385,7 +337,7 @@ class LwipTcpConnection(
      * Surfaces why lwIP tore this connection down. Without this log the
      * connection simply vanishes from the user's perspective — no send /
      * receive error fires because the PCB has already been freed by the
-     * time tcp_err runs. Mirrors iOS LWIPTCPConnection.handleError.
+     * time tcp_err runs.
      */
     fun handleError(err: Int) {
         val reason = TransportErrorLogger.describeLwIPError(err)
@@ -427,8 +379,6 @@ class LwipTcpConnection(
         )
     }
 
-    // -- Direct Connection (bypass) --
-
     private fun connectDirect() {
         if (directConnecting || directRelay != null || closed) return
         directConnecting = true
@@ -459,40 +409,30 @@ class LwipTcpConnection(
                 directConnecting = false
                 if (closed) return@execute
 
-                emitDeferredSynAck()
                 handshakeTimer?.cancel(false)
                 handshakeTimer = null
                 activityTimer = ActivityTimer(lwipExecutor, TunnelConstants.connectionIdleTimeoutMs) {
                     if (!closed) close()
                 }
 
-                // Flush initial data
-                if (initialData != null) {
-                    val dataLen = initialData.size.coerceAtMost(65535)
-                    scope.launch {
-                        try {
-                            relay.send(initialData)
-                            lwipExecutor.execute {
-                                if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
-                            }
-                        } catch (_: CancellationException) {
-                        } catch (e: Exception) {
-                            if (!closed) logTransportFailure("Send", e, LwipStack.LogLevel.WARNING)
-                            lwipExecutor.execute { abort() }
-                        }
-                    }
-                }
-
-                // Flush data that arrived during connect
-                if (pendingData.size() > 0) {
-                    val dataToSend = pendingData.toByteArray()
-                    val dataLen = dataToSend.size.coerceAtMost(65535)
+                // Drain initialData + any pendingData that arrived during connect.
+                // Send sequentially in one coroutine so byte order is preserved
+                // (mirrors iOS UploadPipeline's strict single-flight semantics).
+                val followup = if (pendingData.size() > 0) {
+                    val data = pendingData.toByteArray()
                     pendingData.reset()
+                    data
+                } else null
+
+                if (initialData != null || followup != null) {
                     scope.launch {
                         try {
-                            relay.send(dataToSend)
+                            if (initialData != null) relay.send(initialData)
+                            if (followup != null) relay.send(followup)
+                            val totalAck = (initialData?.size ?: 0) + (followup?.size ?: 0)
                             lwipExecutor.execute {
-                                if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
+                                if (closed) return@execute
+                                ackBytesToLwip(totalAck)
                             }
                         } catch (_: CancellationException) {
                         } catch (e: Exception) {
@@ -507,7 +447,22 @@ class LwipTcpConnection(
         }
     }
 
-    // -- Protocol Connection --
+    /**
+     * Acknowledges [bytes] to lwIP in 65535-byte chunks (UInt16 cap), then
+     * forces an immediate window-update output flush. Mirrors iOS
+     * `acknowledgeReceivedBytes` (LWIPTCPConnection.swift:332-342).
+     */
+    private fun ackBytesToLwip(bytes: Int) {
+        if (bytes <= 0) return
+        var remaining = bytes
+        while (remaining > 0) {
+            val chunk = remaining.coerceAtMost(65535)
+            NativeBridge.nativeTcpRecved(pcb, chunk)
+            remaining -= chunk
+        }
+        NativeBridge.nativeTcpOutput(pcb)
+        LwipStack.instance?.flushOutputInline()
+    }
 
     /**
      * Connects to the proxy using the appropriate protocol (VLESS, Shadowsocks, NaiveProxy).
@@ -519,11 +474,9 @@ class LwipTcpConnection(
 
         // Only protocols that embed the first bytes inside their handshake
         // (VLESS + transports) consume `pendingData` here. For everything
-        // else (Hysteria, Trojan, Shadowsocks, SOCKS5, NaiveProxy), leave
+        // else (Trojan, Shadowsocks, SOCKS5, NaiveProxy), leave
         // `pendingData` intact — `onProxyConnected` will forward it via the
         // proxy connection AND ACK it back to lwIP via `nativeTcpRecved`.
-        // Mirrors iOS `LWIPTCPConnection.connectProxy`'s
-        // `handshakeCarriesInitialData` branch.
         val initialData = if (configuration.outboundProtocol.handshakeCarriesInitialData
             && pendingData.size() > 0) {
             val data = pendingData.toByteArray()
@@ -543,7 +496,7 @@ class LwipTcpConnection(
                 val connection = ProxyClientFactory.connect(
                     configuration, dstHost, dstPort, initialData
                 )
-                onProxyConnected(connection)
+                onProxyConnected(connection, handshakeAckBytes = initialData?.size ?: 0)
             } catch (_: CancellationException) {
                 return@launch
             } catch (e: Exception) {
@@ -561,8 +514,14 @@ class LwipTcpConnection(
     /**
      * Handles post-connection setup common to all protocol paths.
      * Sets up activity timer, flushes pending data, and starts the receive loop.
+     *
+     * [handshakeAckBytes] is the byte count of any initialData that the protocol
+     * consumed inside its handshake (extracted by `connectProxy` for VLESS-style
+     * protocols where `handshakeCarriesInitialData` is true). Those bytes were
+     * never `nativeTcpRecved`'d; ack them here so lwIP's recv window reopens.
+     * Mirrors iOS `LWIPTCPConnection.swift:602-606`.
      */
-    private fun onProxyConnected(connection: VlessConnection) {
+    private fun onProxyConnected(connection: ProxyConnection, handshakeAckBytes: Int = 0) {
         lwipExecutor.execute {
             vlessConnecting = false
             if (closed) {
@@ -571,23 +530,27 @@ class LwipTcpConnection(
             }
 
             vlessConnection = connection
-            emitDeferredSynAck()
             handshakeTimer?.cancel(false)
             handshakeTimer = null
             activityTimer = ActivityTimer(lwipExecutor, TunnelConstants.connectionIdleTimeoutMs) {
                 if (!closed) close()
             }
 
-            // Flush data that arrived during connect
-            if (pendingData.size() > 0) {
-                val dataToSend = pendingData.toByteArray()
-                val dataLen = dataToSend.size.coerceAtMost(65535)
+            // Drain any pendingData arrived during connect, then ack the
+            // combined byte count (handshake-carried + pendingData) in one shot.
+            val followup = if (pendingData.size() > 0) {
+                val data = pendingData.toByteArray()
                 pendingData.reset()
+                data
+            } else null
+
+            if (followup != null) {
                 scope.launch {
                     try {
-                        connection.send(dataToSend)
+                        connection.send(followup)
                         lwipExecutor.execute {
-                            if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
+                            if (closed) return@execute
+                            ackBytesToLwip(handshakeAckBytes + followup.size)
                         }
                     } catch (_: CancellationException) {
                     } catch (e: Exception) {
@@ -595,13 +558,13 @@ class LwipTcpConnection(
                         lwipExecutor.execute { abort() }
                     }
                 }
+            } else if (handshakeAckBytes > 0) {
+                ackBytesToLwip(handshakeAckBytes)
             }
 
             tryArmReceive()
         }
     }
-
-    // -- Chain Connection --
 
     /**
      * Builds a chain of proxy connections: entry → intermediate → ... → exit → target.
@@ -616,7 +579,7 @@ class LwipTcpConnection(
     ) {
         scope.launch {
             try {
-                var previousConnection: VlessConnection? = null
+                var previousConnection: ProxyConnection? = null
 
                 for (i in chain.indices) {
                     val hopConfig = chain[i]
@@ -634,7 +597,7 @@ class LwipTcpConnection(
                 val connection = ProxyClientFactory.connect(
                     configuration, dstHost, dstPort, initialData, tunnel = previousConnection
                 )
-                onProxyConnected(connection)
+                onProxyConnected(connection, handshakeAckBytes = initialData?.size ?: 0)
             } catch (_: CancellationException) {
                 return@launch
             } catch (e: Exception) {
@@ -649,37 +612,15 @@ class LwipTcpConnection(
         }
     }
 
-    // -- Upload Coalescing --
-
     /**
-     * Sends a single segment directly (bypassing coalesce buffer).
-     * Used when the coalesce buffer flush is in-flight or would exceed the size cap.
-     */
-    private fun sendSegmentDirect(data: ByteArray) {
-        val dataLen = data.size.coerceAtMost(65535)
-        val relay = directRelay
-        val connection = vlessConnection
-
-        scope.launch {
-            try {
-                if (relay != null) {
-                    relay.send(data)
-                } else {
-                    connection?.send(data) ?: return@launch
-                }
-                lwipExecutor.execute {
-                    if (!closed) NativeBridge.nativeTcpRecved(pcb, dataLen)
-                }
-            } catch (_: CancellationException) {
-            } catch (e: Exception) {
-                if (!closed) logTransportFailure("Send", e, LwipStack.LogLevel.WARNING)
-                lwipExecutor.execute { abort() }
-            }
-        }
-    }
-
-    /**
-     * Flushes the coalesce buffer, sending all accumulated segments as a single batch.
+     * Flushes the coalesce buffer, sending accumulated segments through the
+     * proxy in `tcpMaxCoalesceSize` chunks. All chunks for a single flush
+     * land in one coroutine so the proxy connection sees strictly serial
+     * `send` calls — a hard requirement for protocols whose framing uses
+     * 2-byte length fields (Vision padding) or shared sequence numbers
+     * (HTTP/2, gRPC). Mirrors iOS `UploadPipeline.pumpUploadSends`
+     * (LWIPTCPConnection.swift:299-326).
+     *
      * Called on the lwIP executor thread after the current processing cycle completes.
      */
     private fun flushCoalesceBuffer() {
@@ -697,24 +638,35 @@ class LwipTcpConnection(
         coalesceFlushInFlight = true
         scope.launch {
             try {
-                if (relay != null) {
-                    relay.send(dataToSend)
-                } else {
-                    connection!!.send(dataToSend)
+                var sent = 0
+                while (sent < dataToSend.size) {
+                    val chunkSize = minOf(
+                        dataToSend.size - sent,
+                        TunnelConstants.tcpMaxCoalesceSize
+                    )
+                    val chunk = if (sent == 0 && chunkSize == dataToSend.size) {
+                        dataToSend
+                    } else {
+                        dataToSend.copyOfRange(sent, sent + chunkSize)
+                    }
+                    if (relay != null) {
+                        relay.send(chunk)
+                    } else {
+                        connection!!.send(chunk)
+                    }
+                    // Per-chunk ack mirrors iOS — keeps lwIP's recv window
+                    // opening in step with upstream throughput rather than
+                    // batching the whole buffer's worth of credit at once.
+                    lwipExecutor.execute {
+                        if (!closed) ackBytesToLwip(chunkSize)
+                    }
+                    sent += chunkSize
                 }
                 lwipExecutor.execute {
                     coalesceFlushInFlight = false
                     if (!closed) {
-                        // Acknowledge all coalesced bytes to advance the TCP receive window
-                        var remaining = dataToSend.size
-                        while (remaining > 0) {
-                            val ack = remaining.coerceAtMost(65535)
-                            NativeBridge.nativeTcpRecved(pcb, ack)
-                            remaining -= ack
-                        }
                         // Immediately flush data that accumulated during the in-flight send.
-                        // Matches iOS Xray-core batched-upload behavior (LWIPTCPConnection.swift:207-209):
-                        // data coalesces while the previous POST + delay runs, then flushes
+                        // Data coalesces while the previous POST + delay runs, then flushes
                         // as one large POST instead of many small per-segment POSTs.
                         if (coalesceBuffer != null && coalesceBuffer!!.size() > 0) {
                             flushCoalesceBuffer()
@@ -732,8 +684,6 @@ class LwipTcpConnection(
             }
         }
     }
-
-    // -- Data Writing to lwIP (downlink: remote → local app) --
 
     /**
      * Feeds as many bytes as possible from [data] (starting at [dataOffset]) into
@@ -770,7 +720,6 @@ class LwipTcpConnection(
      * as much as lwIP will accept. All order-preservation lives in
      * [pendingWrite], so a concurrently prefetched receive can land without
      * racing ahead of the chunk currently being drained.
-     * Mirrors iOS `LWIPTCPConnection.writeToLWIP`.
      */
     fun writeToLwip(data: ByteArray) {
         if (closed || data.isEmpty()) return
@@ -786,7 +735,7 @@ class LwipTcpConnection(
      * Called from [handleSent] on every client ACK, from [writeToLwip]
      * after new proxy data is appended, and from a [TunnelConstants.drainRetryDelayMs]
      * fallback timer when `tcp_write` couldn't place any bytes (snd_buf
-     * full / zero window). Mirrors iOS `LWIPTCPConnection.drainPendingWrite`.
+     * full / zero window).
      */
     private fun drainPendingWrite() {
         if (closed) return
@@ -811,8 +760,7 @@ class LwipTcpConnection(
                 }
                 NativeBridge.nativeTcpOutput(pcb)
                 // Flush the egress queue inline so freed pbufs leave the host
-                // within the same drain cycle that consumed them. Mirrors iOS
-                // `LWIPStack.flushOutputInline()`.
+                // within the same drain cycle that consumed them.
                 LwipStack.instance?.flushOutputInline()
             } else {
                 // Nothing drained (ERR_MEM / zero window) — schedule a delayed
@@ -846,8 +794,7 @@ class LwipTcpConnection(
      *
      * Backpressure still applies: when `pendingWrite.size()` is at or above
      * [TunnelConstants.drainLowWaterMark], this is a no-op, so receives
-     * naturally pause whenever lwIP can't keep up. Mirrors iOS
-     * `LWIPTCPConnection.tryArmReceive`.
+     * naturally pause whenever lwIP can't keep up.
      */
     private fun tryArmReceive() {
         if (closed || receiveInFlight) return
@@ -896,8 +843,6 @@ class LwipTcpConnection(
         }
     }
 
-    // -- Close / Abort --
-
     /** Best-effort flush of pending data into lwIP send buffer before close. */
     private fun flushPendingToLwip() {
         if (pendingWrite.size() == 0) return
@@ -928,8 +873,7 @@ class LwipTcpConnection(
      * failure, which drives browsers and HTTP clients to retry
      * aggressively — defeating the point of the reject rule. Advancing
      * the window first lets `close()` send a real FIN, which clients
-     * treat as a deliberate peer close and don't retry. Mirrors iOS
-     * `LWIPTCPConnection.rejectGracefully`.
+     * treat as a deliberate peer close and don't retry.
      */
     private fun rejectGracefully() {
         if (closed) return
@@ -942,31 +886,10 @@ class LwipTcpConnection(
         close()
     }
 
-    /**
-     * Releases the SYN-ACK we held back in `tcp_listen_input`. No-op in
-     * the legacy ALLOW path (where [deferredAccept] was never set). Must
-     * be called on the lwIP executor before any tcp_write so lwIP enqueues
-     * SYN-ACK ahead of the first data segment. Mirrors iOS
-     * `LWIPTCPConnection.emitDeferredSynAck`.
-     */
-    private fun emitDeferredSynAck() {
-        if (!deferredAccept || closed) return
-        deferredAccept = false
-        NativeBridge.nativeTcpCompleteAccept(pcb)
-    }
-
     fun abort() {
         if (closed) return
         closed = true
-        if (deferredAccept) {
-            // SYN-ACK was never emitted — answer the held SYN with a RST
-            // so the local app's connect(2) sees ECONNREFUSED instead of
-            // a mid-stream reset.
-            deferredAccept = false
-            NativeBridge.nativeTcpRejectAccept(pcb)
-        } else {
-            NativeBridge.nativeTcpAbort(pcb)
-        }
+        NativeBridge.nativeTcpAbort(pcb)
         releaseProtocol()
         LwipStack.instance?.removeConnection(connId)
     }

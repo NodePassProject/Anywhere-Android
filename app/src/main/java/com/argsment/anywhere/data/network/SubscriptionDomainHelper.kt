@@ -1,8 +1,7 @@
 package com.argsment.anywhere.data.network
 
 /**
- * Mirrors iOS `SubscriptionDomainHelper` — allow-lists of subscription domains
- * that trigger special handling:
+ * Allow-lists of subscription domains that trigger special handling:
  *
  *  - [shouldDisableProxyEditing] locks individual proxies inside a subscription
  *    from being edited or deleted (users should re-subscribe instead).

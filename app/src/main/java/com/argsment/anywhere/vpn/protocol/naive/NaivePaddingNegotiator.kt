@@ -1,5 +1,6 @@
 package com.argsment.anywhere.vpn.protocol.naive
 
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 /**
@@ -7,13 +8,10 @@ import kotlin.random.Random
  */
 object NaivePaddingNegotiator {
 
-    /** Negotiated padding type. */
     enum class PaddingType(val value: Int) {
         NONE(0),
         VARIANT1(1)
     }
-
-    // -- Non-Indexed HPACK Characters --
 
     /**
      * The 17 printable ASCII characters (0x20–0x7f) whose HPACK Huffman codes are >= 8 bits,
@@ -50,7 +48,7 @@ object NaivePaddingNegotiator {
      * the 17th entry ('X').
      */
     fun generatePaddingValue(): String {
-        val length = Random.nextInt(16, 33) // 16..32
+        val length = Random.nextInt(16, 33)
         var uniqueBits = Random.nextLong()
         val chars = ByteArray(length)
 
@@ -66,14 +64,10 @@ object NaivePaddingNegotiator {
         return String(chars, Charsets.US_ASCII)
     }
 
-    // -- Request Headers --
-
     /**
-     * Generates the padding-related headers for a CONNECT request.
-     *
-     * @param fastOpen If true, includes the `fastopen: 1` header (used when the server's
-     *   padding type is already known from a previous connection).
-     * @return A list of (name, value) header pairs.
+     * Generates the padding-related headers for a CONNECT request. When [fastOpen] is true,
+     * includes `fastopen: 1` (used when the server's padding type is cached from a prior
+     * connection).
      */
     fun requestHeaders(fastOpen: Boolean = false): List<Pair<String, String>> {
         val headers = mutableListOf<Pair<String, String>>()
@@ -85,15 +79,24 @@ object NaivePaddingNegotiator {
         return headers
     }
 
-    // -- Response Parsing --
+    /**
+     * Caches negotiated padding types per server so subsequent connections can send
+     * `fastopen: 1` and skip the negotiation round-trip.
+     */
+    private val paddingTypeCache = ConcurrentHashMap<String, PaddingType>()
+
+    fun cachedPaddingType(host: String, port: Int, sni: String): PaddingType? =
+        paddingTypeCache["$host:$port:$sni"]
+
+    fun cachePaddingType(type: PaddingType, host: String, port: Int, sni: String) {
+        paddingTypeCache["$host:$port:$sni"] = type
+    }
 
     /**
-     * Parses the server's response headers to determine the negotiated padding type.
-     *
-     * Logic (matching the C++ reference implementation):
-     * 1. If `padding-type-reply` header exists, parse its value as a padding type.
-     * 2. Otherwise, if `padding` header exists, assume [PaddingType.VARIANT1] (backward compat).
-     * 3. Otherwise, [PaddingType.NONE].
+     * Parses the server response headers to determine the negotiated padding type:
+     * 1. If `padding-type-reply` exists, parse its value.
+     * 2. Otherwise, presence of `padding` header implies [PaddingType.VARIANT1] (backward compat).
+     * 3. Otherwise [PaddingType.NONE].
      */
     fun parseResponse(headers: List<Pair<String, String>>): PaddingType {
         val replyHeader = headers.firstOrNull { it.first.equals("padding-type-reply", ignoreCase = true) }

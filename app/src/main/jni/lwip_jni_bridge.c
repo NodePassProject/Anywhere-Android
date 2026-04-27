@@ -1,17 +1,9 @@
 /*
  * lwip_jni_bridge.c
  *
- * JNI bridge for lwIP — replaces the iOS Swift callback mechanism with
- * JNI callbacks to Kotlin.  The Kotlin class is
- *     com.argsment.anywhere.vpn.NativeBridge
- *
- * Every native method in NativeBridge.kt maps to a
- *     Java_com_argsment_anywhere_vpn_NativeBridge_nativeXxx
- * function here.
- *
  * Callbacks from C into Kotlin go through cached jmethodID handles that
  * are resolved once in nativeInit and reused for the lifetime of the
- * bridge.  Because lwIP callbacks may fire on a worker thread we always
+ * bridge. Because lwIP callbacks may fire on a worker thread we always
  * obtain a valid JNIEnv* via AttachCurrentThread before calling into the
  * JVM.
  */
@@ -23,45 +15,26 @@
 
 #include "lwip/lwip_bridge.h"
 
-/* ------------------------------------------------------------------ */
-/*  Logging                                                            */
-/* ------------------------------------------------------------------ */
-
 #define LOG_TAG "LwipJniBridge"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-/* ------------------------------------------------------------------ */
-/*  Cached JNI state                                                   */
-/* ------------------------------------------------------------------ */
+static JavaVM  *g_jvm           = NULL;
+static jclass    g_bridge_class = NULL;
 
-static JavaVM  *g_jvm           = NULL;   /* set in JNI_OnLoad               */
-static jclass    g_bridge_class = NULL;   /* global ref to NativeBridge class */
+/* Pre-allocated output buffer reused across calls to avoid per-packet
+ * allocation. Safe because all lwIP callbacks run on a single thread and
+ * the Java onOutput writes synchronously before returning. */
+static jbyteArray g_output_buf      = NULL;
+static int        g_output_buf_cap  = 0;
 
-/* Pre-allocated output buffer — reused across calls to avoid per-packet
-   allocation.  Safe because all lwIP callbacks run on a single thread and
-   the Java onOutput writes synchronously before returning. */
-static jbyteArray g_output_buf      = NULL;   /* global ref                */
-static int        g_output_buf_cap  = 0;      /* current capacity in bytes */
-
-/* Cached method IDs for callbacks from C -> Kotlin */
 static jmethodID g_onOutput_mid       = NULL;
 static jmethodID g_onTcpAccept_mid    = NULL;
-static jmethodID g_onTcpPreAccept_mid = NULL;
 static jmethodID g_onTcpRecv_mid      = NULL;
 static jmethodID g_onTcpSent_mid      = NULL;
 static jmethodID g_onTcpErr_mid       = NULL;
 static jmethodID g_onUdpRecv_mid      = NULL;
-
-/* Cached LongArray[2] used as the [decision, connId] return slot for the
- * pre-accept callback. Reused across calls — pre-accept is single-threaded
- * (NO_SYS=1, lwIP runs on the lwipExecutor) so contention isn't a concern. */
-static jlongArray g_pre_accept_result = NULL;
-
-/* ------------------------------------------------------------------ */
-/*  Helper: get a JNIEnv* for the calling thread                       */
-/* ------------------------------------------------------------------ */
 
 static JNIEnv *get_env(int *did_attach) {
     JNIEnv *env = NULL;
@@ -97,10 +70,6 @@ static void release_env(int did_attach) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  JNI_OnLoad — cache JavaVM*                                         */
-/* ------------------------------------------------------------------ */
-
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     g_jvm = vm;
@@ -108,18 +77,6 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     return JNI_VERSION_1_6;
 }
 
-/* ------------------------------------------------------------------ */
-/*  C callback implementations (registered with lwip_bridge_set_*_fn)  */
-/* ------------------------------------------------------------------ */
-
-/*
- * lwip_output_fn: lwIP wants to send a packet out through the TUN.
- * Uses a pre-allocated byte array (g_output_buf) to avoid per-packet
- * allocation.  The buffer is grown if a packet exceeds its capacity.
- *
- * Signature of Kotlin method:
- *     fun onOutput(packet: ByteArray, length: Int, isIpv6: Boolean)
- */
 static void jni_output_cb(const void *data, int len, int is_ipv6) {
     int did_attach = 0;
     JNIEnv *env = get_env(&did_attach);
@@ -129,7 +86,6 @@ static void jni_output_cb(const void *data, int len, int is_ipv6) {
         return;
     }
 
-    /* Grow the reusable buffer if needed (rare — MTU is typically 1400). */
     if (g_output_buf == NULL || len > g_output_buf_cap) {
         if (g_output_buf != NULL) {
             (*env)->DeleteGlobalRef(env, g_output_buf);
@@ -157,13 +113,6 @@ static void jni_output_cb(const void *data, int len, int is_ipv6) {
     release_env(did_attach);
 }
 
-/*
- * lwip_tcp_accept_fn: new TCP connection accepted.
- * Signature of Kotlin method:
- *     fun onTcpAccept(srcIp: ByteArray, srcPort: Int, dstIp: ByteArray,
- *                     dstPort: Int, isIpv6: Boolean, pcb: Long): Long
- * Returns a connection ID (or 0 to abort).
- */
 static void *jni_tcp_accept_cb(const void *src_ip, uint16_t src_port,
                                 const void *dst_ip, uint16_t dst_port,
                                 int is_ipv6, void *pcb) {
@@ -202,93 +151,6 @@ static void *jni_tcp_accept_cb(const void *src_ip, uint16_t src_port,
     return (void *)(intptr_t)conn_id;
 }
 
-/*
- * lwip_tcp_pre_accept_fn: new SYN_RCVD PCB; pick ALLOW / DEFER / REJECT
- * before SYN-ACK is enqueued. See lwip/ANYWHERE_PATCHES.md "deferred SYN-ACK".
- *
- * Signature of Kotlin method:
- *     fun onTcpPreAccept(srcIp: ByteArray, srcPort: Int,
- *                        dstIp: ByteArray, dstPort: Int,
- *                        isIpv6: Boolean, pcb: Long,
- *                        outResult: LongArray)
- *
- * Kotlin fills outResult[0]=decision (0/1/2) and outResult[1]=connId.
- */
-static void jni_tcp_pre_accept_cb(const void *src_ip, uint16_t src_port,
-                                    const void *dst_ip, uint16_t dst_port,
-                                    int is_ipv6, void *pcb,
-                                    int *out_decision, void **out_conn) {
-    /* Default to REJECT so any early-out below sends RST. */
-    if (out_decision) *out_decision = 2;
-    if (out_conn)     *out_conn     = NULL;
-
-    int did_attach = 0;
-    JNIEnv *env = get_env(&did_attach);
-    if (env == NULL || g_bridge_class == NULL || g_onTcpPreAccept_mid == NULL) {
-        LOGE("jni_tcp_pre_accept_cb: JNI state not ready");
-        release_env(did_attach);
-        return;
-    }
-
-    /* Lazy-allocate the cached return slot. */
-    if (g_pre_accept_result == NULL) {
-        jlongArray local = (*env)->NewLongArray(env, 2);
-        if (local == NULL) {
-            LOGE("jni_tcp_pre_accept_cb: NewLongArray failed");
-            release_env(did_attach);
-            return;
-        }
-        g_pre_accept_result = (jlongArray)(*env)->NewGlobalRef(env, local);
-        (*env)->DeleteLocalRef(env, local);
-        if (g_pre_accept_result == NULL) {
-            LOGE("jni_tcp_pre_accept_cb: NewGlobalRef failed");
-            release_env(did_attach);
-            return;
-        }
-    }
-
-    /* Pre-fill with REJECT defaults so a Kotlin path that throws or
-     * forgets to write the array still produces a clean RST. */
-    jlong defaults[2] = { 2, 0 };
-    (*env)->SetLongArrayRegion(env, g_pre_accept_result, 0, 2, defaults);
-
-    int addr_len = is_ipv6 ? 16 : 4;
-    jbyteArray j_src_ip = (*env)->NewByteArray(env, addr_len);
-    jbyteArray j_dst_ip = (*env)->NewByteArray(env, addr_len);
-    if (j_src_ip == NULL || j_dst_ip == NULL) {
-        LOGE("jni_tcp_pre_accept_cb: NewByteArray failed");
-        if (j_src_ip) (*env)->DeleteLocalRef(env, j_src_ip);
-        if (j_dst_ip) (*env)->DeleteLocalRef(env, j_dst_ip);
-        release_env(did_attach);
-        return;
-    }
-    (*env)->SetByteArrayRegion(env, j_src_ip, 0, addr_len, (const jbyte *)src_ip);
-    (*env)->SetByteArrayRegion(env, j_dst_ip, 0, addr_len, (const jbyte *)dst_ip);
-
-    (*env)->CallStaticVoidMethod(env, g_bridge_class, g_onTcpPreAccept_mid,
-                                 j_src_ip, (jint)src_port,
-                                 j_dst_ip, (jint)dst_port,
-                                 (jboolean)(is_ipv6 != 0),
-                                 (jlong)(intptr_t)pcb,
-                                 g_pre_accept_result);
-
-    jlong result[2];
-    (*env)->GetLongArrayRegion(env, g_pre_accept_result, 0, 2, result);
-
-    (*env)->DeleteLocalRef(env, j_src_ip);
-    (*env)->DeleteLocalRef(env, j_dst_ip);
-    release_env(did_attach);
-
-    if (out_decision) *out_decision = (int)result[0];
-    if (out_conn)     *out_conn     = (void *)(intptr_t)result[1];
-}
-
-/*
- * lwip_tcp_recv_fn: data received on a TCP connection.
- * Signature of Kotlin method:
- *     fun onTcpRecv(connId: Long, data: ByteArray?)
- * data is null when FIN received (remote closed).
- */
 static void jni_tcp_recv_cb(void *conn, const void *data, int len) {
     int did_attach = 0;
     JNIEnv *env = get_env(&did_attach);
@@ -310,7 +172,7 @@ static void jni_tcp_recv_cb(void *conn, const void *data, int len) {
         }
         (*env)->SetByteArrayRegion(env, j_data, 0, len, (const jbyte *)data);
     }
-    /* data==NULL or len<=0 -> pass null to Kotlin to indicate FIN */
+    /* data==NULL or len<=0: pass null to Kotlin to indicate FIN. */
 
     (*env)->CallStaticVoidMethod(env, g_bridge_class, g_onTcpRecv_mid, conn_id, j_data);
 
@@ -320,11 +182,6 @@ static void jni_tcp_recv_cb(void *conn, const void *data, int len) {
     release_env(did_attach);
 }
 
-/*
- * lwip_tcp_sent_fn: ACK received, send buffer space freed.
- * Signature of Kotlin method:
- *     fun onTcpSent(connId: Long, length: Int)
- */
 static void jni_tcp_sent_cb(void *conn, uint16_t len) {
     int did_attach = 0;
     JNIEnv *env = get_env(&did_attach);
@@ -340,11 +197,6 @@ static void jni_tcp_sent_cb(void *conn, uint16_t len) {
     release_env(did_attach);
 }
 
-/*
- * lwip_tcp_err_fn: TCP error or connection aborted.
- * Signature of Kotlin method:
- *     fun onTcpErr(connId: Long, err: Int)
- */
 static void jni_tcp_err_cb(void *conn, int err) {
     int did_attach = 0;
     JNIEnv *env = get_env(&did_attach);
@@ -360,12 +212,6 @@ static void jni_tcp_err_cb(void *conn, int err) {
     release_env(did_attach);
 }
 
-/*
- * lwip_udp_recv_fn: UDP datagram received.
- * Signature of Kotlin method:
- *     fun onUdpRecv(srcIp: ByteArray, srcPort: Int, dstIp: ByteArray,
- *                   dstPort: Int, isIpv6: Boolean, data: ByteArray)
- */
 static void jni_udp_recv_cb(const void *src_ip, uint16_t src_port,
                               const void *dst_ip, uint16_t dst_port,
                               int is_ipv6, const void *data, int len) {
@@ -406,20 +252,13 @@ static void jni_udp_recv_cb(const void *src_ip, uint16_t src_port,
     release_env(did_attach);
 }
 
-/* ------------------------------------------------------------------ */
-/*  JNI native methods exposed to Kotlin                               */
-/* ------------------------------------------------------------------ */
-
-/*
- * nativeInit() — initialise lwIP, register all C-to-Java callbacks.
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeInit(JNIEnv *env, jclass clazz) {
     LOGI("nativeInit: starting");
 
-    /* For @JvmStatic methods in a Kotlin object, the second JNI parameter
-       is jclass (the NativeBridge class itself), not a jobject instance.
-       Store a global reference to the class for use in static callbacks. */
+    /* For @JvmStatic methods in a Kotlin object the second JNI parameter
+     * is jclass, not a jobject instance. Store a global reference to the
+     * class for use in static callbacks. */
     if (g_bridge_class != NULL) {
         (*env)->DeleteGlobalRef(env, g_bridge_class);
     }
@@ -429,7 +268,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeInit(JNIEnv *env, jclass clazz
         return;
     }
 
-    /* Cache all static callback method IDs. */
     g_onOutput_mid = (*env)->GetStaticMethodID(env, clazz,
         "onOutput", "([BIZ)V");
     if (g_onOutput_mid == NULL) {
@@ -441,13 +279,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeInit(JNIEnv *env, jclass clazz
         "onTcpAccept", "([BI[BIZJ)J");
     if (g_onTcpAccept_mid == NULL) {
         LOGE("nativeInit: could not find onTcpAccept");
-        return;
-    }
-
-    g_onTcpPreAccept_mid = (*env)->GetStaticMethodID(env, clazz,
-        "onTcpPreAccept", "([BI[BIZJ[J)V");
-    if (g_onTcpPreAccept_mid == NULL) {
-        LOGE("nativeInit: could not find onTcpPreAccept");
         return;
     }
 
@@ -479,25 +310,18 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeInit(JNIEnv *env, jclass clazz
         return;
     }
 
-    /* Register our C callback functions with lwip_bridge. */
     lwip_bridge_set_output_fn(jni_output_cb);
     lwip_bridge_set_tcp_accept_fn(jni_tcp_accept_cb);
-    lwip_bridge_set_tcp_pre_accept_fn(jni_tcp_pre_accept_cb);
     lwip_bridge_set_tcp_recv_fn(jni_tcp_recv_cb);
     lwip_bridge_set_tcp_sent_fn(jni_tcp_sent_cb);
     lwip_bridge_set_tcp_err_fn(jni_tcp_err_cb);
     lwip_bridge_set_udp_recv_fn(jni_udp_recv_cb);
 
-    /* Initialise lwIP itself. */
     lwip_bridge_init();
 
     LOGI("nativeInit: done");
 }
 
-/*
- * nativeInput(packet: ByteArray, length: Int) — feed a raw IP packet
- * (read from TUN) into lwIP.
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeInput(JNIEnv *env, jobject thiz,
                                                         jbyteArray packet, jint length) {
@@ -519,9 +343,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeInput(JNIEnv *env, jobject thi
     (*env)->ReleaseByteArrayElements(env, packet, buf, JNI_ABORT);
 }
 
-/*
- * nativeTimerPoll() — drive lwIP internal timers.
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTimerPoll(JNIEnv *env, jobject thiz) {
     (void)env;
@@ -529,11 +350,9 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTimerPoll(JNIEnv *env, jobject
     lwip_bridge_check_timeouts();
 }
 
-/*
- * nativeAbortAllTcp() — abort every active TCP PCB without tearing down
- * the netif or listeners. Used on device wake / underlying-network change
- * to invalidate outbound proxy sockets the kernel killed during sleep.
- */
+/* Abort every active TCP PCB without tearing down the netif or listeners.
+ * Used on device wake / underlying-network change to invalidate outbound
+ * proxy sockets the kernel killed during sleep. */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeAbortAllTcp(JNIEnv *env, jobject thiz) {
     (void)env;
@@ -541,9 +360,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeAbortAllTcp(JNIEnv *env, jobje
     lwip_bridge_abort_all_tcp();
 }
 
-/*
- * nativeShutdown() — tear down lwIP and release JNI resources.
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeShutdown(JNIEnv *env, jobject thiz) {
     (void)thiz;
@@ -551,38 +367,26 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeShutdown(JNIEnv *env, jobject 
 
     lwip_bridge_shutdown();
 
-    /* Clear callback registrations. */
     lwip_bridge_set_output_fn(NULL);
     lwip_bridge_set_tcp_accept_fn(NULL);
-    lwip_bridge_set_tcp_pre_accept_fn(NULL);
     lwip_bridge_set_tcp_recv_fn(NULL);
     lwip_bridge_set_tcp_sent_fn(NULL);
     lwip_bridge_set_tcp_err_fn(NULL);
     lwip_bridge_set_udp_recv_fn(NULL);
 
-    /* Release the pre-allocated output buffer. */
     if (g_output_buf != NULL) {
         (*env)->DeleteGlobalRef(env, g_output_buf);
         g_output_buf = NULL;
         g_output_buf_cap = 0;
     }
 
-    /* Release the cached pre-accept return slot. */
-    if (g_pre_accept_result != NULL) {
-        (*env)->DeleteGlobalRef(env, g_pre_accept_result);
-        g_pre_accept_result = NULL;
-    }
-
-    /* Release the global reference to NativeBridge class. */
     if (g_bridge_class != NULL) {
         (*env)->DeleteGlobalRef(env, g_bridge_class);
         g_bridge_class = NULL;
     }
 
-    /* Invalidate cached method IDs. */
     g_onOutput_mid       = NULL;
     g_onTcpAccept_mid    = NULL;
-    g_onTcpPreAccept_mid = NULL;
     g_onTcpRecv_mid      = NULL;
     g_onTcpSent_mid      = NULL;
     g_onTcpErr_mid       = NULL;
@@ -591,9 +395,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeShutdown(JNIEnv *env, jobject 
     LOGI("nativeShutdown: done");
 }
 
-/*
- * nativeTcpWrite(pcb: Long, data: ByteArray, offset: Int, length: Int): Int
- */
 JNIEXPORT jint JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpWrite(JNIEnv *env, jobject thiz,
                                                            jlong pcb, jbyteArray data,
@@ -619,9 +420,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpWrite(JNIEnv *env, jobject 
     return (jint)result;
 }
 
-/*
- * nativeTcpOutput(pcb: Long)
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpOutput(JNIEnv *env, jobject thiz,
                                                             jlong pcb) {
@@ -630,9 +428,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpOutput(JNIEnv *env, jobject
     lwip_bridge_tcp_output((void *)(intptr_t)pcb);
 }
 
-/*
- * nativeTcpRecved(pcb: Long, length: Int)
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpRecved(JNIEnv *env, jobject thiz,
                                                             jlong pcb, jint length) {
@@ -641,9 +436,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpRecved(JNIEnv *env, jobject
     lwip_bridge_tcp_recved((void *)(intptr_t)pcb, (uint16_t)length);
 }
 
-/*
- * nativeTcpClose(pcb: Long)
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpClose(JNIEnv *env, jobject thiz,
                                                            jlong pcb) {
@@ -652,9 +444,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpClose(JNIEnv *env, jobject 
     lwip_bridge_tcp_close((void *)(intptr_t)pcb);
 }
 
-/*
- * nativeTcpAbort(pcb: Long)
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpAbort(JNIEnv *env, jobject thiz,
                                                            jlong pcb) {
@@ -663,9 +452,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpAbort(JNIEnv *env, jobject 
     lwip_bridge_tcp_abort((void *)(intptr_t)pcb);
 }
 
-/*
- * nativeTcpSndbuf(pcb: Long): Int
- */
 JNIEXPORT jint JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpSndbuf(JNIEnv *env, jobject thiz,
                                                             jlong pcb) {
@@ -674,9 +460,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpSndbuf(JNIEnv *env, jobject
     return (jint)lwip_bridge_tcp_sndbuf((void *)(intptr_t)pcb);
 }
 
-/*
- * nativeTcpSndQueuelen(pcb: Long): Int
- */
 JNIEXPORT jint JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpSndQueuelen(JNIEnv *env, jobject thiz,
                                                                  jlong pcb) {
@@ -685,34 +468,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpSndQueuelen(JNIEnv *env, jo
     return (jint)lwip_bridge_tcp_snd_queuelen((void *)(intptr_t)pcb);
 }
 
-/*
- * nativeTcpCompleteAccept(pcb: Long) — release a deferred SYN-ACK after
- * the upstream dial has succeeded. Must run on the lwipExecutor thread.
- */
-JNIEXPORT void JNICALL
-Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpCompleteAccept(JNIEnv *env, jobject thiz,
-                                                                    jlong pcb) {
-    (void)env;
-    (void)thiz;
-    lwip_bridge_tcp_complete_accept((void *)(intptr_t)pcb);
-}
-
-/*
- * nativeTcpRejectAccept(pcb: Long) — abandon a deferred PCB with RST after
- * the upstream dial has failed. The local app sees ECONNREFUSED.
- */
-JNIEXPORT void JNICALL
-Java_com_argsment_anywhere_vpn_NativeBridge_nativeTcpRejectAccept(JNIEnv *env, jobject thiz,
-                                                                  jlong pcb) {
-    (void)env;
-    (void)thiz;
-    lwip_bridge_tcp_reject_accept((void *)(intptr_t)pcb);
-}
-
-/*
- * nativeUdpSendto(srcIp: ByteArray, srcPort: Int, dstIp: ByteArray,
- *                 dstPort: Int, isIpv6: Boolean, data: ByteArray, length: Int)
- */
 JNIEXPORT void JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeUdpSendto(JNIEnv *env, jobject thiz,
                                                             jbyteArray srcIp, jint srcPort,
@@ -748,9 +503,6 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeUdpSendto(JNIEnv *env, jobject
     (*env)->ReleaseByteArrayElements(env, data,  data_buf,   JNI_ABORT);
 }
 
-/*
- * nativeIpToString(addr: ByteArray, isIpv6: Boolean): String?
- */
 JNIEXPORT jstring JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeIpToString(JNIEnv *env, jobject thiz,
                                                              jbyteArray addr,
@@ -768,8 +520,7 @@ Java_com_argsment_anywhere_vpn_NativeBridge_nativeIpToString(JNIEnv *env, jobjec
         return NULL;
     }
 
-    /* INET6_ADDRSTRLEN is 46 */
-    char out[46];
+    char out[46]; /* INET6_ADDRSTRLEN */
     const char *result = lwip_ip_to_string((const void *)addr_buf,
                                            (int)(isIpv6 != JNI_FALSE),
                                            out, sizeof(out));

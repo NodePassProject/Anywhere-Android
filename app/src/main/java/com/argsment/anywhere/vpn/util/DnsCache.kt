@@ -12,22 +12,21 @@ private val logger = AnywhereLogger("ProxyDNSCache")
  * Thread-safe DNS cache with TTL-based expiry.
  *
  * Wraps [InetAddress.getAllByName] with caching so repeated lookups for the same
- * host (e.g. during latency tests or reconnects) avoid redundant system DNS calls.
+ * host avoid redundant system DNS calls.
  *
  * When an underlying [Network] is set (via [setUnderlyingNetwork]), DNS resolution
- * uses that network, bypassing the VPN tunnel. This matches the iOS behavior where
- * `ProxyDNSCache` resolves through the physical network interface via `getaddrinfo`.
+ * uses that network, bypassing the VPN tunnel.
  *
  * IP addresses bypass the cache entirely. Results are stored as IP strings so they
  * can be shared by both TCP ([NioSocket]) and UDP callers.
- *
- * Modeled after the iOS `ProxyDNSCache` (General/ProxyDNSCache.swift).
  */
 object DnsCache {
 
     private const val DEFAULT_TTL_MS = 120_000L
     private const val EVICTION_THRESHOLD = 256
     private val ipv4Regex = Regex("""^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$""")
+    /** Coarse character-set guard for IPv6 literals (hex, colon, dot for IPv4-mapped, `%scope`). */
+    private val ipv6LiteralForm = Regex("""^[0-9A-Fa-f:.]+(?:%[0-9A-Za-z._-]+)?$""")
 
     private data class CacheEntry(val ips: List<String>, val expiry: Long)
 
@@ -36,13 +35,10 @@ object DnsCache {
     private var activeProxyDomain: String? = null
 
     /**
-     * The underlying physical network for DNS resolution.
-     * When set, [resolveAndCache] uses [Network.getAllByName] to resolve through the
-     * physical interface, bypassing the VPN tunnel. This prevents circular dependency
-     * where proxy DNS resolution would go through the (possibly broken) proxy tunnel.
-     *
-     * Matching iOS behavior: `ProxyDNSCache.resolveViaGetaddrinfo()` always resolves
-     * through the physical network interface in the Network Extension.
+     * Underlying physical network for DNS resolution. When set, [resolveAndCache]
+     * resolves through the physical interface, bypassing the VPN tunnel — this
+     * prevents a circular dependency where proxy DNS resolution would route
+     * through the (possibly broken) proxy tunnel.
      */
     @Volatile
     private var underlyingNetwork: Network? = null
@@ -52,23 +48,12 @@ object DnsCache {
     }
 
     /**
-     * Sets the underlying physical network for DNS resolution.
-     * Called from VpnService after the tunnel is established.
      * Pass `null` when VPN is stopped to revert to default resolution.
      */
     fun setUnderlyingNetwork(network: Network?) {
         underlyingNetwork = network
     }
 
-    /**
-     * Resolves a hostname to all IP address strings, using the cache when available.
-     *
-     * - If [host] is already an IP address, returns it directly without caching.
-     * - If [host] is a domain, checks the cache first. On miss or expiry,
-     *   calls [InetAddress.getAllByName] and caches the result.
-     *
-     * @return All resolved IP addresses (IPv4 and IPv6), or empty on failure.
-     */
     fun resolveAll(host: String): List<String> {
         val bare = stripBrackets(host)
         if (isIpAddress(bare)) return listOf(bare)
@@ -80,38 +65,28 @@ object DnsCache {
         val entry = cache[key]
         if (entry != null && now < entry.expiry) return entry.ips
 
-        // Active proxy with stale cache — return stale IPs immediately, refresh in
-        // background. Mirrors iOS ProxyDNSCache: avoid blocking connections on the
-        // active proxy when TTL expires; the background refresh will replace the
-        // entry. We keep the stale entry in-place so concurrent lookups also
-        // benefit and so a failed refresh still has a fallback.
+        // Active proxy with stale cache: return stale IPs immediately and refresh
+        // in the background. Avoids blocking connections on the active proxy when
+        // TTL expires; the stale entry stays in place so concurrent lookups
+        // benefit and a failed refresh still has a fallback.
         if (entry != null && isActive) {
             refreshAsync(key, bare)
             return entry.ips
         }
 
-        // Periodic eviction: when cache exceeds threshold, purge all expired entries
         if (cache.size > EVICTION_THRESHOLD) {
             evictExpired(now)
         }
 
-        // Cache miss, or expired non-active entry — resolve synchronously
         val ips = resolveAndCache(key, bare)
         if (ips.isNotEmpty()) return ips
 
-        // Resolution failed: fall back to stale IPs if we have any (matches iOS).
+        // Resolution failed: fall back to stale IPs if available.
         return entry?.ips ?: emptyList()
     }
 
-    /**
-     * Convenience: returns a single resolved IP (first result), or `null` on failure.
-     */
     fun resolveHost(host: String): String? = resolveAll(host).firstOrNull()
 
-    /**
-     * Pre-resolves and caches a hostname so subsequent lookups are instant.
-     * Intended for latency tester pre-warming.
-     */
     fun prewarm(host: String) {
         resolveAll(host)
     }
@@ -122,9 +97,6 @@ object DnsCache {
         return cache[bare.lowercase()]?.ips
     }
 
-    /**
-     * Returns `true` if [host] is an IPv4 or IPv6 address literal.
-     */
     fun isIpAddress(host: String): Boolean {
         val bare = stripBrackets(host)
 
@@ -132,6 +104,12 @@ object DnsCache {
         // real DNS lookup and can recurse back into the VPN tunnel.
         if (ipv4Regex.matches(bare)) return true
         if (!bare.contains(':')) return false
+        // IPv6 literals only contain hex digits, colons, dots (for IPv4-mapped
+        // forms), and an optional `%scope` suffix. Reject anything else
+        // before handing to InetAddress so a colon-bearing hostname (rare,
+        // but legal in some intranet stacks) can never escape into a
+        // synchronous DNS lookup.
+        if (!ipv6LiteralForm.matches(bare)) return false
 
         return try {
             InetAddress.getByName(bare) is Inet6Address
@@ -167,8 +145,7 @@ object DnsCache {
     private fun resolveAndCache(key: String, bare: String): List<String> {
         val ips = try {
             // Resolve through the underlying physical network when available,
-            // bypassing the VPN tunnel. Matches iOS ProxyDNSCache.resolveViaGetaddrinfo()
-            // which always resolves through the physical interface in the Network Extension.
+            // bypassing the VPN tunnel.
             val network = underlyingNetwork
             val addresses = if (network != null) {
                 network.getAllByName(bare)

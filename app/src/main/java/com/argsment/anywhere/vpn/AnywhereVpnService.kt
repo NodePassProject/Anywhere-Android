@@ -30,8 +30,6 @@ import kotlinx.serialization.json.Json
 /**
  * Android VPN service that creates a TUN interface, runs the lwIP TCP/IP stack,
  * and routes traffic through VLESS proxy connections.
- *
- * Equivalent of a platform packet tunnel provider.
  */
 private val logger = AnywhereLogger("PacketTunnel")
 
@@ -44,15 +42,14 @@ class AnywhereVpnService : VpnService() {
 
     // Tracks the most recent underlying (non-VPN) network so we can detect
     // path changes (e.g. Wi-Fi → Cellular) and restart the lwIP stack to
-    // replace stale connections bound to the old interface. Mirrors iOS
-    // PacketTunnelProvider's NWPathMonitor logic.
+    // replace stale connections bound to the old interface.
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var lastUnderlyingNetwork: Network? = null
     private var lastUnderlyingTransports: Int = 0
     private var lastNetworkAvailable: Boolean = false
 
-    // Screen on/off proxy for iOS PacketTunnelProvider's sleep()/wake() — Android
-    // doesn't expose those callbacks on a foreground VpnService directly, so we
+    // Screen on/off used to approximate device-level sleep — Android doesn't
+    // expose sleep/wake callbacks on a foreground VpnService directly, so we
     // listen on `ACTION_SCREEN_OFF` / `ACTION_SCREEN_ON` (or `ACTION_USER_PRESENT`
     // on locked devices) and infer the duration the device spent in low-power
     // doze. Long sleeps (≥ wakeRestartThresholdSecs) trigger a stack restart so
@@ -77,10 +74,6 @@ class AnywhereVpnService : VpnService() {
             binder
         }
     }
-
-    // =========================================================================
-    // Lifecycle
-    // =========================================================================
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -110,18 +103,19 @@ class AnywhereVpnService : VpnService() {
                 val config = runCatching {
                     json.decodeFromString(ProxyConfiguration.serializer(), configJson)
                 }.getOrNull() ?: return START_NOT_STICKY
-                getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-                    .edit()
-                    .putString("lastConfigurationData", configJson)
-                    .apply()
                 currentConfig = config
                 DnsCache.setActiveProxyDomain(config.serverAddress)
                 lwipStack?.switchConfiguration(config)
                 updateNotification(config.name)
             }
             null -> {
-                // System auto-start (Always On VPN)
-                handleAlwaysOnStart()
+                // No-op: Always On VPN is not implemented on Android, so we
+                // don't expect the system to auto-start the service. Stop
+                // immediately if we get here unexpectedly (e.g. system tried
+                // to restart a killed STICKY service — shouldn't happen since
+                // we return START_NOT_STICKY).
+                logger.debug("[VPN] Service started without action; stopping")
+                stopSelf()
             }
             else -> {
                 // Unknown action
@@ -141,10 +135,6 @@ class AnywhereVpnService : VpnService() {
         logger.debug("[VPN] Permission revoked, stopping")
         stopVpn()
     }
-
-    // =========================================================================
-    // VPN Setup
-    // =========================================================================
 
     /** Applies the global allowInsecure preference to a config's TLS settings. */
     private fun applyGlobalAllowInsecure(config: ProxyConfiguration): ProxyConfiguration {
@@ -175,8 +165,9 @@ class AnywhereVpnService : VpnService() {
         }
 
         // Prime the cert-policy cache so the first TLS handshake uses the latest
-        // prefs even if the service starts without VpnViewModel being alive
-        // (e.g. Always-On VPN bring-up).
+        // prefs. The VPN service shares the app process on Android so VpnViewModel
+        // would normally have already populated this cache, but a fresh process
+        // (system-killed app + user-tapped reconnect) can race the first handshake.
         CertificatePolicy.reload(this)
 
         val effectiveConfig = applyGlobalAllowInsecure(config)
@@ -185,10 +176,6 @@ class AnywhereVpnService : VpnService() {
 
         currentConfig = effectiveConfig
         DnsCache.setActiveProxyDomain(effectiveConfig.serverAddress)
-        getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-            .edit()
-            .putString("lastConfigurationData", json.encodeToString(ProxyConfiguration.serializer(), effectiveConfig))
-            .apply()
 
         // Create foreground notification
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -206,8 +193,8 @@ class AnywhereVpnService : VpnService() {
         }
         tunFd = fd
 
-        // Start lwIP stack. Matches iOS: a single `ipv6DNSEnabled` knob controls
-        // both IPv6 routes and AAAA fake-IP resolution.
+        // Start lwIP stack. The single `ipv6DNSEnabled` knob controls both IPv6
+        // routes and AAAA fake-IP resolution.
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
         val ipv6Dns = prefs.getBoolean("ipv6DnsEnabled", false)
 
@@ -219,15 +206,14 @@ class AnywhereVpnService : VpnService() {
         )
 
         // Set the underlying physical network for DnsCache so DNS resolution
-        // bypasses the VPN tunnel — matching iOS ProxyDNSCache behavior where
-        // getaddrinfo always resolves through the physical interface.
+        // bypasses the VPN tunnel.
         findUnderlyingNetwork()?.let { DnsCache.setUnderlyingNetwork(it) }
 
         val stack = LwipStack(this)
         lwipStack = stack
 
         // Wire logger sink so logger.info/.warning/.error forward to the
-        // user-facing log buffer (matches iOS LWIPStack+Lifecycle.swift).
+        // user-facing log buffer.
         AnywhereLogger.logSink = { message, level ->
             LogBuffer.append(message, level)
         }
@@ -242,10 +228,9 @@ class AnywhereVpnService : VpnService() {
         // the stack when the user roams between Wi-Fi and Cellular.
         startNetworkMonitoring()
 
-        // Mirror iOS PacketTunnelProvider.sleep()/wake(): observe screen
-        // off/on as a proxy for device-level sleep so we can proactively
-        // restart connections after long periods of inactivity (NAT
-        // rebinds, server-side idle sweeps).
+        // Observe screen off/on as a proxy for device-level sleep so we can
+        // proactively restart connections after long periods of inactivity
+        // (NAT rebinds, server-side idle sweeps).
         startScreenStateMonitoring()
     }
 
@@ -261,7 +246,7 @@ class AnywhereVpnService : VpnService() {
         if (stack != null) {
             // Use the completion callback so the TUN file descriptor is closed
             // AFTER the lwIP executor finishes draining — avoids racing with the
-            // packet reader thread.  Matches iOS's lwipQueue.sync {} ordering.
+            // packet reader thread.
             stack.stop(onComplete = Runnable { finishStopVpn() })
         } else {
             finishStopVpn()
@@ -286,60 +271,12 @@ class AnywhereVpnService : VpnService() {
         stopSelf()
     }
 
-    /** Handles system auto-start when Always On VPN is enabled. */
-    private fun handleAlwaysOnStart() {
-        val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-        val lastConfig = prefs.getString("lastConfigurationData", null)?.let { saved ->
-            runCatching {
-                json.decodeFromString(ProxyConfiguration.serializer(), saved)
-            }.getOrNull()
-        }
-        if (lastConfig != null) {
-            startVpn(lastConfig)
-            return
-        }
-
-        // Fallback for older installs that do not yet have a saved last configuration.
-        val configId = prefs.getString("selectedConfigurationId", null)
-        if (configId == null) {
-            logger.warning("[VPN] Always On: no saved configuration")
-            stopSelf()
-            return
-        }
-
-        // Try to load saved config from file
-        val configFile = filesDir.resolve("configurations.json")
-        if (!configFile.exists()) {
-            logger.warning("[VPN] Always On: no configurations file")
-            stopSelf()
-            return
-        }
-
-        val configs = runCatching {
-            val text = configFile.readText()
-            json.decodeFromString<List<ProxyConfiguration>>(text)
-        }.getOrNull()
-
-        val config = configs?.find { it.id.toString() == configId }
-        if (config == null) {
-            logger.warning("[VPN] Always On: selected config not found")
-            stopSelf()
-            return
-        }
-
-        startVpn(config)
-    }
-
-    // =========================================================================
-    // Tunnel Settings
-    // =========================================================================
-
     // Bypass routes — IP ranges excluded from VPN tunnel (sent directly)
     private data class BypassRoute(val address: String, val prefixLength: Int)
 
     private fun buildTunInterface(config: ProxyConfiguration): ParcelFileDescriptor? {
         val prefs = getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
-        // Single IPv6 knob, matching iOS: when enabled we add IPv6 address/routes/DNS.
+        // When enabled we add IPv6 address/routes/DNS.
         val ipv6Enabled = prefs.getBoolean("ipv6DnsEnabled", false)
         val remoteAddress = config.connectAddress
 
@@ -350,7 +287,7 @@ class AnywhereVpnService : VpnService() {
             .addDnsServer("1.1.1.1")
             .addDnsServer("1.0.0.1")
             // MTU
-            .setMtu(1400)
+            .setMtu(1500)
             // Block connections without VPN
             .setBlocking(true)
 
@@ -381,7 +318,7 @@ class AnywhereVpnService : VpnService() {
         // Android has no addExcludedRoute API, so we replace the catch-all 0.0.0.0/0
         // with the complement routes that cover all public IP space. This allows
         // LAN devices (printers, NAS, local servers) to be reachable without
-        // going through the VPN tunnel — matching iOS's excludedRoutes behaviour.
+        // going through the VPN tunnel.
         //
         // The route list below covers 0.0.0.0/0 minus:
         //   10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
@@ -425,10 +362,6 @@ class AnywhereVpnService : VpnService() {
         }
     }
 
-    // =========================================================================
-    // Socket Protection
-    // =========================================================================
-
     /**
      * Protects a socket from VPN routing (prevents loop-back through TUN).
      * Must be called for all outbound sockets used by protocol connections.
@@ -440,9 +373,7 @@ class AnywhereVpnService : VpnService() {
     /**
      * Finds the underlying physical (non-VPN) network for DNS resolution.
      * Returns the first network that has internet capability and is not a VPN transport.
-     * This allows DnsCache to resolve proxy server domains through the physical
-     * interface, matching iOS behavior where getaddrinfo in Network Extension
-     * always resolves through the physical network.
+     * This allows DnsCache to resolve proxy server domains through the physical interface.
      */
     @Suppress("DEPRECATION")
     private fun findUnderlyingNetwork(): Network? {
@@ -455,14 +386,9 @@ class AnywhereVpnService : VpnService() {
         return null
     }
 
-    // =========================================================================
-    // Network Path Monitoring
-    // =========================================================================
-
     /**
      * Begins observing the system's underlying (non-VPN) network so we can
      * detect interface switches (Wi-Fi ↔ Cellular) and trigger a stack restart.
-     * Mirrors iOS PacketTunnelProvider.startMonitoringPath().
      */
     private fun startNetworkMonitoring() {
         if (networkCallback != null) return
@@ -523,11 +449,10 @@ class AnywhereVpnService : VpnService() {
     }
 
     /**
-     * Listens for screen on/off so we can approximate iOS
-     * `PacketTunnelProvider.sleep()/wake()`. Long sleeps (≥
-     * [WAKE_RESTART_THRESHOLD_SECS]) trigger a stack restart on resume —
-     * the same heuristic iOS uses to defeat carrier NAT rebinds and
-     * server-side idle sweeps after the device has been off for a while.
+     * Listens for screen on/off as a proxy for device-level sleep. Long sleeps
+     * (≥ [WAKE_RESTART_THRESHOLD_SECS]) trigger a stack restart on resume to
+     * defeat carrier NAT rebinds and server-side idle sweeps after the device
+     * has been off for a while.
      */
     private fun startScreenStateMonitoring() {
         if (screenStateReceiver != null) return
@@ -546,9 +471,8 @@ class AnywhereVpnService : VpnService() {
                             logger.warning(
                                 "[VPN] Long sleep detected (${sleepSecs}s); invalidating outbound state"
                             )
-                            // Mirrors iOS PacketTunnelProvider.wake(): targeted
-                            // abort of outbound proxy state instead of a full
-                            // stack rebuild. The lwIP netif, listeners, FakeIP
+                            // Targeted abort of outbound proxy state instead of a
+                            // full stack rebuild. The lwIP netif, listeners, FakeIP
                             // pool, and routing all survive sleep — only the
                             // kernel-killed outbound sockets need invalidating.
                             lwipStack?.handleWake()
@@ -579,10 +503,10 @@ class AnywhereVpnService : VpnService() {
 
     /**
      * Decides whether a network update represents a meaningful change that
-     * requires restarting the lwIP stack. Mirrors iOS handlePathUpdate(): we
-     * compare the current snapshot to the previous one and trigger a restart
-     * only when the underlying interface (or its transport set) actually
-     * changed, or when connectivity is restored after being lost.
+     * requires restarting the lwIP stack. Compares the current snapshot to the
+     * previous one and triggers a restart only when the underlying interface
+     * (or its transport set) actually changed, or when connectivity is restored
+     * after being lost.
      */
     private fun handlePathUpdate(network: Network?, available: Boolean, caps: NetworkCapabilities? = null) {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return
@@ -612,7 +536,7 @@ class AnywhereVpnService : VpnService() {
         lastNetworkAvailable = true
 
         // Refresh DnsCache so domain resolution always goes through the new
-        // physical interface (matches iOS getaddrinfo behavior in NE).
+        // physical interface.
         DnsCache.setUnderlyingNetwork(network)
 
         if (!wasAvailable) {
@@ -644,10 +568,6 @@ class AnywhereVpnService : VpnService() {
         if (mask and 0x8 != 0) parts.add("Bluetooth")
         return if (parts.isEmpty()) "unknown" else parts.joinToString("+")
     }
-
-    // =========================================================================
-    // Notifications
-    // =========================================================================
 
     private fun buildNotification(configName: String? = null): Notification {
         val channelId = "anywhere_vpn"
@@ -696,10 +616,6 @@ class AnywhereVpnService : VpnService() {
         notificationManager.notify(NOTIFICATION_ID, buildNotification(configName))
     }
 
-    // =========================================================================
-    // Stats
-    // =========================================================================
-
     /** Returns current traffic statistics (bytes in/out). */
     fun getStats(): Pair<Long, Long> {
         val stack = lwipStack ?: return 0L to 0L
@@ -722,23 +638,21 @@ class AnywhereVpnService : VpnService() {
         const val ACTION_SWITCH_CONFIG = "com.argsment.anywhere.SWITCH_CONFIG"
         const val EXTRA_CONFIG = "config"
 
-        /** Wake-from-sleep restart threshold. Mirrors iOS
-         *  `TunnelConstants.wakeRestartThreshold`. */
+        /** Wake-from-sleep restart threshold. */
         private val WAKE_RESTART_THRESHOLD_SECS: Long = TunnelConstants.wakeRestartThresholdSec
 
         // Private/local IPv4 ranges excluded from the VPN tunnel.
-        // Mirrors iOS PacketTunnelProvider excludedRoutes.
         private val BYPASS_IPV4_ROUTES = listOf(
             BypassRoute("127.0.0.0", 8),      // loopback
             BypassRoute("10.0.0.0", 8),        // private
             BypassRoute("172.16.0.0", 12),     // private
             BypassRoute("192.168.0.0", 16),    // private
             BypassRoute("100.64.0.0", 10),     // CGNAT
-            BypassRoute("162.14.0.0", 16),     // specific
-            BypassRoute("211.99.96.0", 19),    // specific
-            BypassRoute("162.159.192.0", 24),  // Cloudflare-specific
-            BypassRoute("162.159.193.0", 24),  // Cloudflare-specific
-            BypassRoute("162.159.195.0", 24),  // Cloudflare-specific
+            BypassRoute("162.14.0.0", 16),
+            BypassRoute("211.99.96.0", 19),
+            BypassRoute("162.159.192.0", 24),  // Cloudflare
+            BypassRoute("162.159.193.0", 24),  // Cloudflare
+            BypassRoute("162.159.195.0", 24),  // Cloudflare
         )
 
         private val BYPASS_IPV6_ROUTES = listOf(
@@ -746,56 +660,92 @@ class AnywhereVpnService : VpnService() {
             BypassRoute("fe80::", 10),  // link-local
         )
 
-        // Pre-computed split routes covering 0.0.0.0/0 minus BYPASS_IPV4_ROUTES.
-        // Android has no addExcludedRoute API, so we use split routing to let
-        // private/CGNAT/loopback traffic bypass the tunnel. This matches the iOS
-        // approach of using excludedRoutes on the TUN interface.
-        //
-        // Excluded: 10.0.0.0/8, 100.64.0.0/10 (CGNAT), 127.0.0.0/8 (loopback),
-        //           172.16.0.0/12, 192.168.0.0/16
-        // Note: 240.0.0.0/4 (reserved) and 224.0.0.0/4 (multicast) intentionally
-        // not routed through VPN.
-        private val PUBLIC_IPV4_ROUTES = listOf(
-            BypassRoute("0.0.0.0", 5),         // 0.0.0.0   – 7.255.255.255
-            BypassRoute("8.0.0.0", 7),          // 8.0.0.0   – 9.255.255.255  (excl 10.0.0.0/8)
-            BypassRoute("11.0.0.0", 8),         // 11.0.0.0  – 11.255.255.255
-            BypassRoute("12.0.0.0", 6),         // 12.0.0.0  – 15.255.255.255
-            BypassRoute("16.0.0.0", 4),         // 16.0.0.0  – 31.255.255.255
-            BypassRoute("32.0.0.0", 3),         // 32.0.0.0  – 63.255.255.255
-            BypassRoute("64.0.0.0", 3),         // 64.0.0.0  – 95.255.255.255
-            BypassRoute("96.0.0.0", 6),         // 96.0.0.0  – 99.255.255.255
-            BypassRoute("100.0.0.0", 10),       // 100.0.0.0 – 100.63.255.255 (before CGNAT)
-            BypassRoute("100.128.0.0", 9),      // 100.128.0.0 – 100.255.255.255 (after CGNAT)
-            BypassRoute("101.0.0.0", 8),        // 101.x.x.x
-            BypassRoute("102.0.0.0", 7),        // 102.0.0.0 – 103.255.255.255
-            BypassRoute("104.0.0.0", 5),        // 104.0.0.0 – 111.255.255.255
-            BypassRoute("112.0.0.0", 5),        // 112.0.0.0 – 119.255.255.255
-            BypassRoute("120.0.0.0", 6),        // 120.0.0.0 – 123.255.255.255
-            BypassRoute("124.0.0.0", 7),        // 124.0.0.0 – 125.255.255.255
-            BypassRoute("126.0.0.0", 8),        // 126.x.x.x               (excl 127.0.0.0/8)
-            BypassRoute("128.0.0.0", 3),        // 128.0.0.0 – 159.255.255.255
-            BypassRoute("160.0.0.0", 5),        // 160.0.0.0 – 167.255.255.255
-            BypassRoute("168.0.0.0", 6),        // 168.0.0.0 – 171.255.255.255
-            BypassRoute("172.0.0.0", 12),       // 172.0.0.0 – 172.15.255.255 (before 172.16/12)
-            BypassRoute("172.32.0.0", 11),      // 172.32.0.0 – 172.63.255.255
-            BypassRoute("172.64.0.0", 10),      // 172.64.0.0 – 172.127.255.255
-            BypassRoute("172.128.0.0", 9),      // 172.128.0.0 – 172.255.255.255
-            BypassRoute("173.0.0.0", 8),        // 173.x.x.x
-            BypassRoute("174.0.0.0", 7),        // 174.0.0.0 – 175.255.255.255
-            BypassRoute("176.0.0.0", 4),        // 176.0.0.0 – 191.255.255.255
-            BypassRoute("192.0.0.0", 9),        // 192.0.0.0 – 192.127.255.255
-            BypassRoute("192.128.0.0", 11),     // 192.128.0.0 – 192.159.255.255
-            BypassRoute("192.160.0.0", 13),     // 192.160.0.0 – 192.167.255.255
-            BypassRoute("192.169.0.0", 16),     // 192.169.x.x             (after 192.168/16)
-            BypassRoute("192.170.0.0", 15),     // 192.170.0.0 – 192.171.255.255
-            BypassRoute("192.172.0.0", 14),     // 192.172.0.0 – 192.175.255.255
-            BypassRoute("192.176.0.0", 12),     // 192.176.0.0 – 192.191.255.255
-            BypassRoute("192.192.0.0", 10),     // 192.192.0.0 – 192.255.255.255
-            BypassRoute("193.0.0.0", 8),        // 193.x.x.x
-            BypassRoute("194.0.0.0", 7),        // 194.0.0.0 – 195.255.255.255
-            BypassRoute("196.0.0.0", 6),        // 196.0.0.0 – 199.255.255.255
-            BypassRoute("200.0.0.0", 5),        // 200.0.0.0 – 207.255.255.255
-            BypassRoute("208.0.0.0", 4),        // 208.0.0.0 – 223.255.255.255
-        )
+        /**
+         * Split routes covering 0.0.0.0/0 minus [BYPASS_IPV4_ROUTES], computed once
+         * at class load. Android lacks `VpnService.Builder.addExcludedRoute()` below
+         * API 33, so we feed `addRoute()` the explicit complement instead.
+         *
+         * Computed dynamically so adding entries to [BYPASS_IPV4_ROUTES] (e.g. the
+         * Cloudflare and China Telecom ranges) automatically adjusts the routed
+         * set without manually re-deriving the CIDRs.
+         *
+         * Note: 240.0.0.0/4 (reserved) and 224.0.0.0/4 (multicast) are intentionally
+         * left out of [BYPASS_IPV4_ROUTES] but also not routed through the VPN —
+         * they fall outside the public range we explicitly include below.
+         */
+        private val PUBLIC_IPV4_ROUTES: List<BypassRoute> by lazy {
+            computeIPv4SplitRoutes(BYPASS_IPV4_ROUTES)
+        }
+
+        /**
+         * Returns CIDR routes covering 0.0.0.0/0 with the given bypass routes
+         * removed. Uses a longest-aligned-prefix decomposition: for each gap
+         * between bypass ranges, emit the largest /N block aligned to the
+         * current cursor that fits, then advance.
+         */
+        private fun computeIPv4SplitRoutes(bypass: List<BypassRoute>): List<BypassRoute> {
+            // Sort bypass ranges by start address and merge overlaps.
+            val ranges = bypass.map { it.toIpv4Range() }.sortedBy { it.first }
+            val merged = mutableListOf<LongRange>()
+            for (r in ranges) {
+                val last = merged.lastOrNull()
+                if (last != null && r.first <= last.last + 1) {
+                    merged[merged.size - 1] = last.first..maxOf(last.last, r.last)
+                } else {
+                    merged.add(r)
+                }
+            }
+
+            val routes = mutableListOf<BypassRoute>()
+            var cursor = 0L
+            // Stop one above the public unicast range — multicast (224/4) and
+            // reserved (240/4) should not be routed through the tunnel.
+            val publicEnd = 0xE0000000L  // 224.0.0.0
+            for (r in merged) {
+                if (r.first >= publicEnd) break
+                if (r.first > cursor) {
+                    appendIpv4CidrRange(cursor, r.first - 1, routes)
+                }
+                cursor = r.last + 1
+            }
+            if (cursor < publicEnd) {
+                appendIpv4CidrRange(cursor, publicEnd - 1, routes)
+            }
+            return routes
+        }
+
+        private fun BypassRoute.toIpv4Range(): LongRange {
+            val ip = ipv4ToLong(address)
+            val size = 1L shl (32 - prefixLength)
+            return ip until (ip + size)
+        }
+
+        private fun ipv4ToLong(addr: String): Long {
+            val parts = addr.split(".").map { it.toLong() }
+            require(parts.size == 4) { "Invalid IPv4: $addr" }
+            return (parts[0] shl 24) or (parts[1] shl 16) or (parts[2] shl 8) or parts[3]
+        }
+
+        private fun longToIpv4(ip: Long): String =
+            "${(ip shr 24) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 8) and 0xFF}.${ip and 0xFF}"
+
+        private fun appendIpv4CidrRange(
+            startInclusive: Long,
+            endInclusive: Long,
+            out: MutableList<BypassRoute>
+        ) {
+            var s = startInclusive
+            while (s <= endInclusive) {
+                // Largest k such that s is 2^k-aligned and s + 2^k - 1 <= endInclusive.
+                var k = 32
+                while (k > 0) {
+                    val size = 1L shl k
+                    if ((s and (size - 1)) == 0L && s + size - 1 <= endInclusive) break
+                    k--
+                }
+                out.add(BypassRoute(longToIpv4(s), 32 - k))
+                s += if (k == 0) 1L else (1L shl k)
+            }
+        }
     }
 }

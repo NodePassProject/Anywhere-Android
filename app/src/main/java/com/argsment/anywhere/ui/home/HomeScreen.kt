@@ -82,6 +82,7 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
     val selectedChainId by viewModel.selectedChainId.collectAsState()
     val configurations by viewModel.configRepository.configurations.collectAsState()
     val chains by viewModel.chainRepository.chains.collectAsState()
+    val subscriptions by viewModel.subscriptionRepository.subscriptions.collectAsState()
     val startError by viewModel.startError.collectAsState()
 
     val isConnected = vpnStatus == VpnStatus.CONNECTED
@@ -100,12 +101,10 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
     var showingAddSheet by remember { mutableStateOf(false) }
     var showingManualAddSheet by remember { mutableStateOf(false) }
     var showingConfigPicker by remember { mutableStateOf(false) }
-    // Mirrors iOS HomeView: a Rule/Global segmented picker at the top. This
-    // shadows the SettingsScreen "Global Mode" toggle — both write to the same
+    // Shadows the SettingsScreen "Global Mode" toggle — both write to the same
     // `proxyMode` pref, and LwipStack observes the key to reload routing live.
     var isGlobalMode by remember { mutableStateOf(viewModel.proxyMode == "global") }
 
-    // Background gradient colors
     val isDark = isSystemInDarkTheme()
     val gradientStart by animateColorAsState(
         targetValue = when {
@@ -146,7 +145,6 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Proxy mode picker (matches iOS HomeView Rule/Global segmented picker).
             SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(top = 10.dp)) {
                 SegmentedButton(
                     selected = !isGlobalMode,
@@ -172,17 +170,24 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
 
             Spacer(modifier = Modifier.weight(1f))
 
-            // Power button
+            // When there are zero configurations, the power button bootstraps the
+            // user into the Add sheet — mirrors iOS HomeView power-button-as-empty-CTA.
+            val hasNoConfigurations = configurations.isEmpty() && chains.isEmpty()
             PowerButton(
                 isConnected = isConnected,
                 isTransitioning = isTransitioning,
-                enabled = !viewModel.isButtonDisabled,
-                onClick = { viewModel.toggleVPN() }
+                enabled = hasNoConfigurations || !viewModel.isButtonDisabled,
+                onClick = {
+                    if (hasNoConfigurations) {
+                        showingAddSheet = true
+                    } else {
+                        viewModel.toggleVPN()
+                    }
+                }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Status text
             val statusTextRes = when (vpnStatus) {
                 VpnStatus.DISCONNECTED -> R.string.disconnected
                 VpnStatus.CONNECTING -> R.string.connecting
@@ -198,7 +203,6 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
 
             Spacer(modifier = Modifier.height(if (isConnected) 20.dp else 40.dp))
 
-            // Traffic stats (when connected)
             AnimatedVisibility(
                 visible = isConnected,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -222,7 +226,6 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
                 }
             }
 
-            // Configuration card
             if (selectedItemName != null) {
                 Card(
                     onClick = { showingConfigPicker = true },
@@ -295,7 +298,6 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
         }
     }
 
-    // Config picker bottom sheet
     if (showingConfigPicker) {
         ModalBottomSheet(
             onDismissRequest = { showingConfigPicker = false },
@@ -307,7 +309,15 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
                 )
-                configurations.forEach { config ->
+
+                // Subscription-grouped picker \u2014 mirrors iOS HomeView's allPickerItems
+                // structure (standalone configs first, then per-subscription sections).
+                val standaloneConfigs = configurations.filter { it.subscriptionId == null }
+                val configsBySubscription = subscriptions.associateWith { sub ->
+                    configurations.filter { it.subscriptionId == sub.id }
+                }.filterValues { it.isNotEmpty() }
+
+                standaloneConfigs.forEach { config ->
                     val isSelected = config.id == selectedConfigId && selectedChainId == null
                     Surface(
                         onClick = {
@@ -337,6 +347,46 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
                         }
                     }
                 }
+
+                configsBySubscription.forEach { (subscription, subConfigs) ->
+                    Text(
+                        text = subscription.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
+                    )
+                    subConfigs.forEach { config ->
+                        val isSelected = config.id == selectedConfigId && selectedChainId == null
+                        Surface(
+                            onClick = {
+                                viewModel.setSelectedConfiguration(config)
+                                showingConfigPicker = false
+                            },
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = config.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isSelected) {
+                                    Text(
+                                        text = "\u2713",
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (chains.isNotEmpty()) {
                     Text(
                         text = stringResource(R.string.chains),
@@ -379,7 +429,6 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
         }
     }
 
-    // Add proxy bottom sheet
     if (showingAddSheet) {
         ModalBottomSheet(
             onDismissRequest = { showingAddSheet = false },
@@ -404,7 +453,6 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
         }
     }
 
-    // Manual add sheet
     if (showingManualAddSheet) {
         ModalBottomSheet(
             onDismissRequest = { showingManualAddSheet = false },
@@ -421,7 +469,6 @@ fun HomeScreen(viewModel: VpnViewModel, contentPadding: PaddingValues = PaddingV
         }
     }
 
-    // Error dialog
     if (startError != null) {
         AlertDialog(
             onDismissRequest = { viewModel.clearStartError() },

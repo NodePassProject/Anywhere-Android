@@ -76,14 +76,13 @@ fun SettingsScreen(viewModel: VpnViewModel) {
     var bypassCountryCode by remember { mutableStateOf(viewModel.bypassCountryCode) }
     var allowInsecure by remember { mutableStateOf(viewModel.allowInsecure) }
 
-    // AD Blocking: check if the ADBlock rule set exists and its current assignment
     val adBlockRuleSet = remember { viewModel.ruleSetRepository.ruleSets.value.find { it.name == "ADBlock" } }
     var adBlockEnabled by remember {
         mutableStateOf(adBlockRuleSet?.assignedConfigurationId == "REJECT")
     }
 
-    // Intercept the device back button when a sub-screen is showing.
-    // Without this, the NavHost handles back press by popping the SettingsRoute,
+    // Intercept the device back button when a sub-screen is showing. Without
+    // this, the NavHost handles back press by popping the SettingsRoute,
     // sending the user to Home instead of back to the Settings list.
     val activeSubScreen = showRoutingRules || showAcknowledgements ||
             showTrustedCertificates || showAdvancedSettings
@@ -160,7 +159,6 @@ fun SettingsScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Allow Insecure Warning Alert
     if (showInsecureAlert) {
         AlertDialog(
             onDismissRequest = { showInsecureAlert = false },
@@ -215,7 +213,6 @@ private fun SettingsRoot(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // Routing section
             SectionHeader(stringResource(R.string.routing))
             SettingsSwitch(
                 icon = Icons.AutoMirrored.Filled.CallMerge,
@@ -227,7 +224,7 @@ private fun SettingsRoot(
             if (!globalMode) {
                 CountryBypassPicker(
                     icon = Icons.Filled.Public,
-                    iconTint = Color(0xFFFF9800),
+                    iconTint = Color(0xFF007AFF),
                     selectedCode = bypassCountryCode,
                     onSelect = onBypassCountryChange
                 )
@@ -250,7 +247,6 @@ private fun SettingsRoot(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Security section
             SectionHeader(stringResource(R.string.security))
             SettingsSwitch(
                 icon = Icons.Filled.Warning,
@@ -268,7 +264,6 @@ private fun SettingsRoot(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // About section
             SectionHeader(stringResource(R.string.about))
             SettingsNavRow(
                 painter = painterResource(R.drawable.ic_telegram_symbol),

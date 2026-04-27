@@ -17,11 +17,11 @@ sealed class RouteAction {
 }
 
 /**
- * Domain/IP routing engine, port of iOS `Anywhere Network Extension/DomainRouter.swift`.
+ * Domain/IP routing engine.
  *
  * Rules are loaded from a JSON descriptor emitted by [RuleSetRepository.syncRoutingFile].
  * Country-bypass rules (if present) are inserted first as [RouteAction.Direct];
- * user rules then overwrite on conflict, giving the iOS priority ordering
+ * user rules then overwrite on conflict, giving the priority ordering
  * `country bypass → Direct → services → custom → ADBlock`.
  *
  *  - Domain matching: reverse-label suffix trie — O(k) where k = label count.
@@ -29,8 +29,6 @@ sealed class RouteAction {
  */
 class DomainRouter(private val context: Context) {
 
-    // -- Suffix Trie (reverse-label) & Keyword List --
-    //
     // DOMAIN-SUFFIX rules live in a reverse-label trie: "www.google.com" is
     // inserted as ["com","google","www"]. Lookup walks the domain from the
     // TLD inward and remembers the deepest action seen — naturally label-
@@ -38,7 +36,7 @@ class DomainRouter(private val context: Context) {
     //
     // DOMAIN-KEYWORD rules are substring matches, evaluated only when no
     // suffix rule matched. Within the keyword tier, longer patterns win and
-    // later inserts win ties, mirroring iOS `DomainRouter.lookupKeywordRule`.
+    // later inserts win ties.
 
     private class TrieNode {
         val children = HashMap<String, TrieNode>()
@@ -55,20 +53,14 @@ class DomainRouter(private val context: Context) {
 
     private val keywordRules = ArrayList<KeywordRule>()
 
-    // -- CIDR Binary Tries --
-
     private var ipv4Trie = CIDRTrie()
     private var ipv6Trie = CIDRTrie()
-
-    // -- State --
 
     private var configurationMap = HashMap<UUID, ProxyConfiguration>()
     private var domainRuleCount = 0
     private var ipRuleCount = 0
 
     private val json = Json { ignoreUnknownKeys = true }
-
-    // -- Loading --
 
     /** Clears all routing rules and configurations. */
     fun reset() {
@@ -212,16 +204,13 @@ class DomainRouter(private val context: Context) {
         logger.debug("[DomainRouter] Loaded $domainRuleCount domain rules, $ipRuleCount IP rules, ${configurationMap.size} configurations")
     }
 
-    // -- Public matching API --
-
     /** Whether any user routing rules have been loaded (excludes bypass-only). */
     val hasRules: Boolean
         get() = domainRuleCount > 0 || ipRuleCount > 0
 
     /**
      * Matches a domain in two tiers: suffix rules first, keyword rules second.
-     * Bypass entries present as [RouteAction.Direct]. Matches iOS
-     * `DomainRouter.matchDomain(_:)`.
+     * Bypass entries present as [RouteAction.Direct].
      */
     fun matchDomain(domain: String): RouteAction? {
         if (domain.isEmpty()) return null
@@ -245,8 +234,6 @@ class DomainRouter(private val context: Context) {
         is RouteAction.Proxy -> configurationMap[action.configId]
     }
 
-    // -- Suffix trie --
-
     private fun trieInsert(suffix: String, action: RouteAction) {
         var node = trieRoot
         for (label in suffix.split('.').asReversed()) {
@@ -267,13 +254,10 @@ class DomainRouter(private val context: Context) {
         return deepest
     }
 
-    // -- Keyword tier --
-
     /**
      * Inserts a keyword pattern, overwriting any existing entry with the
      * same pattern so user rules replace bypass rules (mirroring the suffix
-     * trie's overwrite behavior). Matches iOS
-     * `DomainRouter.insertKeywordRule`.
+     * trie's overwrite behavior).
      */
     private fun insertKeywordRule(pattern: String, action: RouteAction) {
         if (pattern.isEmpty()) return
@@ -288,8 +272,7 @@ class DomainRouter(private val context: Context) {
 
     /**
      * Linearly scans keyword rules only after suffix lookup has failed.
-     * Longer keywords win; ties go to the later-inserted rule. Matches iOS
-     * `DomainRouter.lookupKeywordRule`.
+     * Longer keywords win; ties go to the later-inserted rule.
      */
     private fun lookupKeywordRule(domain: String): RouteAction? {
         var bestAction: RouteAction? = null
@@ -303,8 +286,6 @@ class DomainRouter(private val context: Context) {
         }
         return bestAction
     }
-
-    // -- Parsing helpers --
 
     private fun parseRuleType(raw: Any?): DomainRuleType? {
         return when (raw) {
@@ -368,8 +349,6 @@ class DomainRouter(private val context: Context) {
 /**
  * Binary trie for longest-prefix-match on IP addresses. Each bit selects a child
  * (0 = left, 1 = right). Lookup is O(address-width) regardless of rule count.
- *
- * Swift counterpart: `CIDRTrie` at the bottom of DomainRouter.swift.
  */
 private class CIDRTrie {
     private class Node {

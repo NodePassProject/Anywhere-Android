@@ -6,10 +6,7 @@ import com.argsment.anywhere.vpn.util.NioSocketError
 
 private val logger = AnywhereLogger("DirectTCP")
 
-/**
- * Direct TCP relay over NioSocket.
- * connect/receive/send/cancel.
- */
+/** Direct TCP relay over NioSocket. */
 class DirectTcpRelay {
 
     private val socket = NioSocket()
@@ -17,37 +14,21 @@ class DirectTcpRelay {
     @Volatile
     private var cancelled = false
 
-    /**
-     * Connects to the destination host:port.
-     */
     suspend fun connect(host: String, port: Int) {
         socket.connect(host, port)
     }
 
-    /**
-     * Receives up to 64KB from the socket.
-     *
-     * Returns:
-     * - ByteArray: data received
-     * - null: EOF (remote closed)
-     * Throws on error.
-     */
+    /** Returns received bytes, null on EOF, throws on error. */
     suspend fun receive(): ByteArray? {
         if (cancelled) throw NioSocketError.NotConnected()
         return socket.receive()
     }
 
-    /**
-     * Sends data to the destination.
-     */
     suspend fun send(data: ByteArray) {
         if (cancelled) throw NioSocketError.NotConnected()
         socket.send(data)
     }
 
-    /**
-     * Cancels the relay and closes the socket.
-     */
     fun cancel() {
         if (cancelled) return
         cancelled = true

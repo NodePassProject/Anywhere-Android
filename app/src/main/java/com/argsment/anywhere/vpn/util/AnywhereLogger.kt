@@ -1,17 +1,15 @@
 package com.argsment.anywhere.vpn.util
 
 import android.util.Log
+import com.argsment.anywhere.BuildConfig
 
 /**
- * Unified logger for the Anywhere app, mirroring iOS `AnywhereLogger`.
+ * Unified logger for the Anywhere app.
  *
  * `info`, `warning`, and `error` write to LogCat and optionally to a log
  * sink (user-facing log viewer wired by the VPN service).
- * `debug` writes to LogCat only — use for verbose/internal diagnostics.
- *
- * iOS `AnywhereLogger.debug` is `#if DEBUG`-gated. Android relies on LogCat's
- * runtime log-level filter (`adb logcat *:I` suppresses debug) to achieve the
- * same end result without a build-variant split.
+ * `debug` writes to LogCat only and is stripped in Release builds, mirroring
+ * iOS's `#if DEBUG` gate in AnywhereLogger.swift.
  */
 class AnywhereLogger(private val category: String) {
 
@@ -32,16 +30,13 @@ class AnywhereLogger(private val category: String) {
         logSink?.invoke(message, Level.error)
     }
 
-    /** Logs to LogCat only. Not shown in the user-facing log viewer. */
     fun debug(message: String) {
-        Log.d(category, message)
+        if (BuildConfig.DEBUG) {
+            Log.d(category, message)
+        }
     }
 
     companion object {
-        /**
-         * Optional log sink for dual logging. Set by the VPN service at
-         * startup to forward logs to the user-facing log buffer; nil otherwise.
-         */
         @Volatile
         var logSink: ((String, Level) -> Unit)? = null
     }

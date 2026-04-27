@@ -2,7 +2,7 @@ package com.argsment.anywhere.data.network
 
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.DnsCache
 import kotlinx.coroutines.Dispatchers
@@ -30,20 +30,19 @@ sealed class LatencyResult {
  * Tests full proxy round-trip latency by establishing a proxy connection
  * and sending a plain HTTP request through the proxy chain.
  *
- * Uses captive.apple.com:80 (plain HTTP) matching the iOS LatencyTester —
- * no destination TLS handshake needed, which avoids certificate issues and
- * reduces test complexity.
+ * Uses captive.apple.com:80 (plain HTTP) — no destination TLS handshake
+ * needed, which avoids certificate issues and reduces test complexity.
  */
 object LatencyTester {
 
     private val logger = AnywhereLogger("LatencyTester")
     private const val TIMEOUT_MS = 10_000L
 
-    /** Latency test endpoint — plain HTTP, matching iOS captive.apple.com:80. */
+    /** Latency test endpoint — plain HTTP. */
     private const val LATENCY_HOST = "captive.apple.com"
     private const val LATENCY_PORT = 80
 
-    /** Maximum number of latency tests running at the same time. Matches iOS. */
+    /** Maximum number of latency tests running at the same time. */
     private const val MAX_CONCURRENT_TESTS = 6
 
     suspend fun test(config: ProxyConfiguration): LatencyResult = withContext(Dispatchers.IO) {
@@ -69,8 +68,7 @@ object LatencyTester {
             config.chain?.forEach { DnsCache.prewarm(it.serverAddress) }
         }
 
-        // Cap concurrent tests to avoid overwhelming network/proxy. Matches iOS
-        // LatencyTester.maxConcurrentTests = 6.
+        // Cap concurrent tests to avoid overwhelming network/proxy.
         val semaphore = Semaphore(MAX_CONCURRENT_TESTS)
         for (config in configurations) {
             launch(Dispatchers.IO) {
@@ -103,14 +101,13 @@ object LatencyTester {
     /**
      * Establishes a proxy connection and measures HTTP round-trip latency.
      *
-     * Matching iOS LatencyTester methodology:
      * Phase 1 (untimed): Establish proxy connection (TCP + TLS/Reality + VLESS/SS handshake).
      * Phase 2 (untimed): Warmup request — drains proxy-side buffers.
      * Phase 3 (untimed): Send the timed HTTP request.
      * Phase 4 (timed):   Wait for the response — measures actual network RTT.
      */
     private suspend fun performTest(config: ProxyConfiguration): LatencyResult = coroutineScope {
-        val connections = mutableListOf<VlessConnection>()
+        val connections = mutableListOf<ProxyConnection>()
 
         // Cancellation watcher: closes connections when this scope is cancelled
         // (e.g., by withTimeoutOrNull). NioSocket.receive() uses suspendCoroutine
@@ -127,7 +124,7 @@ object LatencyTester {
             config.chain?.forEach { DnsCache.prewarm(it.serverAddress) }
 
             // Phase 1 (untimed): Establish proxy connection through chain.
-            var tunnelConnection: VlessConnection? = null
+            var tunnelConnection: ProxyConnection? = null
 
             val chain = config.chain
             if (!chain.isNullOrEmpty()) {

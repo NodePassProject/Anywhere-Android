@@ -23,7 +23,7 @@ android {
         applicationId = "com.argsment.anywhere"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20
+        versionCode = 21
         versionName = "1.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -59,6 +59,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     externalNativeBuild {
         cmake {
@@ -84,6 +85,7 @@ dependencies {
     implementation(libs.camerax.view)
     implementation(libs.mlkit.barcode)
     implementation(libs.coroutines.android)
+    implementation(libs.bouncycastle.bcprov)
     implementation("org.brotli:dec:0.1.2")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

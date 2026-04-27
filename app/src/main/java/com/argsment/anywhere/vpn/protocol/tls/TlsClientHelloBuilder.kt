@@ -11,7 +11,7 @@ import java.security.spec.ECGenParameterSpec
  *
  * Each fingerprint produces a ClientHello matching the corresponding browser's
  * real TLS implementation (cipher suites, extensions, ordering) as defined by
- * the uTLS library v1.8.2 used by Xray-core.
+ * uTLS v1.8.2.
  */
 object TlsClientHelloBuilder {
 
@@ -61,13 +61,11 @@ object TlsClientHelloBuilder {
 
     // -- Generic Extension Helpers --
 
-    /** Appends a UInt16 in big-endian to a ByteArray builder. */
     private fun MutableList<Byte>.appendU16(value: Int) {
         add(((value shr 8) and 0xFF).toByte())
         add((value and 0xFF).toByte())
     }
 
-    /** Wraps payload with a TLS extension header (type + length). */
     private fun ext(type: Int, payload: ByteArray): ByteArray {
         val result = mutableListOf<Byte>()
         result.appendU16(type)
@@ -76,7 +74,6 @@ object TlsClientHelloBuilder {
         return result.toByteArray()
     }
 
-    /** Empty extension (type + zero-length). */
     private fun ext(type: Int): ByteArray {
         return ext(type, ByteArray(0))
     }
@@ -268,14 +265,12 @@ object TlsClientHelloBuilder {
     /**
      * Builds an X25519MLKEM768 hybrid key share for group 0x11EC.
      *
-     * The wire layout is `mlkemEncapsulationKey(1184) || x25519PublicKey(32)` =
-     * 1216 bytes total. Both halves must be real keys: the ML-KEM encapsulation
-     * key needs a matching private key so the server's ciphertext can be
-     * decapsulated, and the X25519 key is the same one used in the standalone
-     * 0x001D entry. Without a real ML-KEM keypair this extension cannot be
-     * sent — see the `mlkemEncapsulationKey == null` branch in each fingerprint
-     * builder, which mirrors iOS's pre-iOS-26 behaviour of simply omitting the
-     * PQ key share.
+     * Wire layout: `mlkemEncapsulationKey(1184) || x25519PublicKey(32)` = 1216
+     * bytes. Both halves must be real keys — the ML-KEM encapsulation key needs
+     * a matching private key so the server's ciphertext can be decapsulated.
+     * Without a real ML-KEM keypair this extension cannot be sent; see the
+     * `mlkemEncapsulationKey == null` branch in each fingerprint builder, which
+     * simply omits the PQ key share.
      */
     private fun mlkem768HybridKeyShare(mlkemEncapsulationKey: ByteArray, x25519PubKey: ByteArray): ByteArray {
         return mlkemEncapsulationKey + x25519PubKey
@@ -292,14 +287,14 @@ object TlsClientHelloBuilder {
     // -- BoringSSL Padding --
 
     /**
-     * Calculates BoringSSL-style padding: if the full record (5 + ClientHello) is 256-511 bytes,
-     * pad to exactly 512. Returns the padding data length (excluding extension header), or null.
+     * BoringSSL-style padding: if the full record (5 + ClientHello) is 256-511 bytes,
+     * pad to exactly 512. Returns the padding data length (excluding extension header),
+     * or null when there is no room for the 4-byte extension header.
      */
     private fun boringPaddingDataLength(clientHelloLen: Int): Int? {
         val unpaddedLen = clientHelloLen
         if (unpaddedLen <= 0xFF || unpaddedLen >= 0x200) return null
         val needed = 0x200 - unpaddedLen
-        // Matching iOS: return null if can't fit extension header (4 bytes)
         return if (needed >= 4) (needed - 4) else null
     }
 
@@ -398,11 +393,10 @@ object TlsClientHelloBuilder {
      * @param publicKey X25519 ephemeral public key for the key_share extension.
      * @param alpn Optional ALPN override. When null, uses browser default (["h2", "http/1.1"]).
      * @param omitPQKeyShares When true, never offer X25519MLKEM768. Used for plain TLS
-     *   ClientHellos to keep the message small (matching iOS `TLSClient`).
+     *   ClientHellos to keep the message small.
      * @param mlkemEncapsulationKey 1184-byte ML-KEM-768 encapsulation key. When provided
      *   alongside `omitPQKeyShares = false`, an X25519MLKEM768 hybrid key share is added
-     *   to fingerprints that support it. When `null` (the current default on Android),
-     *   no PQ key share is sent — matching iOS pre-26 behaviour.
+     *   to fingerprints that support it. When `null`, no PQ key share is sent.
      */
     fun buildRawClientHello(
         fingerprint: TlsFingerprint,
@@ -551,9 +545,8 @@ object TlsClientHelloBuilder {
         val echPayloadLen = echPayloadLens[(random[30].toInt() and 0xFF) % echPayloadLens.size]
 
         // X25519MLKEM768 hybrid key share — only sent when a real ML-KEM
-        // encapsulation key is supplied. Without one we'd have to either
-        // forge the bytes (servers that pick MLKEM would then fail key
-        // agreement) or omit the entry; iOS pre-26 omits, so we do too.
+        // encapsulation key is supplied; otherwise omit (forging would fail key
+        // agreement for servers that pick MLKEM).
         val groups: IntArray
         val keyShares: List<Pair<Int, ByteArray>>
         if (!omitPQKeyShares && mlkemEncapsulationKey != null) {
@@ -626,8 +619,8 @@ object TlsClientHelloBuilder {
 
         val echAead = if ((random[30].toInt() and 0xFF) % 2 == 0) 0x0001 else 0x0003
 
-        // X25519MLKEM768 hybrid key share for Firefox 148. Only sent when a
-        // real ML-KEM encapsulation key is provided (matches iOS pre-26).
+        // X25519MLKEM768 hybrid key share. Only sent when a real ML-KEM
+        // encapsulation key is provided.
         val ffGroups: IntArray
         val ffKeyShares: List<Pair<Int, ByteArray>>
         if (!omitPQKeyShares && mlkemEncapsulationKey != null) {
@@ -703,7 +696,7 @@ object TlsClientHelloBuilder {
         val protocols = alpn ?: listOf("h2", "http/1.1")
 
         // X25519MLKEM768 hybrid key share. Only sent when a real ML-KEM
-        // encapsulation key is provided (matches iOS pre-26).
+        // encapsulation key is provided.
         val safGroups: IntArray
         val safKeyShares: List<Pair<Int, ByteArray>>
         if (!omitPQKeyShares && mlkemEncapsulationKey != null) {
@@ -809,7 +802,6 @@ object TlsClientHelloBuilder {
     private fun buildAndroid11(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
     ): FingerprintParts {
-        // No GREASE, no TLS 1.3 cipher suites, no key share
         val suites = cipherSuitesData(intArrayOf(
             0xC02B, 0xC02C,                                   // ECDHE ECDSA AES-GCM
             0xCCA9,                                            // ECDHE ECDSA ChaCha20
@@ -899,7 +891,6 @@ object TlsClientHelloBuilder {
     private fun buildBrowser360(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
     ): FingerprintParts {
-        // Legacy cipher suites, no TLS 1.3, no GREASE
         val suites = cipherSuitesData(intArrayOf(
             0xC00A, 0xC014, 0x0039, 0x006B, 0x0035, 0x003D,  // AES-256 variants
             0xC007, 0xC009, 0xC023,                           // ECDHE ECDSA (RC4, AES-128)
@@ -936,13 +927,12 @@ object TlsClientHelloBuilder {
     private fun buildChrome120(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
     ): FingerprintParts {
-        // BoringSSL GREASE values
         val gCipher  = grease(random[24])
         val gExt1    = grease(random[25])
         val gGroup   = grease(random[26])
         val gVersion = grease(random[28])
         var gExt2    = grease(random[29])
-        // Ensure gExt2 != gExt1 to avoid duplicate extension types (matching iOS)
+        // Ensure gExt2 != gExt1 to avoid duplicate extension types.
         if (gExt2 == gExt1) gExt2 = grease(((random[29].toInt() and 0xFF) + 1).toByte())
 
         val suites = cipherSuitesData(intArrayOf(
@@ -1002,7 +992,6 @@ object TlsClientHelloBuilder {
     private fun buildFirefox120(
         random: ByteArray, serverName: String, publicKey: ByteArray, alpn: List<String>?
     ): FingerprintParts {
-        // Firefox uses no GREASE values
         val suites = cipherSuitesData(intArrayOf(
             0x1301, 0x1303, 0x1302,                           // TLS 1.3 (ChaCha20 before AES-256)
             0xC02B, 0xC02F,                                   // ECDHE AES-128-GCM
@@ -1016,10 +1005,7 @@ object TlsClientHelloBuilder {
 
         val protocols = alpn ?: listOf("h2", "http/1.1")
 
-        // Firefox offers two key shares: X25519 + P256
         val p256PublicKey = deriveP256PublicKey(random)
-
-        // Firefox ECH: pick AES-128-GCM or ChaCha20 deterministically
         val echAead = if ((random[30].toInt() and 0xFF) % 2 == 0) 0x0001 else 0x0003
 
         val exts = listOf(
@@ -1228,7 +1214,6 @@ object TlsClientHelloBuilder {
 
     // -- Helpers --
 
-    /** Concatenate a list of byte arrays into a single byte array. */
     private fun concatenateArrays(arrays: List<ByteArray>): ByteArray {
         val totalLen = arrays.sumOf { it.size }
         val result = ByteArray(totalLen)
@@ -1240,7 +1225,6 @@ object TlsClientHelloBuilder {
         return result
     }
 
-    /** Wrap a ClientHello message in a TLS record. */
     fun wrapInTLSRecord(clientHello: ByteArray): ByteArray {
         val record = mutableListOf<Byte>()
         record.add(0x16) // Content type: Handshake

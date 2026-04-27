@@ -67,7 +67,7 @@ object ClashProxyParser {
         val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
         val server = node.optString("server").takeIf { it.isNotEmpty() } ?: return null
         val uuidString = node.optString("uuid").takeIf { it.isNotEmpty() } ?: return null
-        val uuid = runCatching { UUID.fromString(uuidString) }.getOrNull() ?: return null
+        val uuid = parseXrayUuid(uuidString) ?: return null
 
         val portInt = node.optInt("port", -1)
         if (portInt <= 0 || portInt > UShort.MAX_VALUE.toInt()) return null
@@ -187,87 +187,29 @@ object ClashProxyParser {
         )
     }
 
+    /**
+     * Parses a Clash `type: ss` node. Anywhere only supports bare Shadowsocks —
+     * any plugin (obfs, v2ray-plugin, shadow-tls, restls), configured transport
+     * other than plain TCP, or TLS wrapper causes the node to be skipped rather
+     * than silently downgraded.
+     */
     private fun parseShadowsocksProxy(node: JSONObject): ProxyConfiguration? {
         val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
         val server = node.optString("server").takeIf { it.isNotEmpty() } ?: return null
         val password = node.optString("password").takeIf { it.isNotEmpty() } ?: return null
         val cipher = node.optString("cipher").takeIf { it.isNotEmpty() } ?: return null
 
-        // Validate cipher is supported
         ShadowsocksCipher.fromMethod(cipher) ?: return null
 
         val portInt = node.optInt("port", -1)
         if (portInt <= 0 || portInt > UShort.MAX_VALUE.toInt()) return null
         val port = portInt.toUShort()
 
-        // Transport: tcp (default) or ws; skip h2/grpc
         val network = node.optString("network", "").takeIf { it.isNotEmpty() }
             ?: node.optString("plugin-opts-network", "tcp")
-        if (network == "h2" || network == "grpc") return null
-        val transport = if (network == "ws") "ws" else "tcp"
-
-        // TLS
-        val tlsEnabled = node.optBoolean("tls", false)
-        val security = if (tlsEnabled) "tls" else "none"
-
-        var tlsConfig: TlsConfiguration? = null
-        if (tlsEnabled) {
-            val sni = node.optString("servername", "").takeIf { it.isNotEmpty() }
-                ?: node.optString("sni", "").takeIf { it.isNotEmpty() }
-                ?: server
-            val alpn = node.optJSONArray("alpn")?.let { arr ->
-                (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { s -> s.isNotEmpty() } }
-            }?.takeIf { it.isNotEmpty() }
-            val clientFP = node.optString("client-fingerprint", "").takeIf { it.isNotEmpty() }
-            val fingerprint = TlsFingerprint.fromRaw(mapFingerprint(clientFP))
-
-            tlsConfig = TlsConfiguration(
-                serverName = sni,
-                alpn = alpn,
-                allowInsecure = node.optBoolean("skip-cert-verify", false),
-                fingerprint = fingerprint
-            )
-        }
-
-        // WebSocket / HTTPUpgrade
-        var wsConfig: WebSocketConfiguration? = null
-        var httpUpgradeConfig: HttpUpgradeConfiguration? = null
-        if (transport == "ws") {
-            var wsPath = "/"
-            var wsHost = server
-            val wsHeaders = mutableMapOf<String, String>()
-            var maxEarlyData = 0
-            var earlyDataHeaderName = ""
-            var isHttpUpgrade = false
-
-            node.optJSONObject("ws-opts")?.let { woNode ->
-                wsPath = woNode.optString("path", "/")
-                isHttpUpgrade = woNode.optBoolean("v2ray-http-upgrade", false)
-                maxEarlyData = woNode.optInt("max-early-data", 0)
-                earlyDataHeaderName = woNode.optString("early-data-header-name", "")
-                woNode.optJSONObject("headers")?.let { headers ->
-                    for (key in headers.keys()) {
-                        val value = headers.optString(key, "")
-                        wsHeaders[key] = value
-                        if (key == "Host") wsHost = value
-                    }
-                }
-            }
-
-            if (isHttpUpgrade) {
-                httpUpgradeConfig = HttpUpgradeConfiguration(host = wsHost, path = wsPath, headers = wsHeaders)
-            } else {
-                wsConfig = WebSocketConfiguration(
-                    host = wsHost,
-                    path = wsPath,
-                    headers = wsHeaders,
-                    maxEarlyData = maxEarlyData,
-                    earlyDataHeaderName = earlyDataHeaderName.ifEmpty { "Sec-WebSocket-Protocol" }
-                )
-            }
-        }
-
-        val ssEffectiveTransport = if (httpUpgradeConfig != null) "httpupgrade" else transport
+        if (network != "tcp") return null
+        if (node.optBoolean("tls", false)) return null
+        if (node.optString("plugin", "").isNotEmpty()) return null
 
         return ProxyConfiguration(
             name = name,
@@ -275,11 +217,8 @@ object ClashProxyParser {
             serverPort = port,
             uuid = UUID.randomUUID(),
             encryption = "none",
-            transport = ssEffectiveTransport,
-            security = security,
-            tls = tlsConfig,
-            websocket = wsConfig,
-            httpUpgrade = httpUpgradeConfig,
+            transport = "tcp",
+            security = "none",
             outboundProtocol = OutboundProtocol.SHADOWSOCKS,
             ssPassword = password,
             ssMethod = cipher
@@ -287,10 +226,10 @@ object ClashProxyParser {
     }
 
     /**
-     * Parses a Clash `type: trojan` node into a TROJAN outbound. Mirrors iOS
-     * `ClashProxyParser.parseTrojanProxy`: Reality, ECH, gRPC, the Trojan-Go
-     * SS layer, and any transport other than bare TCP cause the node to be
-     * skipped rather than silently downgraded to a different wire format.
+     * Parses a Clash `type: trojan` node into a TROJAN outbound. Reality, ECH,
+     * gRPC, the Trojan-Go SS layer, and any transport other than bare TCP
+     * cause the node to be skipped rather than silently downgraded to a
+     * different wire format.
      */
     private fun parseTrojanProxy(node: JSONObject): ProxyConfiguration? {
         val name = node.optString("name").takeIf { it.isNotEmpty() } ?: return null
@@ -349,7 +288,11 @@ object ClashProxyParser {
         if (portInt <= 0 || portInt > UShort.MAX_VALUE.toInt()) return null
         val port = portInt.toUShort()
 
-        // Optional username/password (Clash uses snake_case in some forks)
+        // Anywhere speaks SOCKS5 strictly in the clear — reject SOCKS5-over-TLS
+        // nodes rather than silently downgrading them.
+        if (node.optBoolean("tls", false)) return null
+
+        // Some Clash forks use snake_case (user/pass) instead of username/password.
         val username = node.optString("username", "").takeIf { it.isNotEmpty() }
             ?: node.optString("user", "").takeIf { it.isNotEmpty() }
         val password = node.optString("password", "").takeIf { it.isNotEmpty() }
@@ -367,16 +310,59 @@ object ClashProxyParser {
         )
     }
 
+    /**
+     * Parses a UUID the way Xray-core does (common/uuid/uuid.go ParseString):
+     * length 32–36 is hex/standard-form decoded; length 1–30 is derived as
+     * `SHA1(zero_uuid || input)[0..16]` with RFC 4122 v5 + variant bits stamped.
+     * Mirrors iOS `UUID(xrayString:)`.
+     */
+    private fun parseXrayUuid(str: String): UUID? {
+        val len = str.length
+        if (len in 32..36) {
+            // Try standard hyphenated form first, then 32-char hex.
+            runCatching { return UUID.fromString(str) }
+            if (len == 32 && str.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+                val bytes = ByteArray(16) { i ->
+                    val hi = Character.digit(str[i * 2], 16)
+                    val lo = Character.digit(str[i * 2 + 1], 16)
+                    if (hi < 0 || lo < 0) return null
+                    ((hi shl 4) or lo).toByte()
+                }
+                return uuidFromBytes(bytes)
+            }
+            return null
+        }
+        if (len !in 1..30) return null
+
+        // SHA-1(zero-UUID || str), take first 16 bytes, stamp v5 + variant bits.
+        val md = java.security.MessageDigest.getInstance("SHA-1")
+        md.update(ByteArray(16))
+        md.update(str.toByteArray(Charsets.UTF_8))
+        val hash = md.digest()
+        val bytes = hash.copyOfRange(0, 16)
+        bytes[6] = ((bytes[6].toInt() and 0x0F) or (5 shl 4)).toByte()
+        bytes[8] = ((bytes[8].toInt() and 0x3F) or 0x80).toByte()
+        return uuidFromBytes(bytes)
+    }
+
+    private fun uuidFromBytes(b: ByteArray): UUID {
+        var msb = 0L
+        var lsb = 0L
+        for (i in 0..7) msb = (msb shl 8) or (b[i].toLong() and 0xFF)
+        for (i in 8..15) lsb = (lsb shl 8) or (b[i].toLong() and 0xFF)
+        return UUID(msb, lsb)
+    }
+
     private fun mapFingerprint(fp: String?): String = when (fp?.lowercase()) {
         "chrome" -> TlsFingerprint.CHROME_133.raw
         "firefox" -> TlsFingerprint.FIREFOX_148.raw
         "safari" -> TlsFingerprint.SAFARI_26.raw
         "ios" -> TlsFingerprint.IOS_14.raw
         "edge" -> TlsFingerprint.EDGE_85.raw
-        "android" -> TlsFingerprint.ANDROID_11.raw
-        "qq" -> TlsFingerprint.QQ_11.raw
-        "360" -> TlsFingerprint.BROWSER_360.raw
         "random" -> TlsFingerprint.RANDOM.raw
+        // Note: Android-only fingerprints (android_11/qq_11/360_7) intentionally
+        // not surfaced here — iOS doesn't recognize them, so adding the mapping
+        // would create asymmetric Clash-import behavior between platforms.
         else -> fp ?: TlsFingerprint.CHROME_133.raw
     }
 }

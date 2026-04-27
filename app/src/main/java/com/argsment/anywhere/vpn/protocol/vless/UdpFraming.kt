@@ -1,12 +1,8 @@
 package com.argsment.anywhere.vpn.protocol.vless
 
-/**
- * UDP packet framing capabilities.
- * UDP packets are length-prefixed with 2 bytes (big-endian).
- */
+/** UDP packet framing — packets are prefixed with a 2-byte big-endian length. */
 object UdpFraming {
 
-    /** Frame a UDP packet with 2-byte big-endian length prefix. */
     fun frame(data: ByteArray): ByteArray {
         val length = data.size
         val framed = ByteArray(2 + length)
@@ -16,11 +12,7 @@ object UdpFraming {
         return framed
     }
 
-    /**
-     * Extracts a complete UDP packet from a buffer.
-     * Returns the extracted packet data, or null if not enough data is available.
-     * Updates [state] to track buffer position.
-     */
+    /** Returns null if [state] does not yet contain a complete packet. */
     fun extract(state: UdpBufferState): ByteArray? {
         val available = state.buffer.size - state.offset
         if (available < 2) return null
@@ -34,7 +26,6 @@ object UdpFraming {
 
         state.offset = packetStart + length
 
-        // Compact buffer periodically to avoid unbounded growth
         if (state.offset > 8192) {
             state.buffer = state.buffer.copyOfRange(state.offset, state.buffer.size)
             state.offset = 0
@@ -44,10 +35,6 @@ object UdpFraming {
     }
 }
 
-/**
- * Mutable state for UDP buffer tracking.
- * Used by connections that need to reassemble length-prefixed UDP packets.
- */
 class UdpBufferState {
     var buffer: ByteArray = byteArrayOf()
     var offset: Int = 0

@@ -1,37 +1,26 @@
 package com.argsment.anywhere.vpn.protocol.shadowsocks
 
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.Transport
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 
 private val logger = AnywhereLogger("Shadowsocks")
-private val udpLogger = AnywhereLogger("SS-UDP")
-
-// =============================================================================
-// ShadowsocksConnection (TCP)
-// =============================================================================
 
 /**
- * Wraps a transport with Shadowsocks AEAD encryption.
- *
- * The address header is prepended to the first `send()` call's data
- * (encrypted as part of the stream). Shadowsocks has no response header,
- * so `responseHeaderReceived` starts as `true`.
+ * Shadowsocks TCP connection wrapping a transport with AEAD encryption. The address
+ * header is prepended to the first send (encrypted as part of the stream).
+ * Shadowsocks has no response header.
  */
 class ShadowsocksConnection(
     private val transport: Transport,
     cipher: ShadowsocksCipher,
     masterKey: ByteArray,
     private var addressHeader: ByteArray?
-) : VlessConnection() {
+) : ProxyConnection() {
 
     private val writer = ShadowsocksAEADWriter(cipher, masterKey)
     private val reader = ShadowsocksAEADReader(cipher, masterKey)
     private val headerLock = Any()
-
-    init {
-        responseHeaderReceived = true
-    }
 
     override val isConnected: Boolean get() = true
 
@@ -77,59 +66,8 @@ class ShadowsocksConnection(
             if (data.isEmpty()) return null
             val plaintext = reader.open(data)
             if (plaintext.isNotEmpty()) return plaintext
-            // If plaintext is empty, we need more data — loop to receive again
+            // Empty plaintext means the AEAD reader needs more bytes — loop.
         }
-    }
-
-    override fun cancel() {
-        transport.forceCancel()
-    }
-}
-
-// =============================================================================
-// ShadowsocksUDPConnection (UDP-over-TCP)
-// =============================================================================
-
-/**
- * Wraps a transport with Shadowsocks per-packet UDP encryption.
- * Used for UDP-over-TCP tunneling.
- */
-class ShadowsocksUDPConnection(
-    private val transport: Transport,
-    private val cipher: ShadowsocksCipher,
-    private val masterKey: ByteArray,
-    private val dstHost: String,
-    private val dstPort: Int
-) : VlessConnection() {
-
-    init {
-        responseHeaderReceived = true
-    }
-
-    override val isConnected: Boolean get() = true
-
-    override suspend fun sendRaw(data: ByteArray) {
-        val packet = ShadowsocksProtocol.encodeUDPPacket(dstHost, dstPort, data)
-        val encrypted = ShadowsocksUDPCrypto.encrypt(cipher, masterKey, packet)
-        transport.send(encrypted)
-    }
-
-    override fun sendRawAsync(data: ByteArray) {
-        try {
-            val packet = ShadowsocksProtocol.encodeUDPPacket(dstHost, dstPort, data)
-            val encrypted = ShadowsocksUDPCrypto.encrypt(cipher, masterKey, packet)
-            transport.sendAsync(encrypted)
-        } catch (e: Exception) {
-            udpLogger.error("[SS-UDP] Send error: ${e.message}")
-        }
-    }
-
-    override suspend fun receiveRaw(): ByteArray? {
-        val data = transport.receive() ?: return null
-        if (data.isEmpty()) return null
-        val decrypted = ShadowsocksUDPCrypto.decrypt(cipher, masterKey, data)
-        val parsed = ShadowsocksProtocol.decodeUDPPacket(decrypted) ?: throw ShadowsocksError.InvalidAddress()
-        return parsed.payload
     }
 
     override fun cancel() {

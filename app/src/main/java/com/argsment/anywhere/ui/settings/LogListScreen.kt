@@ -73,7 +73,6 @@ fun LogListScreen(
     var selectMode by remember { mutableStateOf(false) }
     val selection = remember { mutableStateMapOf<UUID, Unit>() }
 
-    // Start/stop polling on composition lifecycle (mirrors iOS onAppear/onDisappear).
     DisposableEffect(Unit) {
         logsModel.startPolling()
         onDispose { logsModel.stopPolling() }
@@ -159,7 +158,7 @@ fun LogListScreen(
                     .padding(innerPadding),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)
             ) {
-                // iOS displays newest first (reversed).
+                // Newest first.
                 val reversed = logs.asReversed()
                 items(reversed, key = { it.id }) { entry ->
                     LogRow(

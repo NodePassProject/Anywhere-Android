@@ -71,7 +71,6 @@ fun ChainEditorScreen(
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
     ) {
-        // Header
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -104,7 +103,6 @@ fun ChainEditorScreen(
         HorizontalDivider()
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Name field
         OutlinedTextField(
             value = name,
             onValueChange = { name = it },
@@ -115,7 +113,6 @@ fun ChainEditorScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Proxies section header
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -139,7 +136,6 @@ fun ChainEditorScreen(
             )
         }
 
-        // Proxy list
         LazyColumn(
             modifier = Modifier.weight(1f, fill = false)
         ) {
@@ -165,7 +161,6 @@ fun ChainEditorScreen(
             }
         }
 
-        // Route preview
         if (selectedProxies.size >= 2) {
             Spacer(modifier = Modifier.height(12.dp))
             Text(
@@ -183,7 +178,6 @@ fun ChainEditorScreen(
         Spacer(modifier = Modifier.height(16.dp))
     }
 
-    // Proxy picker
     if (showingProxyPicker) {
         ModalBottomSheet(
             onDismissRequest = { showingProxyPicker = false },
@@ -213,8 +207,8 @@ private fun ProxyChainItem(
     onMoveDown: (() -> Unit)? = null
 ) {
     val badgeColor = when {
-        index == 0 -> Color(0xFF2196F3) // blue - entry
-        index == totalCount - 1 -> Color(0xFF4CAF50) // green - exit
+        index == 0 -> Color(0xFF2196F3)
+        index == totalCount - 1 -> Color(0xFF4CAF50)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
@@ -230,7 +224,6 @@ private fun ProxyChainItem(
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Index badge
         Surface(
             shape = CircleShape,
             color = badgeColor,
@@ -312,8 +305,8 @@ private fun ProxyPickerScreenContent(
         configurations.filter { it.id !in excludedIds }
     }
 
-    // Group like iOS AssignmentPicker / RuleSetListView: a Standalone section
-    // (configs without a subscriptionId) followed by one section per subscription.
+    // Standalone section (configs without a subscriptionId) followed by one
+    // section per subscription.
     val standalone = remember(available) { available.filter { it.subscriptionId == null } }
     val groups = remember(available, subscriptions) {
         subscriptions.mapNotNull { sub ->
@@ -341,7 +334,6 @@ private fun ProxyPickerScreenContent(
                 text = stringResource(R.string.select_proxy),
                 style = MaterialTheme.typography.titleMedium
             )
-            // Spacer for symmetry
             Spacer(modifier = Modifier.width(64.dp))
         }
 

@@ -10,13 +10,11 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Read-only SQLite database for bundled routing rules (replaces JSON resource files).
+ * Read-only SQLite database for bundled routing rules.
  *
  * Tables:
  *  - `rules(source, type, value)` — domain/IP rules keyed by source name
  *  - `metadata(key, value)` — JSON-encoded lists and mappings
- *
- * Swift counterpart: [Shared/DataStore/RulesDatabase.swift].
  */
 class RulesDatabase private constructor(private val db: SQLiteDatabase?) {
 

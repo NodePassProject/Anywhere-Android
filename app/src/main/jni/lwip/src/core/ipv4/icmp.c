@@ -213,6 +213,9 @@ icmp_input(struct pbuf *p, struct netif *inp)
         ip4_addr_copy(iphdr->src, *src);
         ip4_addr_copy(iphdr->dest, *ip4_current_src_addr());
         ICMPH_TYPE_SET(iecho, ICMP_ER);
+        /* --- BEGIN Anywhere Patch: reset if_idx on pbuf reuse --- */
+        p->if_idx = NETIF_NO_INDEX;
+        /* --- END Anywhere Patch --- */
 #if CHECKSUM_GEN_ICMP
         IF__NETIF_CHECKSUM_ENABLED(inp, NETIF_CHECKSUM_GEN_ICMP) {
           /* adjust the checksum */

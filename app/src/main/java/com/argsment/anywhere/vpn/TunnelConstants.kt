@@ -1,27 +1,25 @@
 package com.argsment.anywhere.vpn
 
 /**
- * Centralized tunnel tuning constants. Mirrors iOS `TunnelConstants.swift`.
- *
- * All values expressed in their natural unit (seconds, milliseconds, bytes, etc.)
- * and in one place so Android stays in lock-step with iOS.
+ * Centralized tunnel tuning constants. All values expressed in their natural
+ * unit (seconds, milliseconds, bytes, etc.) and in one place.
  */
 object TunnelConstants {
 
     // -- Connection Timeouts --
 
-    /** Inactivity timeout for TCP connections (Xray-core `connIdle`, default 300s). */
+    /** Inactivity timeout for TCP connections (default 300s). */
     const val connectionIdleTimeoutMs: Long = 300_000L
 
-    /** Timeout after uplink (local → remote) finishes (Xray-core `downlinkOnly`, default 1s). */
+    /** Timeout after uplink (local → remote) finishes (default 1s). */
     const val downlinkOnlyTimeoutMs: Long = 1_000L
 
-    /** Timeout after downlink (remote → local) finishes (Xray-core `uplinkOnly`, default 1s). */
+    /** Timeout after downlink (remote → local) finishes (default 1s). */
     const val uplinkOnlyTimeoutMs: Long = 1_000L
 
     /**
-     * Handshake timeout matching Xray-core's `Timeout.Handshake` (60 seconds).
-     * Bounds the entire connection setup phase (TCP + TLS + WS/HTTPUpgrade + VLESS header).
+     * Handshake timeout (60 seconds). Bounds the entire connection setup phase
+     * (TCP + TLS + WS/HTTPUpgrade + VLESS header).
      */
     const val handshakeTimeoutMs: Long = 60_000L
 
@@ -51,26 +49,34 @@ object TunnelConstants {
     /**
      * Safety cap on per-connection `pendingData` (bytes accumulated while the
      * sniff phase runs or the proxy is dialing). Bounded naturally by TCP_WND
-     * since we defer `tcp_recved` until the route is committed; this cap
-     * defends against pathological states where the window bookkeeping drifts.
-     * Set to 2 × TCP_WND so it only fires on runaway growth.
+     * (~696 KB) since we defer `tcp_recved` until the route is committed;
+     * this cap defends against pathological states where the window bookkeeping
+     * drifts. Set to 2 × TCP_WND so it only fires on runaway growth.
      */
-    const val tcpMaxPendingDataSize: Int = 2 * 512 * 1360
+    const val tcpMaxPendingDataSize: Int = 2 * 1024 * 1360
+
+    /**
+     * Maximum packets per single TUN write batch. Caps each `flushOutputPackets`
+     * pass so the lwIP executor doesn't monopolize the TUN fd under sustained
+     * downlink. Mirrors iOS `tunnelMaxPacketsPerWrite=64`.
+     */
+    const val tunnelMaxPacketsPerWrite: Int = 64
 
     /**
      * Low-water mark for the per-connection downlink backlog (`pendingWrite`).
      * When the backlog drops below this we prefetch the next proxy receive in
      * parallel with the ongoing drain — without this overlap, big chunks turn
-     * the downlink into stop-and-wait and throughput collapses. Sized to match
-     * TCP_SND_BUF in lwipopts.h so a prefetched chunk can be pushed into lwIP
-     * the moment space frees up.
+     * the downlink into stop-and-wait and throughput collapses. Sized at half
+     * TCP_SND_BUF (lwipopts.h) so a prefetched chunk still fits in lwIP's send
+     * buffer once space frees up, without letting the backlog balloon past a
+     * full send-buffer worth of bytes.
      */
     const val drainLowWaterMark: Int = 512 * 1360
 
     // -- UDP Settings --
 
     /** Maximum buffer size for queued UDP datagrams. */
-    const val udpMaxBufferSize: Int = 16 * 1024
+    const val udpMaxBufferSize: Int = 256 * 1024
 
     /** Idle timeout for UDP flows (seconds). */
     const val udpIdleTimeoutSec: Double = 60.0
@@ -83,10 +89,13 @@ object TunnelConstants {
     /** Maximum number of log entries in the buffer. */
     const val logMaxEntries: Int = 50
 
+    /** Time window (seconds) to attribute connection errors to a recent tunnel interruption. */
+    const val recentTunnelInterruptionWindowSec: Long = 8L
+
     // -- Timer Intervals --
 
     /** lwIP periodic timeout interval (milliseconds). */
-    const val lwipTimeoutIntervalMs: Long = 250L
+    const val lwipTimeoutIntervalMs: Long = 100L
 
     /** UDP flow cleanup timer interval (seconds). */
     const val udpCleanupIntervalSec: Long = 1L
@@ -113,8 +122,8 @@ object TunnelConstants {
 
     /**
      * Minimum interval between prefs-observer signal handler invocations (nanoseconds).
-     * 1s matches iOS `AWCore.throttleInterval` so coalesced tunnel-settings, routing,
-     * and certificate-policy signals land on the VPN service at the same cadence.
+     * 1s so coalesced tunnel-settings, routing, and certificate-policy signals land
+     * on the VPN service at the same cadence.
      */
     const val settingsThrottleNanos: Long = 1_000_000_000L
 

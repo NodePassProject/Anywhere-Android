@@ -45,9 +45,6 @@
                 <data android:scheme="socks5" />
                 <data android:scheme="socks" />
                 <data android:scheme="trojan" />
-                <data android:scheme="hysteria2" />
-                <data android:scheme="hy2" />
-                <data android:scheme="quic" />
             </intent-filter>
         </activity>
 

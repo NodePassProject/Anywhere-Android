@@ -56,47 +56,41 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         application.getSharedPreferences("anywhere_settings", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
 
-    // VPN state
     private val _vpnStatus = MutableStateFlow(VpnStatus.DISCONNECTED)
     val vpnStatus: StateFlow<VpnStatus> = _vpnStatus.asStateFlow()
     private var pendingReconnect = false
 
-    // Traffic stats
     private val _bytesIn = MutableStateFlow(0L)
     val bytesIn: StateFlow<Long> = _bytesIn.asStateFlow()
 
     private val _bytesOut = MutableStateFlow(0L)
     val bytesOut: StateFlow<Long> = _bytesOut.asStateFlow()
 
-    // Selected configuration
     private val _selectedConfigId = MutableStateFlow<UUID?>(null)
     val selectedConfigId: StateFlow<UUID?> = _selectedConfigId.asStateFlow()
 
-    // Latency results
     private val _latencyResults = MutableStateFlow<Map<UUID, LatencyResult>>(emptyMap())
     val latencyResults: StateFlow<Map<UUID, LatencyResult>> = _latencyResults.asStateFlow()
 
-    // Error state
     private val _startError = MutableStateFlow<String?>(null)
     val startError: StateFlow<String?> = _startError.asStateFlow()
 
-    // Orphaned rule set names (after config deletion)
     private val _orphanedRuleSetNames = MutableStateFlow<List<String>>(emptyList())
     val orphanedRuleSetNames: StateFlow<List<String>> = _orphanedRuleSetNames.asStateFlow()
 
-    // Chain selection
     private val _selectedChainId = MutableStateFlow<UUID?>(null)
     val selectedChainId: StateFlow<UUID?> = _selectedChainId.asStateFlow()
 
-    // Chain latency results
     private val _chainLatencyResults = MutableStateFlow<Map<UUID, LatencyResult>>(emptyMap())
     val chainLatencyResults: StateFlow<Map<UUID, LatencyResult>> = _chainLatencyResults.asStateFlow()
 
-    // VPN permission request callback
     var onRequestVpnPermission: ((Intent) -> Unit)? = null
 
-    // Deep-link pending URL (vless://…, ss://…, socks5://…, quic://…, or raw link from anywhere://add-proxy?link=…).
-    // Consumed by ProxyListScreen to open the Add Proxy sheet with the URL pre-filled. Mirrors iOS DeepLinkManager.pendingAction.
+    /**
+     * Pending deep-link URL (vless://…, ss://…, socks5://…, or raw link from
+     * anywhere://add-proxy?link=…). Consumed by ProxyListScreen to open the
+     * Add Proxy sheet with the URL pre-filled.
+     */
     private val _pendingDeepLinkUrl = MutableStateFlow<String?>(null)
     val pendingDeepLinkUrl: StateFlow<String?> = _pendingDeepLinkUrl.asStateFlow()
 
@@ -115,7 +109,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     com.argsment.anywhere.data.model.percentDecode(raw)
                 }.getOrDefault(raw)
             }
-            "vless", "trojan", "ss", "socks5", "socks", "hysteria2", "hy2", "quic" -> {
+            "vless", "trojan", "ss", "socks5", "socks" -> {
                 _pendingDeepLinkUrl.value = uri.toString()
             }
             else -> {}
@@ -126,7 +120,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _pendingDeepLinkUrl.value = null
     }
 
-    // Service binding
     private var vpnService: AnywhereVpnService? = null
     private var serviceBound = false
     private var statsJob: Job? = null
@@ -140,9 +133,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
             // The binder is delivered after `onStartCommand` has returned,
             // so `isRunning` reflects whether `startVpn` set up the TUN and
-            // lwIP stack successfully. Matches iOS, where `vpnStatus` only
-            // flips to `.connected` once `NEVPNStatusDidChange` fires with
-            // the system-confirmed connected state.
+            // lwIP stack successfully.
             if (localBinder.service.isRunning) {
                 _vpnStatus.value = VpnStatus.CONNECTED
                 startStatsPolling()
@@ -166,7 +157,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             (_vpnStatus.value != VpnStatus.CONNECTED && _vpnStatus.value != VpnStatus.DISCONNECTED)
 
     init {
-        // Restore chain or config selection
         val savedChainId = prefs.getString("selectedChainId", null)?.let {
             runCatching { UUID.fromString(it) }.getOrNull()
         }
@@ -185,7 +175,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
         // React to trusted-certificate changes: update the singleton immediately and
         // notify the tunnel so live TLS connections tear down and reconnect under the
-        // new policy. Matches iOS CertificatePolicy + certificatePolicyChanged.
+        // new policy.
         viewModelScope.launch {
             var first = true
             certificateRepository.fingerprints.collect { fingerprints ->
@@ -198,7 +188,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     val selectedConfiguration: ProxyConfiguration?
         get() {
-            // If a chain is selected, resolve it
             val chainId = _selectedChainId.value
             if (chainId != null) {
                 val chain = chainRepository.get(chainId) ?: return null
@@ -214,15 +203,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _selectedConfigId.value = config.id
         prefs.edit().putString("selectedConfigurationId", config.id.toString()).apply()
 
-        // If VPN is connected, push new configuration to the tunnel
         if (_vpnStatus.value == VpnStatus.CONNECTED) {
             switchConfig(config)
         }
     }
-
-    // =========================================================================
-    // VPN Lifecycle
-    // =========================================================================
 
     fun toggleVPN() {
         when (_vpnStatus.value) {
@@ -236,7 +220,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         val config = selectedConfiguration ?: return
         val context = getApplication<Application>()
 
-        // Check VPN permission
         val prepareIntent = VpnService.prepare(context)
         if (prepareIntent != null) {
             pendingConnectAfterPermission = true
@@ -247,7 +230,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         startVpnService(config)
     }
 
-    /** Called from Activity after VPN permission is granted. */
     fun onVpnPermissionGranted() {
         if (pendingConnectAfterPermission) {
             pendingConnectAfterPermission = false
@@ -256,7 +238,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Called from Activity after VPN permission is denied. */
     fun onVpnPermissionDenied() {
         pendingConnectAfterPermission = false
         _startError.value = "VPN permission denied"
@@ -279,7 +260,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         val context = getApplication<Application>()
         _vpnStatus.value = VpnStatus.CONNECTING
 
-        // Sync routing rules before starting tunnel
         syncRoutingConfigurationToNE()
 
         viewModelScope.launch {
@@ -298,12 +278,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
             try {
                 context.startForegroundService(intent)
-                // Bind to service for stats polling and config switching.
                 // Status stays at CONNECTING until the service binder confirms
                 // the tunnel is up via [serviceConnection.onServiceConnected]
-                // + `isRunning` — matching iOS, which waits for the
-                // `NEVPNStatusDidChange` notification before flipping to
-                // `.connected`.
+                // + `isRunning`.
                 bindToService()
             } catch (e: Exception) {
                 logger.warning("Failed to send configuration to tunnel: ${e.message}")
@@ -331,7 +308,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         _bytesOut.value = 0
         _vpnStatus.value = VpnStatus.DISCONNECTED
 
-        // Auto-reconnect if pending (matching iOS reconnectVPN)
         if (pendingReconnect) {
             pendingReconnect = false
             connect()
@@ -340,7 +316,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Stops the VPN and automatically reconnects once disconnected.
-     * Used when switching configurations while connected (matching iOS reconnectVPN).
+     * Used when switching configurations while connected.
      */
     fun reconnect() {
         val status = _vpnStatus.value
@@ -368,10 +344,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // =========================================================================
-    // Service Binding
-    // =========================================================================
-
     private fun bindToService() {
         if (serviceBound) return
         val context = getApplication<Application>()
@@ -388,10 +360,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         vpnService = null
         serviceBound = false
     }
-
-    // =========================================================================
-    // Traffic Stats Polling
-    // =========================================================================
 
     private fun startStatsPolling() {
         if (statsJob != null) return
@@ -421,17 +389,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         statsJob = null
     }
 
-    // =========================================================================
-    // DNS Resolution
-    // =========================================================================
-
     /**
      * Resolves server address to IP before tunnel starts (avoids DNS-over-tunnel loop).
      * If already an IP, returns config as-is. If a domain, resolves via system DNS.
      */
     private fun resolveServerAddress(config: ProxyConfiguration): ProxyConfiguration {
         val resolvedConfig = resolveAddress(config)
-        // Also resolve chain proxy addresses
         val resolvedChain = config.chain?.map { resolveAddress(it) }
         return if (resolvedChain != null) resolvedConfig.copy(chain = resolvedChain) else resolvedConfig
     }
@@ -459,10 +422,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // =========================================================================
-    // Cleanup
-    // =========================================================================
-
     override fun onCleared() {
         super.onCleared()
         stopStatsPolling()
@@ -476,10 +435,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun clearOrphanedRuleSetNames() {
         _orphanedRuleSetNames.value = emptyList()
     }
-
-    // =========================================================================
-    // Configuration CRUD
-    // =========================================================================
 
     fun addConfiguration(config: ProxyConfiguration) {
         configRepository.add(config)
@@ -499,7 +454,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             _selectedConfigId.value = remaining.firstOrNull()?.id
             prefs.edit().putString("selectedConfigurationId", _selectedConfigId.value?.toString()).apply()
         }
-        // If a chain is selected and now broken, fall back
         val chainId = _selectedChainId.value
         if (chainId != null) {
             val chain = chainRepository.get(chainId)
@@ -515,10 +469,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun configurations(forSubscription: Subscription): List<ProxyConfiguration> {
         return configRepository.getAll().filter { it.subscriptionId == forSubscription.id }
     }
-
-    // =========================================================================
-    // Subscription CRUD
-    // =========================================================================
 
     fun addSubscription(configurations: List<ProxyConfiguration>, subscription: Subscription) {
         subscriptionRepository.add(subscription)
@@ -551,12 +501,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         // When multiple configs share the same name, they are matched positionally within that group.
         val oldConfigs = configRepository.getAll().filter { it.subscriptionId == subscription.id }
 
-        // Group old configs by name, preserving order within each group
         val oldByName = mutableMapOf<String, MutableList<ProxyConfiguration>>()
         for (old in oldConfigs) {
             oldByName.getOrPut(old.name) { mutableListOf() }.add(old)
         }
-        // Track how many old configs per name have been consumed
         val oldNameCursor = mutableMapOf<String, Int>()
 
         val newConfigs = result.configurations.map { newConfig ->
@@ -575,8 +523,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         // Atomically replace old configurations with new ones (single StateFlow emission)
         configRepository.replaceBySubscription(subscription.id, newConfigs)
 
-        // Update subscription metadata (preserve old values when new ones are null).
-        // Respect user-customized names: don't overwrite them with the remote name. Mirrors iOS.
+        // Preserve old metadata when new values are null and respect user-customized names.
         val updated = subscription.copy(
             lastUpdate = System.currentTimeMillis(),
             name = if (subscription.isNameCustomized) subscription.name else (result.name ?: subscription.name),
@@ -590,10 +537,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         ensureValidSelection()
     }
 
-    // =========================================================================
-    // Latency Testing
-    // =========================================================================
-
     fun testLatency(forConfig: ProxyConfiguration) {
         syncProxyServerAddresses(forConfig)
         _latencyResults.value = _latencyResults.value + (forConfig.id to LatencyResult.Testing)
@@ -603,9 +546,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Tests latency for a specific set of configurations. Mirrors iOS
-     *  `ProxyListViewModel.testLatencies(for:)`. The caller filters out
-     *  collapsed subscriptions before invoking — we don't filter here. */
+    /** Tests latency for a specific set of configurations. The caller filters
+     *  out collapsed subscriptions before invoking — we don't filter here. */
     fun testLatencies(forConfigs: List<ProxyConfiguration>) {
         if (forConfigs.isEmpty()) return
         syncProxyServerAddresses(forConfigs)
@@ -619,17 +561,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // =========================================================================
-    // Chain CRUD & Selection
-    // =========================================================================
-
     fun addChain(chain: ProxyChain) {
         chainRepository.add(chain)
     }
 
     fun updateChain(chain: ProxyChain) {
         chainRepository.update(chain)
-        // Re-resolve if this is the active chain
         if (_selectedChainId.value == chain.id) {
             val resolved = resolveChain(chain)
             if (resolved != null && _vpnStatus.value == VpnStatus.CONNECTED) {
@@ -676,10 +613,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    // =========================================================================
-    // Chain Latency Testing
-    // =========================================================================
-
     fun testChainLatency(chain: ProxyChain) {
         val resolved = resolveChain(chain) ?: return
         syncProxyServerAddresses(resolved)
@@ -709,23 +642,15 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // =========================================================================
-    // Routing
-    // =========================================================================
-
     fun syncRoutingConfigurationToNE() {
         ruleSetRepository.syncRoutingFile(
             configRepository.getAll()
         ) { address -> resolveServerAddress(address) }
-        // Signal service to reload routing if connected
         if (_vpnStatus.value == VpnStatus.CONNECTED) {
             prefs.edit().putLong("routingChanged", System.currentTimeMillis()).apply()
         }
     }
 
-    // =========================================================================
-    // Proxy Server Address Bypass
-    // =========================================================================
 
     /** Collects all proxy server addresses (domains + resolved IPs) from all
      *  configurations and sends them to the VPN service. This prevents routing
@@ -757,11 +682,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // =========================================================================
-    // Settings
-    // =========================================================================
-
-    /** "rule" (default) applies routing rules per-destination; "global" routes everything through the proxy. Mirrors iOS. */
+    /** "rule" (default) applies routing rules per-destination; "global" routes everything through the proxy. */
     var proxyMode: String
         get() = prefs.getString("proxyMode", "rule") ?: "rule"
         set(value) = prefs.edit().putString("proxyMode", value).apply()
@@ -771,9 +692,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         set(value) = prefs.edit().putString("bypassCountryCode", value).apply()
 
     /**
-     * IPv6 DNS lookup toggle. Matches iOS `ipv6DNSEnabled` — a single knob that
-     * controls both IPv6 routes in the TUN interface and fake-IPv6 answers for
-     * AAAA queries. When off, IPv6 is effectively disabled.
+     * IPv6 DNS lookup toggle — a single knob that controls both IPv6 routes
+     * in the TUN interface and fake-IPv6 answers for AAAA queries. When off,
+     * IPv6 is effectively disabled.
      */
     var ipv6DnsEnabled: Boolean
         get() = prefs.getBoolean("ipv6DnsEnabled", false)
@@ -791,6 +712,14 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         get() = prefs.getString("encryptedDnsServer", "") ?: ""
         set(value) = prefs.edit().putString("encryptedDnsServer", value).apply()
 
+    /**
+     * When true, drop UDP/443 traffic with ICMP port-unreachable so HTTP/3 clients
+     * fall back to HTTP/2. Defaults to true.
+     */
+    var blockQuicEnabled: Boolean
+        get() = prefs.getBoolean("blockQuicEnabled", true)
+        set(value) = prefs.edit().putBoolean("blockQuicEnabled", value).apply()
+
     var allowInsecure: Boolean
         get() = prefs.getBoolean("allowInsecure", false)
         set(value) {
@@ -800,23 +729,20 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             // (e.g. SubscriptionFetcher) observe the new value without waiting
             // for LwipStack to reload after a prefs listener fires.
             CertificatePolicy.setAllowInsecure(value)
-            // Mirrors iOS: toggling allowInsecure posts `certificatePolicyChanged`, which
-            // tears down active TLS connections so the new policy applies immediately.
+            // Toggling allowInsecure tears down active TLS connections so the
+            // new policy applies immediately.
             signalCertificatePolicyChanged()
         }
 
-    /**
-     * UI-only flag gating experimental features (e.g. custom rule set creation). Mirrors
-     * iOS `experimentalEnabled` AppStorage — no tunnel interaction, no restart needed.
-     */
+    /** UI-only flag gating experimental features (e.g. custom rule set creation). */
     var experimentalEnabled: Boolean
         get() = prefs.getBoolean("experimentalEnabled", false)
         set(value) = prefs.edit().putBoolean("experimentalEnabled", value).apply()
 
     /**
      * Toggle for Remnawave-panel subscriptions that require an `x-hwid` header keyed
-     * to this install. Mirrors iOS `AWCore.getRemnawaveHWIDEnabled()`. Off by default
-     * so the identifier is never sent unless the user opts in.
+     * to this install. Off by default so the identifier is never sent unless the
+     * user opts in.
      */
     var remnawaveHWIDEnabled: Boolean
         get() = prefs.getBoolean("remnawaveHWIDEnabled", false)
@@ -824,9 +750,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Persistent per-install identifier used as the `x-hwid` header value for
-     * Remnawave subscriptions. Mirrors iOS `AWCore.getIdentifier()`, which generates
-     * a UUID on first read and reuses it thereafter. Stored in the same shared
-     * preferences file as other app settings.
+     * Remnawave subscriptions. Generates a UUID on first read and reuses it
+     * thereafter.
      */
     val deviceIdentifier: String
         get() {
@@ -837,8 +762,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     /**
-     * Fires the Android-side equivalent of iOS's `certificatePolicyChanged` Darwin
-     * notification. LwipStack observes this key and tears down active connections.
+     * Signals a certificate policy change. LwipStack observes this key and
+     * tears down active connections.
      */
     fun signalCertificatePolicyChanged() {
         prefs.edit().putLong("certificatePolicyChanged", System.currentTimeMillis()).apply()
@@ -848,12 +773,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         get() = prefs.getBoolean("hasCompletedOnboarding", false)
 
     fun completeOnboarding(bypassCountryCode: String, adBlockEnabled: Boolean) {
-        // Apply country bypass
         if (bypassCountryCode.isNotEmpty()) {
             this.bypassCountryCode = bypassCountryCode
         }
 
-        // Apply ADBlock → REJECT
         if (adBlockEnabled) {
             val adBlock = ruleSetRepository.ruleSets.value.find { it.name == "ADBlock" }
             if (adBlock != null) {
@@ -861,10 +784,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Sync routing to service
         syncRoutingConfigurationToNE()
 
-        // Mark onboarding completed
         prefs.edit().putBoolean("hasCompletedOnboarding", true).apply()
     }
 

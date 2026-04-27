@@ -97,7 +97,6 @@ fun AcknowledgementsScreen(onBack: () -> Unit) {
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
-            // Independent project notice
             item {
                 Text(
                     text = stringResource(R.string.independent_project_notice),
@@ -107,7 +106,6 @@ fun AcknowledgementsScreen(onBack: () -> Unit) {
                 )
             }
 
-            // Trademarks section
             item {
                 Text(
                     text = stringResource(R.string.trademarks),
@@ -147,7 +145,6 @@ fun AcknowledgementsScreen(onBack: () -> Unit) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
             }
 
-            // Open Source Libraries section
             item {
                 Text(
                     text = stringResource(R.string.open_source_libraries),

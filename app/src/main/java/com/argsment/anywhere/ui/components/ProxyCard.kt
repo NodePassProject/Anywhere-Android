@@ -63,9 +63,7 @@ fun ProxyCardContent(
                     color = badgeColor
                 )
                 // Transport is only meaningful for VLESS — every other
-                // protocol's `transport` field is just a "tcp" placeholder
-                // that doesn't reflect the actual wire (e.g. Hysteria runs
-                // over QUIC/UDP, not TCP). Mirrors iOS ProxyListView.swift.
+                // protocol's `transport` field is just a "tcp" placeholder.
                 if (configuration.outboundProtocol == OutboundProtocol.VLESS) {
                     Text(text = dot, style = badgeStyle, color = badgeColor)
                     Text(
@@ -101,9 +99,9 @@ fun LatencyBadge(latency: LatencyResult?, modifier: Modifier = Modifier) {
         }
         is LatencyResult.Success -> {
             val color = when {
-                latency.ms < 300 -> Color(0xFF4CAF50) // green
-                latency.ms < 600 -> Color(0xFFFF9800) // yellow/orange
-                else -> Color(0xFFF44336) // red
+                latency.ms < 300 -> Color(0xFF4CAF50)
+                latency.ms < 600 -> Color(0xFFFF9800)
+                else -> Color(0xFFF44336)
             }
             Text(
                 text = stringResource(R.string.latency_ms, latency.ms),
@@ -129,6 +127,6 @@ fun LatencyBadge(latency: LatencyResult?, modifier: Modifier = Modifier) {
                 modifier = modifier
             )
         }
-        null -> { /* no latency result yet */ }
+        null -> {}
     }
 }

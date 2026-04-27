@@ -14,8 +14,6 @@ private val logger = AnywhereLogger("HttpUpgrade")
 /**
  * HTTP upgrade connection that performs an HTTP upgrade handshake and then
  * passes data through as raw TCP bytes (no WebSocket framing).
- *
- * Suspend-based transport abstraction avoids modifying [NioSocket] or [TlsRecordConnection].
  */
 class HttpUpgradeConnection private constructor(
     private val configuration: HttpUpgradeConfiguration,
@@ -24,7 +22,6 @@ class HttpUpgradeConnection private constructor(
     private val transportReceive: suspend () -> ByteArray?,
     private val transportCancel: () -> Unit
 ) {
-    // State
     private var leftoverBuffer = ByteArray(0)
     private var leftoverLen = 0
     private val lock = ReentrantLock()
@@ -34,21 +31,9 @@ class HttpUpgradeConnection private constructor(
         get() = lock.withLock { _isConnected }
 
     companion object {
-        /**
-         * Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
-         * Uses a fixed base version (Chrome 144, released 2026-01-13) and advances
-         * by one version every ~35 days (midpoint of Xray-core's 25-45 day range).
-         */
         val chromeUserAgent: String get() = WebSocketConnection.chromeUserAgent
     }
 
-    // =========================================================================
-    // Factory constructors
-    // =========================================================================
-
-    /**
-     * Creates an HTTP upgrade connection over a plain NioSocket.
-     */
     constructor(socket: NioSocket, configuration: HttpUpgradeConfiguration) : this(
         configuration = configuration,
         transportSend = { data -> socket.send(data) },
@@ -57,9 +42,6 @@ class HttpUpgradeConnection private constructor(
         transportCancel = { socket.forceCancel() }
     )
 
-    /**
-     * Creates an HTTP upgrade connection over a TLS record connection.
-     */
     constructor(
         tlsConnection: TlsRecordConnection,
         configuration: HttpUpgradeConfiguration
@@ -71,9 +53,6 @@ class HttpUpgradeConnection private constructor(
         transportCancel = { tlsConnection.cancel() }
     )
 
-    /**
-     * Creates an HTTP upgrade connection over a generic transport, including tunneled chaining.
-     */
     constructor(
         transport: Transport,
         configuration: HttpUpgradeConfiguration
@@ -85,33 +64,26 @@ class HttpUpgradeConnection private constructor(
         transportCancel = { transport.forceCancel() }
     )
 
-    // =========================================================================
-    // HTTP Upgrade Handshake
-    // =========================================================================
-
     /**
-     * Performs the HTTP upgrade handshake.
-     *
-     * Sends an HTTP GET with `Connection: Upgrade` and `Upgrade: websocket` headers
-     * (matching Xray-core's httpupgrade dialer), then waits for HTTP 101.
+     * Sends an HTTP GET with `Connection: Upgrade` and `Upgrade: websocket` headers,
+     * then waits for HTTP 101.
      */
     suspend fun performUpgrade() {
-        // Build HTTP upgrade request matching Xray-core's dialer.go
         val sb = StringBuilder()
         sb.append("GET ${configuration.path} HTTP/1.1\r\n")
         sb.append("Host: ${configuration.host}\r\n")
         sb.append("Connection: Upgrade\r\n")
         sb.append("Upgrade: websocket\r\n")
 
-        // Default User-Agent (Chrome UA) if not set in custom headers.
-        // Matches Xray-core's httpupgrade dialer which sets utils.ChromeUA.
-        if (configuration.headers["User-Agent"] == null) {
-            sb.append("User-Agent: $chromeUserAgent\r\n")
-        }
-
-        // Custom headers from configuration
+        // Custom headers first, then default User-Agent only if no user-supplied
+        // header (case-insensitive). Mirrors iOS HTTPUpgradeConnection.swift:84-92.
         for ((key, value) in configuration.headers) {
             sb.append("$key: $value\r\n")
+        }
+
+        val hasUserAgent = configuration.headers.keys.any { it.equals("User-Agent", ignoreCase = true) }
+        if (!hasUserAgent) {
+            sb.append("User-Agent: $chromeUserAgent\r\n")
         }
 
         sb.append("\r\n")
@@ -123,9 +95,7 @@ class HttpUpgradeConnection private constructor(
     }
 
     /**
-     * Reads the HTTP 101 response and validates upgrade headers.
-     *
-     * Matches Xray-core's ConnRF.Read() validation:
+     * Reads the HTTP 101 response and validates upgrade headers:
      * - Status must be "101 Switching Protocols"
      * - `Upgrade` header must be "websocket" (case-insensitive)
      * - `Connection` header must be "upgrade" (case-insensitive)
@@ -141,10 +111,8 @@ class HttpUpgradeConnection private constructor(
             lock.withLock {
                 appendToLeftover(data)
 
-                // Look for the end of HTTP headers (\r\n\r\n)
                 val headerEndIdx = findHeaderEnd(leftoverBuffer, leftoverLen)
                 if (headerEndIdx < 0) {
-                    // Haven't received the full header yet, keep reading
                     return@withLock null
                 }
 
@@ -163,18 +131,15 @@ class HttpUpgradeConnection private constructor(
                     leftoverLen = 0
                 }
 
-                // Validate HTTP 101 response
                 val headerString = String(headerData, Charsets.UTF_8)
                 val lines = headerString.split("\r\n")
                 val statusLine = lines.firstOrNull()
                     ?: throw HttpUpgradeError.UpgradeFailed("Empty response")
 
-                // Xray-core checks: resp.Status == "101 Switching Protocols"
                 if (!statusLine.contains("101")) {
                     throw HttpUpgradeError.UpgradeFailed("Expected HTTP 101, got: $statusLine")
                 }
 
-                // Xray-core checks Upgrade and Connection headers (case-insensitive)
                 var hasUpgradeWebSocket = false
                 var hasConnectionUpgrade = false
                 for (line in lines.drop(1)) {
@@ -197,36 +162,21 @@ class HttpUpgradeConnection private constructor(
                 }
 
                 return@withLock Unit
-            } ?: continue // null means need more data
+            } ?: continue
 
-            // Upgrade complete
             return
         }
     }
 
-    // =========================================================================
-    // Public API (Raw TCP passthrough)
-    // =========================================================================
-
-    /**
-     * Sends raw data through the transport (no framing).
-     */
     suspend fun send(data: ByteArray) {
         transportSend(data)
     }
 
-    /**
-     * Sends raw data through the transport without tracking completion.
-     */
     fun sendAsync(data: ByteArray) {
         transportSendAsync(data)
     }
 
-    /**
-     * Receives raw data from the transport.
-     *
-     * On the first call, returns any leftover data buffered from the HTTP upgrade response.
-     */
+    /** On the first call, returns any leftover data buffered from the HTTP upgrade response. */
     suspend fun receive(): ByteArray? {
         lock.withLock {
             if (leftoverLen > 0) {
@@ -239,14 +189,11 @@ class HttpUpgradeConnection private constructor(
 
         val data = transportReceive()
         if (data == null || data.isEmpty()) {
-            return null // EOF
+            return null
         }
         return data
     }
 
-    /**
-     * Cancels the connection.
-     */
     fun cancel() {
         lock.withLock {
             _isConnected = false
@@ -256,13 +203,7 @@ class HttpUpgradeConnection private constructor(
         transportCancel()
     }
 
-    // =========================================================================
-    // Buffer Helpers
-    // =========================================================================
-
-    /**
-     * Appends data to the leftover buffer. Must be called with lock held.
-     */
+    /** Must be called with lock held. */
     private fun appendToLeftover(data: ByteArray) {
         if (leftoverLen + data.size > leftoverBuffer.size) {
             val newSize = maxOf(leftoverBuffer.size * 2, leftoverLen + data.size)
@@ -274,9 +215,6 @@ class HttpUpgradeConnection private constructor(
         leftoverLen += data.size
     }
 
-    /**
-     * Finds the position of \r\n\r\n in the buffer, or returns -1.
-     */
     private fun findHeaderEnd(buf: ByteArray, len: Int): Int {
         for (i in 0 until len - 3) {
             if (buf[i] == 0x0D.toByte() && buf[i + 1] == 0x0A.toByte() &&
@@ -289,13 +227,6 @@ class HttpUpgradeConnection private constructor(
     }
 }
 
-// =============================================================================
-// HTTP Upgrade Errors
-// =============================================================================
-
-/**
- * HTTP upgrade transport errors.
- */
 sealed class HttpUpgradeError(message: String) : Exception(message) {
     class UpgradeFailed(reason: String) : HttpUpgradeError("HTTP upgrade failed: $reason")
 }

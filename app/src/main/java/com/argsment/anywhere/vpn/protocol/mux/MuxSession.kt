@@ -6,8 +6,8 @@ import com.argsment.anywhere.data.model.ProxyError
 private val logger = AnywhereLogger("MuxSession")
 
 /**
- * Individual mux session with send (Keep frame) and close (End frame).
- * Data/close delivery from demuxer.
+ * Individual mux session: send (Keep frame), close (End frame), and demuxer
+ * delivery callbacks.
  */
 class MuxSession(
     val sessionID: Int,           // UInt16 range
@@ -21,14 +21,12 @@ class MuxSession(
     var closed: Boolean = false
         private set
 
-    /** Called by MuxClient when demuxed data arrives for this session. */
     var dataHandler: ((ByteArray) -> Unit)? = null
 
-    /** Called by MuxClient when the session is closed (End frame received or connection error). */
     var closeHandler: (() -> Unit)? = null
 
-    // For XUDP: the first send must include a New frame with the data payload and GlobalID.
-    // Matching iOS behavior which defers the New frame until first data arrives.
+    // For XUDP, the first send must include a New frame with the data payload
+    // and GlobalID — defer the New frame until first data arrives.
     private var firstFrameSent: Boolean = (globalID == null)
 
     /**
@@ -48,17 +46,16 @@ class MuxSession(
         try {
             client.writeFrame(frame)
         } catch (e: Exception) {
-            // Reset firstFrameSent on failure so retry sends New frame (matching iOS)
+            // Reset firstFrameSent on failure so retry sends New frame.
             if (isFirst) firstFrameSent = false
             throw e
         }
     }
 
     /**
-     * Non-suspending send that checks closed synchronously and enqueues the write.
-     * Matches the iOS callback-based send pattern: the closed check and frame encoding
-     * happen on the calling thread (lwipExecutor), preventing races with closeAll().
-     * Used for buffered payloads during initial connection setup.
+     * Non-suspending send: the closed check and frame encoding happen on the
+     * calling thread (lwipExecutor) to prevent races with closeAll(). Used for
+     * buffered payloads during initial connection setup.
      */
     fun sendAsync(data: ByteArray) {
         if (closed) return
@@ -72,9 +69,6 @@ class MuxSession(
         client.writeFrameAsync(frame)
     }
 
-    /**
-     * Encodes a New frame with data payload and GlobalID for XUDP first-frame deferral.
-     */
     private fun encodeNewFrameWithData(data: ByteArray): ByteArray {
         val metadata = MuxFrameMetadata(
             sessionID = sessionID,
@@ -94,7 +88,7 @@ class MuxSession(
             status = MuxSessionStatus.KEEP,
             option = MuxOption.DATA
         )
-        // For UDP Keep frames, include address (matching Xray-core writer.go)
+        // UDP Keep frames carry the address.
         if (network == MuxNetwork.UDP) {
             metadata = metadata.copy(
                 network = network,
@@ -105,9 +99,7 @@ class MuxSession(
         return encodeMuxFrame(metadata = metadata, payload = data)
     }
 
-    /**
-     * Closes this session by sending an End frame.
-     */
+    /** Closes this session by sending an End frame. */
     fun close() {
         if (closed) return
         closed = true
@@ -124,37 +116,20 @@ class MuxSession(
         closeHandler?.invoke()
     }
 
-    // =========================================================================
-    // Called by MuxClient (demux)
-    // =========================================================================
-
-    /**
-     * Delivers demuxed data to this session.
-     */
     fun deliverData(data: ByteArray) {
         if (closed) return
         dataHandler?.invoke(data)
     }
 
     /**
-     * Delivers a close event to this session.
-     * Sends a best-effort End frame back to acknowledge the close, matching
-     * iOS MuxSession.deinit() which sends an End frame on deallocation.
+     * Delivers a server-initiated close to this session. The server already
+     * sent the End frame, and `MuxClient.handleReceivedData` removed the
+     * session from its map before invoking this — there is no peer to ack to.
+     * Mirrors iOS MuxSession.swift:117-121.
      */
     fun deliverClose() {
         if (closed) return
         closed = true
-
-        // Best-effort End frame — mirrors iOS deinit best-effort send.
-        val metadata = MuxFrameMetadata(
-            sessionID = sessionID,
-            status = MuxSessionStatus.END,
-            option = 0
-        )
-        val frame = encodeMuxFrame(metadata = metadata, payload = null)
-        client.writeFrameAsync(frame)
-        client.removeSession(sessionID)
-
         closeHandler?.invoke()
     }
 }

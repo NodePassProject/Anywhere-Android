@@ -9,11 +9,10 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
 
 /**
- * Horizontal push/pop transition used for in-screen drill-down navigation,
- * mirroring the default iOS NavigationStack behaviour.
+ * Horizontal push/pop transition used for in-screen drill-down navigation.
  *
  * The root destination is always represented by [rootKey]; anything else is
- * treated as a child route.  Going root → child slides the child in from the
+ * treated as a child route. Going root → child slides the child in from the
  * right; going child → root slides the child back out to the right.
  */
 @Composable

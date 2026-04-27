@@ -2,9 +2,6 @@ package com.argsment.anywhere.vpn.protocol.tls
 
 import com.argsment.anywhere.vpn.NativeBridge
 
-/**
- * TLS cipher suite constants and classification utilities.
- */
 object TlsCipherSuite {
     // TLS 1.3
     const val TLS_AES_128_GCM_SHA256: Int = 0x1301
@@ -39,7 +36,6 @@ object TlsCipherSuite {
     const val TLS_RSA_WITH_AES_128_CBC_SHA256: Int = 0x003C
     const val TLS_RSA_WITH_AES_256_CBC_SHA256: Int = 0x003D
 
-    /** Whether the cipher suite uses AEAD (GCM or ChaCha20-Poly1305). */
     fun isAEAD(suite: Int): Boolean = when (suite) {
         TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256,
         TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
@@ -49,7 +45,6 @@ object TlsCipherSuite {
         else -> false
     }
 
-    /** Whether the cipher suite uses ChaCha20-Poly1305. */
     fun isChaCha20(suite: Int): Boolean = when (suite) {
         TLS_CHACHA20_POLY1305_SHA256,
         TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
@@ -57,7 +52,6 @@ object TlsCipherSuite {
         else -> false
     }
 
-    /** Whether the cipher suite uses SHA-384 (vs SHA-256). */
     fun usesSHA384(suite: Int): Boolean = when (suite) {
         TLS_AES_256_GCM_SHA384,
         TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
@@ -68,7 +62,6 @@ object TlsCipherSuite {
         else -> false
     }
 
-    /** Whether the cipher suite uses ECDHE key exchange (vs static RSA). */
     fun isECDHE(suite: Int): Boolean = when (suite) {
         TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
@@ -97,7 +90,6 @@ object TlsCipherSuite {
         else -> 0
     }
 
-    /** Whether the CBC suite uses SHA-256 for MAC (vs SHA-1). */
     fun cbcUsesSHA256(suite: Int): Boolean = when (suite) {
         TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
         TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
@@ -106,7 +98,6 @@ object TlsCipherSuite {
         else -> false
     }
 
-    /** Encryption key length for a cipher suite. */
     fun keyLength(suite: Int): Int = when (suite) {
         TLS_AES_128_GCM_SHA256,
         TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
@@ -121,7 +112,6 @@ object TlsCipherSuite {
         else -> 32  // AES-256, ChaCha20
     }
 
-    /** IV length for a cipher suite. */
     fun ivLength(suite: Int): Int = when {
         isChaCha20(suite) -> 12   // ChaCha20: full 12-byte IV
         isAEAD(suite) -> 4        // GCM: 4-byte implicit + 8-byte explicit = 12
@@ -129,9 +119,6 @@ object TlsCipherSuite {
     }
 }
 
-/**
- * TLS 1.3 handshake traffic keys.
- */
 data class TlsHandshakeKeys(
     val clientKey: ByteArray,
     val clientIV: ByteArray,
@@ -162,9 +149,6 @@ data class TlsHandshakeKeys(
     }
 }
 
-/**
- * TLS 1.3 application traffic keys.
- */
 data class TlsApplicationKeys(
     val clientKey: ByteArray,
     val clientIV: ByteArray,
@@ -190,21 +174,15 @@ data class TlsApplicationKeys(
 }
 
 /**
- * TLS 1.3 key derivation utilities.
- *
- * Delegates all cryptographic operations to [NativeBridge] JNI functions
- * which use OpenSSL/BoringSSL for HKDF-Expand-Label and transcript hashing.
- *
- * Supports both AES-128-GCM-SHA256 (0x1301) and AES-256-GCM-SHA384 (0x1302).
+ * TLS 1.3 key derivation. Delegates HKDF-Expand-Label and transcript hashing to
+ * [NativeBridge] (OpenSSL/BoringSSL).
  */
 class Tls13KeyDerivation(
     val cipherSuite: Int = TlsCipherSuite.TLS_AES_128_GCM_SHA256
 ) {
-    /** Hash output length based on cipher suite. */
     val hashLength: Int
         get() = if (cipherSuite == TlsCipherSuite.TLS_AES_256_GCM_SHA384) 48 else 32
 
-    /** Encryption key length based on cipher suite. */
     val keyLength: Int
         get() = when (cipherSuite) {
             TlsCipherSuite.TLS_AES_256_GCM_SHA384,
@@ -213,10 +191,6 @@ class Tls13KeyDerivation(
         }
 
     /**
-     * Derive TLS 1.3 handshake keys from shared secret and transcript.
-     *
-     * @param sharedSecret The X25519 shared secret (32 bytes).
-     * @param transcript The concatenated ClientHello + ServerHello handshake messages.
      * @return A pair of (handshakeSecret, TlsHandshakeKeys).
      */
     fun deriveHandshakeKeys(
@@ -263,13 +237,6 @@ class Tls13KeyDerivation(
         return Pair(hsSecret, keys)
     }
 
-    /**
-     * Derive application keys from the full transcript (including server Finished).
-     *
-     * @param handshakeSecret The handshake secret from [deriveHandshakeKeys].
-     * @param fullTranscript The full handshake transcript including all messages through Finished.
-     * @return The application traffic keys.
-     */
     fun deriveApplicationKeys(
         handshakeSecret: ByteArray,
         fullTranscript: ByteArray
@@ -300,13 +267,6 @@ class Tls13KeyDerivation(
         )
     }
 
-    /**
-     * Compute Client Finished verify data.
-     *
-     * @param clientTrafficSecret The client handshake traffic secret.
-     * @param transcript The handshake transcript up to and including server Finished.
-     * @return The verify data (32 or 48 bytes depending on cipher suite).
-     */
     fun computeFinishedVerifyData(
         clientTrafficSecret: ByteArray,
         transcript: ByteArray
@@ -316,12 +276,6 @@ class Tls13KeyDerivation(
         ) ?: throw IllegalStateException("Failed to compute TLS 1.3 finished verify data")
     }
 
-    /**
-     * Compute transcript hash.
-     *
-     * @param messages The concatenated handshake messages to hash.
-     * @return The hash (32 or 48 bytes depending on cipher suite).
-     */
     fun transcriptHash(messages: ByteArray): ByteArray {
         return NativeBridge.nativeTls13TranscriptHash(
             cipherSuite, messages

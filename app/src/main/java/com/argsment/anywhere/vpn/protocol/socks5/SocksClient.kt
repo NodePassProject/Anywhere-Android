@@ -5,9 +5,9 @@ import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.SocketProtector
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.TunneledTransport
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.NioSocket
 import kotlinx.coroutines.delay
 import java.net.DatagramPacket
@@ -16,10 +16,6 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 
 private val logger = AnywhereLogger("SOCKS5")
-
-// =============================================================================
-// SOCKS5 Protocol Constants
-// =============================================================================
 
 private object Socks5 {
     const val VERSION: Byte = 0x05
@@ -34,18 +30,12 @@ private object Socks5 {
     const val STATUS_SUCCESS: Byte = 0x00
 }
 
-// =============================================================================
-// SOCKS5 Read Buffer
-// =============================================================================
-
 /**
  * Shared read buffer for the SOCKS5 handshake.
  *
  * Reads data from the underlying transport in large chunks and serves exact byte counts
  * from its internal buffer. Any bytes remaining after the handshake belong to the
  * tunneled data stream and are preserved via [remaining].
- *
- * Mirrors iOS `SOCKS5Buffer`.
  */
 private class Socks5Buffer(private val transport: Transport) {
     private var buffer: ByteArray = ByteArray(0)
@@ -70,15 +60,7 @@ private class Socks5Buffer(private val transport: Transport) {
         get() = if (buffer.isEmpty()) null else buffer
 }
 
-// =============================================================================
-// SOCKS5 Handshake
-// =============================================================================
-
-/**
- * Performs the SOCKS5 client handshake (greeting, optional auth, CONNECT or UDP ASSOCIATE).
- *
- * Mirrors iOS `SOCKS5Handshake`, which itself matches Xray-core's `ClientHandshake`.
- */
+/** Performs the SOCKS5 client handshake (greeting, optional auth, CONNECT or UDP ASSOCIATE). */
 private object Socks5Handshake {
 
     /** Result of a UDP ASSOCIATE handshake containing the relay endpoint. */
@@ -141,8 +123,6 @@ private object Socks5Handshake {
         return UdpRelayInfo(serverAddress, info.port)
     }
 
-    // -- Authentication --
-
     private suspend fun performAuth(
         buffer: Socks5Buffer,
         transport: Transport,
@@ -199,8 +179,6 @@ private object Socks5Handshake {
         }
     }
 
-    // -- Command (CONNECT / UDP ASSOCIATE) --
-
     private suspend fun sendCommand(
         buffer: Socks5Buffer,
         transport: Transport,
@@ -255,8 +233,6 @@ private object Socks5Handshake {
         }
     }
 
-    // -- Address Encoding --
-
     /** Encodes a host as a SOCKS5 address: `[ATYP, ADDR...]`. */
     fun encodeAddress(host: String): ByteArray {
         parseIPv4(host)?.let { return byteArrayOf(Socks5.ADDR_IPV4) + it }
@@ -294,14 +270,10 @@ private object Socks5Handshake {
     }
 }
 
-// =============================================================================
-// Buffer-Prefix Transport
-// =============================================================================
-
 /**
  * Wraps a [Transport] so that any leftover bytes from the SOCKS5 handshake buffer
  * are delivered on the first `receive()` call before falling through to the underlying
- * transport. Mirrors iOS `SOCKS5Transport`.
+ * transport.
  */
 private class BufferedPrefixTransport(
     private val inner: Transport,
@@ -323,20 +295,11 @@ private class BufferedPrefixTransport(
     override fun forceCancel() = inner.forceCancel()
 }
 
-// =============================================================================
-// SocksTcpConnection
-// =============================================================================
-
 /**
  * SOCKS5 TCP connection. After the SOCKS5 handshake, the underlying transport
  * is a transparent byte stream — no per-message header processing.
  */
-class SocksTcpConnection(private val transport: Transport) : VlessConnection() {
-
-    init {
-        // SOCKS5 has no response header, so we never need to strip one.
-        responseHeaderReceived = true
-    }
+class SocksTcpConnection(private val transport: Transport) : ProxyConnection() {
 
     override val isConnected: Boolean
         get() = (transport as? NioSocket)?.state == NioSocket.State.READY || transport !is NioSocket
@@ -353,33 +316,25 @@ class SocksTcpConnection(private val transport: Transport) : VlessConnection() {
     override fun cancel() = transport.forceCancel()
 }
 
-// =============================================================================
-// SocksUdpConnection
-// =============================================================================
-
 /**
  * SOCKS5 UDP ASSOCIATE relay connection.
  *
  * Wraps a [DatagramSocket] connected to the relay address. Outgoing packets are
  * prefixed with the SOCKS5 UDP header (`RSV(2) + FRAG(1) + ATYP + DST.ADDR + DST.PORT`),
- * and incoming packets have the header stripped.
- *
- * Holds the TCP control connection open for the lifetime of the UDP session.
- *
- * Mirrors iOS `SOCKS5UDPProxyConnection`.
+ * and incoming packets have the header stripped. Holds the TCP control connection
+ * open for the lifetime of the UDP session.
  */
 class SocksUdpConnection(
     private val tcpTransport: Transport,
     private val udpSocket: DatagramSocket,
     destinationHost: String,
     destinationPort: Int
-) : VlessConnection() {
+) : ProxyConnection() {
 
     private val udpHeader: ByteArray
     @Volatile private var cancelled = false
 
     init {
-        responseHeaderReceived = true
         // Pre-build the SOCKS5 UDP header: RSV(2) + FRAG(1) + ATYP + DST.ADDR + DST.PORT
         val addr = Socks5Handshake.encodeAddress(destinationHost)
         udpHeader = ByteArray(3 + addr.size + 2).also {
@@ -455,21 +410,14 @@ class SocksUdpConnection(
     }
 }
 
-// =============================================================================
-// SocksClient
-// =============================================================================
-
 /**
  * Client for establishing SOCKS5 proxy connections (TCP CONNECT or UDP ASSOCIATE).
- *
- * Supports proxy chaining via [tunnel] and the same retry policy as [VlessClient]
- * (5 attempts, linear backoff 0/200/400/600/800 ms, matching Xray-core).
- *
- * Mirrors iOS `SOCKS5Connection.swift` (handshake, buffer, UDP proxy connection).
+ * Supports proxy chaining via [tunnel] and uses 5 retry attempts with linear backoff
+ * (0/200/400/600/800 ms).
  */
 class SocksClient(
     private val configuration: ProxyConfiguration,
-    private val tunnel: VlessConnection? = null
+    private val tunnel: ProxyConnection? = null
 ) {
 
     private var connection: NioSocket? = null
@@ -485,7 +433,7 @@ class SocksClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray? = null
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
             if (tunnel != null && attempt > 0) break
@@ -526,7 +474,7 @@ class SocksClient(
     suspend fun connectUDP(
         destinationHost: String,
         destinationPort: Int
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
             if (tunnel != null && attempt > 0) break

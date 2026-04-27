@@ -6,13 +6,11 @@ import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.TunneledTransport
 import com.argsment.anywhere.vpn.protocol.tls.TlsClient
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.util.NioSocket
 import java.io.IOException
 
 private val logger = AnywhereLogger("NaiveTLS")
-
-// -- Error --
 
 sealed class NaiveTlsError(message: String) : IOException(message) {
     class ConnectionFailed(msg: String) : NaiveTlsError("Naive TLS connection failed: $msg")
@@ -20,36 +18,21 @@ sealed class NaiveTlsError(message: String) : IOException(message) {
 }
 
 /**
- * TLS transport for NaiveProxy connections using [NioSocket] + [TlsClient].
- *
- * Reuses Anywhere's existing TLS infrastructure to establish a TLS 1.3 connection
- * to the proxy server. The ALPN protocol list is configurable (e.g. ["h2"] for
- * HTTP/2, ["http/1.1"] for HTTP/1.1). After the handshake, all I/O goes through
- * a [TlsRecordConnection] which handles TLS record encryption/decryption.
- *
- * Supports both direct connections and connections tunneled through an existing
- * [VlessConnection] (for proxy chaining).
+ * TLS transport for NaiveProxy. ALPN is configurable per HTTP version
+ * (`["h2"]` or `["http/1.1"]`). Supports direct connections and tunneled
+ * connections through an existing [ProxyConnection].
  */
 class NaiveTlsTransport(
     private val host: String,
     private val port: Int,
     private val sni: String?,
     private val alpn: List<String> = listOf("h2"),
-    private val tunnel: VlessConnection? = null
+    private val tunnel: ProxyConnection? = null
 ) {
     private var tlsConnection: TlsRecordConnection? = null
     var isReady = false
         private set
 
-    // -- Connect --
-
-    /**
-     * Establishes a TLS connection to the proxy server.
-     *
-     * Uses [NioSocket] for TCP (or tunnels through an existing [VlessConnection])
-     * and [TlsClient] for the TLS 1.3 handshake. On success, stores the
-     * [TlsRecordConnection] for subsequent I/O.
-     */
     suspend fun connect() {
         val config = TlsConfiguration(
             serverName = sni ?: host,
@@ -71,32 +54,18 @@ class NaiveTlsTransport(
         }
     }
 
-    // -- Send --
-
-    /**
-     * Sends data through the TLS connection.
-     */
     suspend fun send(data: ByteArray) {
         val conn = tlsConnection
         if (conn == null || !isReady) throw NaiveTlsError.NotConnected()
         conn.send(data)
     }
 
-    // -- Receive --
-
-    /**
-     * Receives decrypted data from the TLS connection.
-     * Returns null for EOF.
-     */
     suspend fun receive(): ByteArray? {
         val conn = tlsConnection
         if (conn == null || !isReady) throw NaiveTlsError.NotConnected()
         return conn.receive()
     }
 
-    // -- Cancel --
-
-    /** Closes the TLS connection and releases all resources. */
     fun cancel() {
         isReady = false
         tlsConnection?.cancel()

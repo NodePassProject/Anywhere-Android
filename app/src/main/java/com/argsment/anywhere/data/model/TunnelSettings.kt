@@ -5,7 +5,7 @@ data class TunnelSettings(
     val prefixLength: Int = 24,
     val gateway: String = "10.8.0.1",
     val dnsServers: List<String> = listOf("1.1.1.1", "1.0.0.1"),
-    val mtu: Int = 1400,
+    val mtu: Int = 1500,
     val ipv6Enabled: Boolean = false,
     val ipv6Address: String = "fd00::2",
     val ipv6PrefixLength: Int = 64,

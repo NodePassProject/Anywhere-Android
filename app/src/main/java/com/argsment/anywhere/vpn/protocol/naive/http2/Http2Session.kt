@@ -4,7 +4,7 @@ import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.protocol.naive.NaiveConfiguration
 import com.argsment.anywhere.vpn.protocol.naive.NaivePaddingNegotiator
 import com.argsment.anywhere.vpn.protocol.naive.NaiveTlsTransport
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -15,22 +15,16 @@ import java.io.ByteArrayOutputStream
 private val logger = AnywhereLogger("HTTP2Session")
 
 /**
- * Manages one TLS connection with multiple concurrent CONNECT streams.
- *
- * Handles:
- * - Connection preface and SETTINGS exchange (identical to [Http2Connection])
- * - Persistent read loop that routes frames to per-stream [Http2Stream] instances
- * - Connection-level flow control (128 MB receive window)
- * - Write serialization via [Mutex]
- * - GOAWAY handling with graceful stream draining
- *
- * The first caller to [ensureReady] performs the TLS+HTTP/2 handshake; concurrent
- * callers queue on [CompletableDeferred] (same pattern as MuxClient).
+ * One TLS connection with multiple concurrent CONNECT streams. Owns the persistent
+ * read loop that routes frames to per-stream [Http2Stream] instances, the 128 MB
+ * connection receive window, and serializes writes through a [Mutex]. The first
+ * caller to [ensureReady] performs the handshake; concurrent callers queue on
+ * [CompletableDeferred].
  */
 class Http2Session(
     private val configuration: NaiveConfiguration,
     private val scope: CoroutineScope,
-    private val tunnel: VlessConnection? = null,
+    private val tunnel: ProxyConnection? = null,
     var onClose: (() -> Unit)? = null
 ) {
     companion object {
@@ -49,75 +43,109 @@ class Http2Session(
     private var goawayReceived = false
     private var goawayLastStreamID = Int.MAX_VALUE
 
-    // -- Transport --
-
     private var transport: NaiveTlsTransport? = null
     private val receiveBuffer = Http2Buffer()
 
-    // -- Streams --
-
     private val streams = mutableMapOf<Int, Http2Stream>()
     private var nextStreamID = 1
-
-    // -- Flow Control (connection level) --
+    private val streamsLock = Any()
 
     private var connectionSendWindow = Http2FlowControl.DEFAULT_INITIAL_WINDOW_SIZE
     private var connectionRecvConsumed = 0
+    private val flowLock = Any()
+    private var connectionWindowAwaiter: CompletableDeferred<Unit>? = null
 
-    /** The server's SETTINGS_INITIAL_WINDOW_SIZE (for new streams). */
+    /** The server's SETTINGS_INITIAL_WINDOW_SIZE, used as the initial send window for new streams. */
     var serverInitialWindowSize = Http2FlowControl.DEFAULT_INITIAL_WINDOW_SIZE
         private set
 
-    // -- HPACK --
-
     val hpackDecoder = HpackDecoder()
 
-    // -- Write Serialization --
-
     private val writeMutex = Mutex()
-
-    // -- Connection Setup (ensureReady pattern) --
 
     private var connecting = false
     private val pendingReady = mutableListOf<CompletableDeferred<Unit>>()
 
     val hasCapacity: Boolean
-        get() = state == State.READY && !goawayReceived && streams.size < MAX_CONCURRENT_STREAMS
+        get() = state == State.READY && !goawayReceived &&
+            synchronized(streamsLock) { streams.size < MAX_CONCURRENT_STREAMS }
 
     val isClosed: Boolean get() = state == State.CLOSED
 
-    // =========================================================================
-    // Stream Management
-    // =========================================================================
-
-    /**
-     * Acquires a new [Http2Stream] on this session.
-     * Ensures the session is ready (handshake complete) before allocating the stream.
-     */
     suspend fun acquireStream(destination: String): Http2Stream {
         ensureReady()
 
         if (state != State.READY) throw Http2Error.NotReady()
         if (goawayReceived) throw Http2Error.Goaway()
 
-        val streamID = nextStreamID
-        nextStreamID += 2
+        return synchronized(streamsLock) {
+            val streamID = nextStreamID
+            nextStreamID += 2
+            val stream = Http2Stream(streamID, this, destination)
+            streams[streamID] = stream
+            stream
+        }
+    }
 
-        val stream = Http2Stream(streamID, this, destination)
-        streams[streamID] = stream
-        return stream
+    /**
+     * Atomically checks capacity and reserves a stream slot. Returns null if the
+     * session is at capacity, going-away, or closed. Used by [Http2SessionPool] so
+     * concurrent acquisitions cannot exceed [MAX_CONCURRENT_STREAMS]. Mirrors iOS
+     * `HTTP2Session.tryReserveStream()`.
+     */
+    fun tryReserveStream(destination: String): Http2Stream? {
+        if (state != State.READY || goawayReceived) return null
+        return synchronized(streamsLock) {
+            if (streams.size >= MAX_CONCURRENT_STREAMS) return@synchronized null
+            val streamID = nextStreamID
+            nextStreamID += 2
+            val stream = Http2Stream(streamID, this, destination)
+            streams[streamID] = stream
+            stream
+        }
     }
 
     fun removeStream(streamID: Int) {
-        streams.remove(streamID)
-        if (goawayReceived && streams.isEmpty()) {
+        synchronized(streamsLock) { streams.remove(streamID) }
+        if (goawayReceived && synchronized(streamsLock) { streams.isEmpty() }) {
             close()
         }
     }
 
-    // =========================================================================
-    // Connection Setup
-    // =========================================================================
+    /**
+     * Acks [bytes] consumed from [streamID]'s data channel by the application.
+     * Updates per-stream and connection-level recv counters and emits WINDOW_UPDATE
+     * when half the window has been drained. Mirrors iOS
+     * `HTTP2Stream.acknowledgeConsumedData(count:)`. Called by [Http2Stream.receiveData].
+     */
+    fun acknowledgeConsumedData(streamID: Int, bytes: Int) {
+        if (bytes <= 0) return
+        val connInc: Int?
+        synchronized(flowLock) {
+            connectionRecvConsumed += bytes
+            connInc = if (connectionRecvConsumed >= Http2FlowControl.NAIVE_SESSION_MAX_RECV_WINDOW / 2) {
+                val v = connectionRecvConsumed
+                connectionRecvConsumed = 0
+                v
+            } else null
+        }
+        if (connInc != null) {
+            scope.launch { sendWindowUpdate(0, connInc) }
+        }
+        val stream = synchronized(streamsLock) { streams[streamID] }
+        stream?.flowControl?.consumeRecv(bytes)?.let { streamInc ->
+            scope.launch { sendWindowUpdate(streamID, streamInc) }
+        }
+    }
+
+    /**
+     * Sends RST_STREAM with the given error code. Used when a stream is closed
+     * by the client before the server closes it, so the server can reclaim the
+     * stream slot. Mirrors iOS `HTTP2Stream.close()` sending CANCEL.
+     */
+    fun sendReset(streamID: Int, errorCode: Int) {
+        scope.launch { sendFrameRaw(Http2Framer.rstStreamFrame(streamID, errorCode)) }
+    }
 
     private suspend fun ensureReady() {
         if (state == State.READY) return
@@ -151,10 +179,8 @@ class Http2Session(
             state = State.READY
             connecting = false
 
-            // Start persistent read loop
             scope.launch { readLoop() }
 
-            // Complete all pending callers
             val pending = pendingReady.toList()
             pendingReady.clear()
             for (deferred in pending) {
@@ -196,10 +222,7 @@ class Http2Session(
         t.send(buf.toByteArray())
     }
 
-    /**
-     * Processes frames during handshake until server SETTINGS is received and ACK'd.
-     * Does NOT send CONNECT — that's per-stream.
-     */
+    /** Processes frames until server SETTINGS is received and ACK'd; CONNECT is per-stream. */
     private suspend fun processHandshake(t: NaiveTlsTransport) {
         while (true) {
             val frame = Http2Framer.deserialize(receiveBuffer)
@@ -213,7 +236,7 @@ class Http2Session(
                     if (frame.hasFlag(Http2FrameFlags.ACK)) continue
                     handleServerSettings(frame)
                     sendFrameRaw(Http2Framer.settingsAckFrame())
-                    return // Handshake complete
+                    return
                 }
 
                 Http2FrameType.WINDOW_UPDATE -> {
@@ -239,10 +262,6 @@ class Http2Session(
         }
     }
 
-    // =========================================================================
-    // Persistent Read Loop
-    // =========================================================================
-
     private suspend fun readLoop() {
         val t = transport ?: return
         try {
@@ -266,35 +285,24 @@ class Http2Session(
         when (frame.type) {
             Http2FrameType.DATA -> {
                 if (frame.streamID == 0) return
-                val stream = streams[frame.streamID] ?: return
+                val stream = synchronized(streamsLock) { streams[frame.streamID] } ?: return
 
+                // WINDOW_UPDATE deferred to consume time; see [acknowledgeConsumedData]
+                // (mirrors iOS HTTP2Stream.acknowledgeConsumedData semantics).
                 if (frame.payload.isNotEmpty()) {
-                    // Connection-level receive flow control
-                    connectionRecvConsumed += frame.payload.size
-                    if (connectionRecvConsumed >= Http2FlowControl.NAIVE_SESSION_MAX_RECV_WINDOW / 2) {
-                        val connInc = connectionRecvConsumed
-                        connectionRecvConsumed = 0
-                        scope.launch { sendWindowUpdate(0, connInc) }
-                    }
-
-                    // Stream-level receive flow control
-                    val streamInc = stream.flowControl.consumeRecv(frame.payload.size)
-                    if (streamInc != null) {
-                        scope.launch { sendWindowUpdate(frame.streamID, streamInc) }
-                    }
-
                     stream.deliverData(frame.payload)
                 }
 
                 if (frame.hasFlag(Http2FrameFlags.END_STREAM)) {
-                    stream.deliverReset()
-                    streams.remove(frame.streamID)
+                    // END_STREAM is a clean half-close from the server, not a reset.
+                    stream.deliverEndStream()
+                    synchronized(streamsLock) { streams.remove(frame.streamID) }
                 }
             }
 
             Http2FrameType.HEADERS -> {
                 if (frame.streamID == 0) return
-                val stream = streams[frame.streamID] ?: return
+                val stream = synchronized(streamsLock) { streams[frame.streamID] } ?: return
                 val headers = hpackDecoder.decode(frame.payload)
                 if (headers != null) {
                     stream.deliverHeaders(headers)
@@ -305,10 +313,10 @@ class Http2Session(
 
             Http2FrameType.RST_STREAM -> {
                 if (frame.streamID == 0) return
-                val stream = streams[frame.streamID]
+                val stream = synchronized(streamsLock) { streams[frame.streamID] }
                 if (stream != null) {
                     stream.deliverReset()
-                    streams.remove(frame.streamID)
+                    synchronized(streamsLock) { streams.remove(frame.streamID) }
                 }
             }
 
@@ -327,9 +335,15 @@ class Http2Session(
             Http2FrameType.WINDOW_UPDATE -> {
                 Http2Framer.parseWindowUpdate(frame.payload)?.let { inc ->
                     if (frame.streamID == 0) {
-                        connectionSendWindow += inc
+                        synchronized(flowLock) {
+                            connectionSendWindow += inc
+                            // Wake any sender suspended on connection-level flow control.
+                            connectionWindowAwaiter?.complete(Unit)
+                            connectionWindowAwaiter = null
+                        }
                     } else {
-                        streams[frame.streamID]?.deliverWindowUpdate(inc)
+                        synchronized(streamsLock) { streams[frame.streamID] }
+                            ?.deliverWindowUpdate(inc)
                     }
                 }
             }
@@ -341,28 +355,22 @@ class Http2Session(
                     goawayLastStreamID = parsed.lastStreamID
                     logger.warning("GOAWAY: lastStreamID=${parsed.lastStreamID}, errorCode=${parsed.errorCode}")
 
-                    // Error streams with ID > lastStreamID
-                    val affected = streams.filter { it.key > parsed.lastStreamID }
+                    val affected = synchronized(streamsLock) {
+                        streams.filter { it.key > parsed.lastStreamID }
+                    }
                     for ((sid, stream) in affected) {
                         stream.deliverGoaway()
-                        streams.remove(sid)
+                        synchronized(streamsLock) { streams.remove(sid) }
                     }
                 }
 
-                if (streams.isEmpty()) {
+                if (synchronized(streamsLock) { streams.isEmpty() }) {
                     close()
                 }
             }
         }
     }
 
-    // =========================================================================
-    // Write Operations (called by Http2Stream)
-    // =========================================================================
-
-    /**
-     * Sends a CONNECT request for [streamID] with auth + UA + padding headers.
-     */
     suspend fun sendConnectRequest(streamID: Int, destination: String) {
         val extraHeaders = mutableListOf<Pair<String, String>>()
 
@@ -388,9 +396,6 @@ class Http2Session(
         }
     }
 
-    /**
-     * Sends DATA frames for [streamID], respecting both connection and stream flow control.
-     */
     suspend fun sendData(streamID: Int, data: ByteArray, streamFlowControl: Http2StreamFlowControl) {
         val maxPayload = Http2Framer.MAX_DATA_PAYLOAD
         var currentOffset = 0
@@ -400,7 +405,23 @@ class Http2Session(
             val maxAllowed = minOf(connectionSendWindow, streamFlowControl.sendWindow)
             val chunkSize = minOf(remaining, minOf(maxPayload, maxAllowed))
             if (chunkSize <= 0) {
-                throw Http2Error.ProtocolError("Flow control blocked on stream $streamID")
+                // Flow-control blocked. Suspend until a WINDOW_UPDATE arrives
+                // for the exhausted scope (connection or stream). Mirrors iOS
+                // HTTP2Session.swift:451-455 / HTTP2Connection.swift:427-433
+                // — iOS schedules a 50ms retry; we use awaiters for precision.
+                if (state == State.CLOSED) throw Http2Error.ConnectionFailed("Session closed")
+                if (connectionSendWindow <= 0) {
+                    val awaiter = synchronized(flowLock) {
+                        if (connectionSendWindow > 0) null
+                        else (connectionWindowAwaiter ?: CompletableDeferred<Unit>().also {
+                            connectionWindowAwaiter = it
+                        })
+                    }
+                    awaiter?.await()
+                } else {
+                    streamFlowControl.awaitWindow()
+                }
+                continue
             }
 
             connectionSendWindow -= chunkSize
@@ -418,10 +439,6 @@ class Http2Session(
         }
     }
 
-    // =========================================================================
-    // Internal
-    // =========================================================================
-
     private fun handleServerSettings(frame: Http2Frame) {
         val settings = Http2Framer.parseSettings(frame.payload)
         for ((id, value) in settings) {
@@ -429,7 +446,7 @@ class Http2Session(
                 0x4 -> { // SETTINGS_INITIAL_WINDOW_SIZE
                     val delta = value - serverInitialWindowSize
                     serverInitialWindowSize = value
-                    // Adjust all existing streams (RFC 7540 §6.9.2)
+                    // RFC 7540 §6.9.2: shift every existing stream's send window by delta.
                     for (stream in streams.values) {
                         stream.adjustSendWindow(delta)
                     }
@@ -472,10 +489,18 @@ class Http2Session(
         if (state == State.CLOSED) return
         state = State.CLOSED
 
-        val allStreams = streams.values.toList()
-        streams.clear()
+        val allStreams = synchronized(streamsLock) {
+            val snapshot = streams.values.toList()
+            streams.clear()
+            snapshot
+        }
         for (stream in allStreams) {
             stream.deliverError(error)
+        }
+
+        synchronized(flowLock) {
+            connectionWindowAwaiter?.completeExceptionally(error)
+            connectionWindowAwaiter = null
         }
 
         transport?.cancel()
@@ -487,10 +512,20 @@ class Http2Session(
         if (state == State.CLOSED) return
         state = State.CLOSED
 
-        val allStreams = streams.values.toList()
-        streams.clear()
+        val allStreams = synchronized(streamsLock) {
+            val snapshot = streams.values.toList()
+            streams.clear()
+            snapshot
+        }
         for (stream in allStreams) {
             stream.deliverError(Http2Error.ConnectionFailed("Session closed"))
+        }
+
+        synchronized(flowLock) {
+            connectionWindowAwaiter?.completeExceptionally(
+                Http2Error.ConnectionFailed("Session closed")
+            )
+            connectionWindowAwaiter = null
         }
 
         transport?.cancel()

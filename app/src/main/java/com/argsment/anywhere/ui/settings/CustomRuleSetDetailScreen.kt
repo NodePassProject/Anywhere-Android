@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,9 +19,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Lan
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -68,7 +72,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Editor for a single user-created rule set, matching iOS `CustomRuleSetDetailView`.
+ * Editor for a single user-created rule set.
  *
  * Supports: viewing rules, adding a rule manually, bulk-importing rules (paste or
  * URL download), deleting individual rules, renaming the rule set, and picking an
@@ -240,6 +244,15 @@ private fun RuleRow(rule: DomainRule, onDelete: () -> Unit) {
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // Per-type leading icon mirrors iOS CustomRuleSetDetailView.iconName.
+        Icon(
+            imageVector = ruleTypeIcon(rule.type),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .size(24.dp)
+                .padding(end = 8.dp)
+        )
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = rule.value,
@@ -257,6 +270,12 @@ private fun RuleRow(rule: DomainRule, onDelete: () -> Unit) {
             Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.delete))
         }
     }
+}
+
+private fun ruleTypeIcon(type: DomainRuleType) = when (type) {
+    DomainRuleType.DOMAIN_SUFFIX -> Icons.Filled.Public
+    DomainRuleType.DOMAIN_KEYWORD -> Icons.Filled.Search
+    DomainRuleType.IP_CIDR, DomainRuleType.IP_CIDR6 -> Icons.Filled.Lan
 }
 
 @Composable
@@ -592,14 +611,9 @@ private fun RenameDialog(
     )
 }
 
-// -----------------------------------------------------------------------------
-// Rule parser — mirrors iOS RuleParser.parse.
-//
-// Line format: "type, value" where type is 0 (IPv4 CIDR), 1 (IPv6 CIDR) or
-// 2 (Domain Suffix). Comment lines (#, //) and blanks are ignored. Bare IPs are
-// normalised to /32 (v4) and /128 (v6).
-// -----------------------------------------------------------------------------
-
+// Line format: "type, value" where type is 0 (IPv4 CIDR), 1 (IPv6 CIDR),
+// 2 (Domain Suffix), or 3 (Domain Keyword). Comment lines (#, //) and blanks
+// are ignored. Bare IPs are normalised to /32 (v4) and /128 (v6).
 internal object RuleParser {
 
     fun parse(text: String): List<DomainRule> = text.lineSequence()

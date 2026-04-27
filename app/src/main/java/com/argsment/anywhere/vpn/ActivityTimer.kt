@@ -9,12 +9,6 @@ import java.util.concurrent.TimeUnit
  * since the last check. If no activity is detected within the configured interval,
  * the [onTimeout] callback fires.
  *
- * Design mirrors Xray-core `common/signal/timer.go`:
- * - A boolean flag is set by [update] (non-blocking, safe to call often).
- * - A periodic task checks the flag. If still clear → inactivity → callback.
- * - [setTimeout] replaces the interval (used to switch between ConnectionIdle
- *   and direction-only timeouts).
- *
  * All operations must run on the provided executor (single-threaded lwIP thread).
  */
 class ActivityTimer(
@@ -36,10 +30,7 @@ class ActivityTimer(
         hasActivity = true
     }
 
-    /**
-     * Changes the check interval, restarting the timer.
-     * Used to switch from ConnectionIdle to DownlinkOnly / UplinkOnly.
-     */
+    /** Changes the check interval, restarting the timer. */
     fun setTimeout(timeoutMs: Long) {
         if (cancelled) return
         future?.cancel(false)
@@ -48,8 +39,8 @@ class ActivityTimer(
             onTimeout()
             return
         }
-        // Do NOT reset hasActivity here (matching iOS). The next timer tick
-        // will check for actual activity since the timeout was changed.
+        // Do NOT reset hasActivity here. The next timer tick will check for
+        // actual activity since the timeout was changed.
         startTimer(timeoutMs)
     }
 

@@ -18,16 +18,16 @@ import kotlin.concurrent.withLock
 private val logger = AnywhereLogger("TLS")
 
 /**
- * TLS record encryption/decryption wrapper supporting both TLS 1.3 and TLS 1.2.
+ * TLS record encryption/decryption wrapper supporting TLS 1.2 and 1.3.
  *
  * Encrypts outgoing data into TLS Application Data records and decrypts incoming
- * records. Sequence numbers are tracked independently for client and server directions.
+ * records. Sequence numbers are tracked independently per direction.
  *
  * TLS 1.3: AEAD-only with inner content type and XOR nonce.
  * TLS 1.2: AEAD with explicit nonce, or CBC with HMAC and per-record IV.
  *
- * Supports a "direct" mode ([receiveRaw] / [sendRaw]) that bypasses
- * encryption for Vision direct-copy transitions.
+ * [receiveRaw] / [sendRaw] expose a "direct" mode that bypasses encryption for
+ * Vision direct-copy transitions.
  */
 class TlsRecordConnection private constructor(
     private val clientKey: ByteArray,
@@ -41,7 +41,7 @@ class TlsRecordConnection private constructor(
     initialClientSeqNum: Long,
     initialServerSeqNum: Long
 ) {
-    /** TLS 1.3 constructor (original). */
+    /** TLS 1.3 constructor. */
     constructor(
         clientKey: ByteArray,
         clientIV: ByteArray,
@@ -66,13 +66,10 @@ class TlsRecordConnection private constructor(
     ) : this(tls12ClientKey, clientIV, serverKey, serverIV, cipherSuite,
         protocolVersion, clientMACKey, serverMACKey, initialClientSeqNum, initialServerSeqNum)
 
-    /** The underlying transport (NioSocket or TunneledTransport). */
     var connection: Transport? = null
 
-    /** Whether this is a TLS 1.3 connection. */
     val isTls13: Boolean get() = tlsVersion >= 0x0304
 
-    // Cipher dispatch helpers
     private val isChaCha = TlsCipherSuite.isChaCha20(cipherSuite)
     private val isAEAD = TlsCipherSuite.isAEAD(cipherSuite)
     private val cipherAlgo = if (isChaCha) "ChaCha20" else "AES"
@@ -80,27 +77,24 @@ class TlsRecordConnection private constructor(
     private val clientKeySpec = SecretKeySpec(clientKey, cipherAlgo)
     private val serverKeySpec = SecretKeySpec(serverKey, cipherAlgo)
 
-    // Cached Cipher instances to avoid Cipher.getInstance() on every record.
     // Cipher is not thread-safe, so separate instances for encrypt/decrypt.
     private val encryptCipher: Cipher = Cipher.getInstance(cipherTransform)
     private val decryptCipher: Cipher = Cipher.getInstance(cipherTransform)
 
-    // CBC cipher (lazy, only created if needed)
     private val cbcEncryptCipher: Cipher by lazy { Cipher.getInstance("AES/CBC/NoPadding") }
     private val cbcDecryptCipher: Cipher by lazy { Cipher.getInstance("AES/CBC/NoPadding") }
     private val cbcClientKeySpec: SecretKeySpec by lazy { SecretKeySpec(clientKey, "AES") }
     private val cbcServerKeySpec: SecretKeySpec by lazy { SecretKeySpec(serverKey, "AES") }
 
-    // Sequence numbers
     private var clientSeqNum: Long = initialClientSeqNum
     private var serverSeqNum: Long = initialServerSeqNum
     private val seqLock = ReentrantLock()
 
-    /** Serialises the encrypt-then-enqueue path so that TLS records arrive at
-     *  the socket in sequence-number order. Without this, two concurrent `send`
+    /** Serialises the encrypt-then-enqueue path so TLS records arrive at the
+     *  socket in sequence-number order. Without this, two concurrent `send`
      *  calls can allocate consecutive sequence numbers but enqueue the encrypted
      *  records in reverse order, causing TLS decryption failures on the server
-     *  and a "Broken pipe" on the next write. Matching iOS sendLock. */
+     *  and a "Broken pipe" on the next write. */
     private val sendLock = Mutex()
 
     /** TLS 1.3 maximum plaintext per record (RFC 8446 S5.1). */
@@ -108,16 +102,10 @@ class TlsRecordConnection private constructor(
         private const val MAX_RECORD_PLAINTEXT = 16384
     }
 
-    // Receive buffer for batching reads
     private var receiveBuffer = ByteArray(0)
     private var receiveBufferLen = 0
     private val receiveLock = ReentrantLock()
 
-    // -- Send (Encrypted) --
-
-    /**
-     * Sends data through the TLS tunnel, encrypting it as TLS Application Data records.
-     */
     suspend fun send(data: ByteArray) {
         sendLock.withMutexLock {
             val conn = connection ?: throw RealityError.HandshakeFailed("Connection cancelled")
@@ -126,9 +114,6 @@ class TlsRecordConnection private constructor(
         }
     }
 
-    /**
-     * Sends data through the TLS tunnel without tracking completion.
-     */
     fun sendAsync(data: ByteArray) {
         runBlocking {
             sendLock.withMutexLock {
@@ -143,14 +128,7 @@ class TlsRecordConnection private constructor(
         }
     }
 
-    // -- Receive (Encrypted) --
-
     /**
-     * Receives and decrypts data from the TLS tunnel.
-     *
-     * Uses buffered reading to process multiple TLS records per network read,
-     * reducing system call overhead.
-     *
      * @return Decrypted data, or null on connection close.
      * @throws RealityError.DecryptionFailed with raw data on decryption failure
      *   so the caller (Vision) can switch to direct-copy mode.
@@ -165,11 +143,8 @@ class TlsRecordConnection private constructor(
         return fetchMore()
     }
 
-    // -- Send / Receive (Raw, Unencrypted) --
-
     /**
      * Receives raw data without decryption (for Vision direct-copy mode).
-     *
      * Returns any buffered data first, then reads directly from the socket.
      */
     suspend fun receiveRaw(): ByteArray? {
@@ -189,29 +164,18 @@ class TlsRecordConnection private constructor(
         }
     }
 
-    /**
-     * Sends raw data without encryption (for Vision direct-copy mode).
-     */
+    /** Sends raw data without encryption (for Vision direct-copy mode). */
     suspend fun sendRaw(data: ByteArray) {
         val conn = connection ?: throw RealityError.HandshakeFailed("Connection cancelled")
         conn.send(data)
     }
 
-    /**
-     * Sends raw data without encryption and without tracking completion.
-     */
     fun sendRawAsync(data: ByteArray) {
         val conn = connection ?: return
         conn.sendAsync(data)
     }
 
-    // -- Cancel --
-
-    /**
-     * Closes the connection and releases all resources.
-     *
-     * Sends a TLS close_notify alert (best-effort) before closing.
-     */
+    /** Closes the connection. Sends a best-effort TLS close_notify alert before closing. */
     fun cancel() {
         sendCloseNotify()
 
@@ -224,9 +188,6 @@ class TlsRecordConnection private constructor(
         connection = null
     }
 
-    /**
-     * Sends a TLS close_notify alert record (best-effort, fire-and-forget).
-     */
     private fun sendCloseNotify() {
         runBlocking {
             sendLock.withMutexLock {
@@ -242,7 +203,6 @@ class TlsRecordConnection private constructor(
                     // Alert: level=warning(1), desc=close_notify(0)
                     val alertData = byteArrayOf(0x01, 0x00)
                     val record = if (isTls13) {
-                        // TLS 1.3: encrypt alert with inner content type
                         val innerPlaintext = byteArrayOf(0x01, 0x00, 0x15)
                         val encryptedLen = innerPlaintext.size + 16
                         val nonce = com.argsment.anywhere.vpn.util.PacketUtil.xorNonce(clientIV, seqNum)
@@ -262,20 +222,15 @@ class TlsRecordConnection private constructor(
                         System.arraycopy(encrypted, 0, r, 5, encrypted.size)
                         r
                     } else {
-                        // TLS 1.2: encrypt alert record
                         encryptTls12Record(alertData, 0x15, seqNum)
                     }
                     conn.sendAsync(record)
                 } catch (_: Exception) {
-                    // Best-effort, ignore errors
                 }
             }
         }
     }
 
-    // -- Internal Buffer Processing --
-
-    /** Result of processing buffered TLS records. */
     private sealed class BufferResult {
         class Data(val data: ByteArray) : BufferResult()
         class Error(val error: Exception) : BufferResult()
@@ -284,10 +239,7 @@ class TlsRecordConnection private constructor(
         class DecryptionFailed(val rawData: ByteArray) : BufferResult()
     }
 
-    /**
-     * Handles a BufferResult, returning data or throwing on error.
-     * Must NOT be called under receiveLock.
-     */
+    /** Must NOT be called under receiveLock. */
     private suspend fun handleBufferResult(result: BufferResult): ByteArray? {
         return when (result) {
             is BufferResult.Data -> result.data
@@ -299,7 +251,6 @@ class TlsRecordConnection private constructor(
         }
     }
 
-    /** Fetches more data from the network and processes it. */
     private suspend fun fetchMore(): ByteArray? {
         val conn = connection ?: throw RealityError.HandshakeFailed("Connection cancelled")
 
@@ -316,14 +267,10 @@ class TlsRecordConnection private constructor(
             if (result != null) {
                 return handleBufferResult(result)
             }
-            // No complete record yet, fetch more
         }
     }
 
-    /**
-     * Prepends data to the receive buffer (e.g., leftover post-handshake data).
-     * Matching iOS prependToReceiveBuffer() for NewSessionTicket data.
-     */
+    /** Prepends data to the receive buffer (e.g., leftover post-handshake NewSessionTicket data). */
     fun prependToReceiveBuffer(data: ByteArray) {
         if (data.isEmpty()) return
         receiveLock.withLock {
@@ -340,7 +287,7 @@ class TlsRecordConnection private constructor(
         }
     }
 
-    /** Appends data to the receive buffer. Must be called under receiveLock. */
+    /** Must be called under receiveLock. */
     private fun appendToBuffer(data: ByteArray) {
         if (receiveBufferLen + data.size > receiveBuffer.size) {
             val newSize = maxOf(receiveBuffer.size * 2, receiveBufferLen + data.size)
@@ -353,9 +300,8 @@ class TlsRecordConnection private constructor(
     }
 
     /**
-     * Processes all complete TLS records in the receive buffer.
-     * Returns batched decrypted data from multiple records to reduce callback overhead.
-     * Must be called while holding receiveLock.
+     * Processes all complete TLS records in the receive buffer, returning batched
+     * decrypted data. Must be called while holding receiveLock.
      */
     private fun processBuffer(): BufferResult? {
         if (receiveBufferLen == 0) return null
@@ -365,7 +311,7 @@ class TlsRecordConnection private constructor(
         var hasError: Exception? = null
         var recordsProcessed = 0
         var failedRecordData: ByteArray? = null
-        var offset = 0  // Current read position within receiveBuffer
+        var offset = 0
 
         while (offset + 5 <= receiveBufferLen) {
             val contentType = receiveBuffer[offset].toInt() and 0xFF
@@ -385,7 +331,6 @@ class TlsRecordConnection private constructor(
                 }
 
                 try {
-                    // Pass header and body slices without copying the full record
                     val header = receiveBuffer.copyOfRange(offset, offset + 5)
                     val body = receiveBuffer.copyOfRange(offset + 5, offset + totalLen)
                     val decrypted = decryptTLSRecord(body, header, seqNum)
@@ -402,7 +347,7 @@ class TlsRecordConnection private constructor(
                         batchedLen += decrypted.size
                     }
                 } catch (e: Exception) {
-                    // Collect the failed record + all remaining unprocessed data
+                    // Collect the failed record + all remaining unprocessed data.
                     failedRecordData = receiveBuffer.copyOfRange(offset, receiveBufferLen)
                     hasError = e
                     offset = receiveBufferLen
@@ -413,11 +358,9 @@ class TlsRecordConnection private constructor(
                 offset += totalLen
                 break
             }
-            // Other content types (ChangeCipherSpec, etc.) are skipped
             offset += totalLen
         }
 
-        // Compact buffer: shift remaining unprocessed data to front
         val remaining = receiveBufferLen - offset
         if (remaining > 0 && offset > 0) {
             System.arraycopy(receiveBuffer, offset, receiveBuffer, 0, remaining)
@@ -452,10 +395,7 @@ class TlsRecordConnection private constructor(
         return null
     }
 
-    // -- TLS Record Crypto --
-
     /**
-     * Encrypts plaintext into one or more TLS Application Data records.
      * Splits at the TLS 1.3 maximum (16384 bytes) to prevent record_overflow.
      * Sequence numbers are reserved atomically so concurrent sends stay ordered.
      */
@@ -517,8 +457,6 @@ class TlsRecordConnection private constructor(
         }
     }
 
-    // ========= TLS 1.3 Record Crypto =========
-
     private fun decryptTls13Record(ciphertext: ByteArray, header: ByteArray, seqNum: Long): ByteArray {
         if (ciphertext.size < 16) {
             throw RealityError.HandshakeFailed("Ciphertext too short")
@@ -576,8 +514,6 @@ class TlsRecordConnection private constructor(
         return record
     }
 
-    // ========= TLS 1.2 Record Crypto =========
-
     private fun encryptTls12Record(plaintext: ByteArray, contentType: Byte, seqNum: Long): ByteArray {
         val versionHi = ((tlsVersion shr 8) and 0xFF).toByte()
         val versionLo = (tlsVersion and 0xFF).toByte()
@@ -601,7 +537,7 @@ class TlsRecordConnection private constructor(
             nonce = xorNonce(clientIV, seqNum)
             explicitNonce = ByteArray(0)
         } else {
-            // AES-GCM: implicit(4) || explicit(8) where explicit = seq number
+            // AES-GCM nonce: implicit(4) || explicit(8) where explicit = seq number.
             val seqBytes = seqToBytes(seqNum)
             nonce = ByteArray(clientIV.size + seqBytes.size)
             System.arraycopy(clientIV, 0, nonce, 0, clientIV.size)
@@ -609,8 +545,7 @@ class TlsRecordConnection private constructor(
             explicitNonce = seqBytes
         }
 
-        // AAD: seq(8) || type(1) || version(2) || plaintext_length(2)
-        val aad = ByteArray(13)
+        val aad = ByteArray(13) // seq(8) || type(1) || version(2) || plaintext_length(2)
         val seqBytes = seqToBytes(seqNum)
         System.arraycopy(seqBytes, 0, aad, 0, 8)
         aad[8] = contentType
@@ -649,12 +584,10 @@ class TlsRecordConnection private constructor(
             useSHA384, useSHA256
         )
 
-        // plaintext || MAC
         val data = ByteArray(plaintext.size + mac.size)
         System.arraycopy(plaintext, 0, data, 0, plaintext.size)
         System.arraycopy(mac, 0, data, plaintext.size, mac.size)
 
-        // Padding: pad to AES block size (16)
         val blockSize = 16
         val paddingLen = blockSize - (data.size % blockSize)
         val paddingByte = (paddingLen - 1).toByte()
@@ -662,7 +595,7 @@ class TlsRecordConnection private constructor(
         System.arraycopy(data, 0, padded, 0, data.size)
         for (i in data.size until padded.size) padded[i] = paddingByte
 
-        // Random IV per record
+        // Random IV per record.
         val iv = ByteArray(blockSize)
         java.security.SecureRandom().nextBytes(iv)
 
@@ -739,7 +672,7 @@ class TlsRecordConnection private constructor(
         cbcDecryptCipher.init(Cipher.DECRYPT_MODE, cbcServerKeySpec, IvParameterSpec(iv))
         var decrypted = cbcDecryptCipher.doFinal(encrypted)
 
-        // Validate and strip padding (constant-time to mitigate Lucky13)
+        // Validate and strip padding (constant-time to mitigate Lucky13).
         val paddingByte = decrypted.last().toInt() and 0xFF
         val paddingLen = paddingByte + 1
         if (paddingLen > decrypted.size) {
@@ -754,7 +687,6 @@ class TlsRecordConnection private constructor(
         }
         decrypted = decrypted.copyOfRange(0, decrypted.size - paddingLen)
 
-        // Strip and verify MAC
         val macSize = TlsCipherSuite.macLength(cipherSuite)
         if (decrypted.size < macSize) {
             throw RealityError.HandshakeFailed("Decrypted data too short for MAC")
@@ -768,14 +700,12 @@ class TlsRecordConnection private constructor(
             serverMACKey, seqNum, contentType, tlsVersion, payload, useSHA384, useSHA256
         )
 
-        // Constant-time comparison to prevent timing attacks (mirrors iOS constantTimeEqual).
+        // Constant-time comparison to prevent timing attacks.
         if (!MessageDigest.isEqual(receivedMAC, expectedMAC)) {
             throw RealityError.HandshakeFailed("MAC verification failed")
         }
         return payload
     }
-
-    // ========= Nonce Helpers =========
 
     /** XOR sequence number into the last 8 bytes of an IV (for ChaCha20 TLS 1.2). */
     private fun xorNonce(iv: ByteArray, seqNum: Long): ByteArray {
@@ -787,7 +717,6 @@ class TlsRecordConnection private constructor(
         return nonce
     }
 
-    /** Convert sequence number to 8-byte big-endian array. */
     private fun seqToBytes(seqNum: Long): ByteArray {
         val bytes = ByteArray(8)
         for (i in 0 until 8) {

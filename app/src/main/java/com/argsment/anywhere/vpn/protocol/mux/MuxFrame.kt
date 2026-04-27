@@ -2,13 +2,6 @@ package com.argsment.anywhere.vpn.protocol.mux
 
 import java.io.ByteArrayOutputStream
 
-// =============================================================================
-// Enums & Types
-// =============================================================================
-
-/**
- * Session status values matching Xray-core SessionStatusNew/Keep/End/KeepAlive.
- */
 enum class MuxSessionStatus(val value: Int) {
     NEW(0x01),
     KEEP(0x02),
@@ -20,17 +13,11 @@ enum class MuxSessionStatus(val value: Int) {
     }
 }
 
-/**
- * Frame option flags (bitmask).
- */
 object MuxOption {
     const val DATA: Int = 0x01
     const val ERROR: Int = 0x02
 }
 
-/**
- * Network type for mux sessions.
- */
 enum class MuxNetwork(val value: Int) {
     TCP(0x01),
     UDP(0x02);
@@ -40,9 +27,7 @@ enum class MuxNetwork(val value: Int) {
     }
 }
 
-/**
- * Mux address type (port-first format, matching Xray-core).
- */
+/** Mux address type (port-first format on the wire). */
 private enum class MuxAddressType(val value: Int) {
     IPV4(0x01),
     DOMAIN(0x02),
@@ -53,13 +38,6 @@ private enum class MuxAddressType(val value: Int) {
     }
 }
 
-// =============================================================================
-// MuxFrameMetadata
-// =============================================================================
-
-/**
- * Metadata portion of a mux frame.
- */
 data class MuxFrameMetadata(
     val sessionID: Int,          // UInt16 range
     val status: MuxSessionStatus,
@@ -69,40 +47,31 @@ data class MuxFrameMetadata(
     val targetPort: Int? = null, // UInt16 range
     val globalID: ByteArray? = null  // 8 bytes, for XUDP
 ) {
-    /**
-     * Encodes metadata into wire bytes (not including the 2-byte metadata_length prefix).
-     */
+    /** Encodes metadata into wire bytes (excluding the 2-byte metadata_length prefix). */
     fun encode(): ByteArray {
         val buf = ByteArrayOutputStream()
 
-        // Session ID (2B big-endian)
         buf.write((sessionID shr 8) and 0xFF)
         buf.write(sessionID and 0xFF)
 
-        // Status (1B)
         buf.write(status.value)
 
-        // Option (1B)
         buf.write(option and 0xFF)
 
-        // Address block for New frames
         if (status == MuxSessionStatus.NEW) {
             val net = network
             val host = targetHost
             val port = targetPort
             if (net != null && host != null && port != null) {
-                // Network (1B)
                 buf.write(net.value)
 
-                // Port (2B big-endian) -- port-first format
+                // Port (2B big-endian) — port-first format.
                 buf.write((port shr 8) and 0xFF)
                 buf.write(port and 0xFF)
 
-                // Address
                 encodeAddress(host, buf)
 
-                // GlobalID (8B) for UDP New frames -- only when XUDP is active
-                // Without XUDP, omit GlobalID (matching Xray-core: only written when b.UDP != nil)
+                // GlobalID is written only when XUDP is active.
                 if (net == MuxNetwork.UDP) {
                     val gid = globalID
                     if (gid != null && gid.size == 8) {
@@ -139,12 +108,9 @@ data class MuxFrameMetadata(
     }
 
     companion object {
-        /**
-         * Decodes metadata from raw bytes.
-         * Returns (metadata, bytesConsumed) or null if insufficient data.
-         */
+        /** Returns (metadata, bytesConsumed) or null if insufficient data. */
         fun decode(data: ByteArray): Pair<MuxFrameMetadata, Int>? {
-            if (data.size < 4) return null  // minimum: 2B id + 1B status + 1B option
+            if (data.size < 4) return null  // 2B id + 1B status + 1B option
 
             var offset = 0
             val sessionID = ((data[offset].toInt() and 0xFF) shl 8) or (data[offset + 1].toInt() and 0xFF)
@@ -161,23 +127,20 @@ data class MuxFrameMetadata(
             var targetPort: Int? = null
             var globalID: ByteArray? = null
 
-            // New frames carry address info
             if (status == MuxSessionStatus.NEW) {
                 if (data.size < offset + 1) return null
                 network = MuxNetwork.fromByte(data[offset].toInt()) ?: return null
                 offset += 1
 
-                // Port (2B big-endian)
                 if (data.size < offset + 2) return null
                 targetPort = ((data[offset].toInt() and 0xFF) shl 8) or (data[offset + 1].toInt() and 0xFF)
                 offset += 2
 
-                // Address
                 val addrResult = decodeAddress(data, offset) ?: return null
                 targetHost = addrResult.first
                 offset += addrResult.second
 
-                // GlobalID for UDP (optional -- only present with XUDP)
+                // GlobalID is only present with XUDP.
                 if (network == MuxNetwork.UDP && data.size >= offset + 8) {
                     globalID = data.copyOfRange(offset, offset + 8)
                     offset += 8
@@ -200,7 +163,7 @@ data class MuxFrameMetadata(
         private fun decodeAddress(data: ByteArray, offset: Int): Pair<String, Int>? {
             if (data.size <= offset) return null
             val addrType = MuxAddressType.fromByte(data[offset].toInt()) ?: return null
-            var pos = 1  // consumed addr_type byte
+            var pos = 1
 
             return when (addrType) {
                 MuxAddressType.IPV4 -> {
@@ -223,7 +186,7 @@ data class MuxFrameMetadata(
 
                 MuxAddressType.IPV6 -> {
                     if (data.size < offset + pos + 16) return null
-                    // Use InetAddress for proper IPv6 formatting with zero-compression (matching iOS inet_ntop)
+                    // InetAddress gives proper IPv6 formatting with zero-compression.
                     val ipBytes = data.copyOfRange(offset + pos, offset + pos + 16)
                     val addr = try {
                         java.net.InetAddress.getByAddress(ipBytes).hostAddress ?: "::1"
@@ -243,10 +206,6 @@ data class MuxFrameMetadata(
     }
 }
 
-// =============================================================================
-// Address Encoding Helper
-// =============================================================================
-
 private fun encodeAddress(host: String, buf: ByteArrayOutputStream) {
     val ipv4 = parseIPv4(host)
     if (ipv4 != null) {
@@ -262,16 +221,11 @@ private fun encodeAddress(host: String, buf: ByteArrayOutputStream) {
         return
     }
 
-    // Domain
     val domainData = host.toByteArray(Charsets.UTF_8)
     buf.write(MuxAddressType.DOMAIN.value)
     buf.write(domainData.size)
     buf.write(domainData)
 }
-
-// =============================================================================
-// IP Parsing Helpers
-// =============================================================================
 
 private fun parseIPv4(address: String): ByteArray? {
     val parts = address.split(".")
@@ -292,7 +246,6 @@ private fun parseIPv6(address: String): ByteArray? {
     }
     if (!addr.contains(':')) return null
 
-    // Use InetAddress for robust IPv6 parsing (matching iOS inet_pton)
     return try {
         val inetAddr = java.net.InetAddress.getByName(addr)
         if (inetAddr is java.net.Inet6Address) inetAddr.address else null
@@ -301,13 +254,7 @@ private fun parseIPv6(address: String): ByteArray? {
     }
 }
 
-// =============================================================================
-// Frame Encoding
-// =============================================================================
-
-/**
- * Encodes a complete mux frame (metadata length + metadata + optional payload).
- */
+/** Encodes a complete mux frame (metadata length + metadata + optional payload). */
 fun encodeMuxFrame(metadata: MuxFrameMetadata, payload: ByteArray?): ByteArray {
     val metaBytes = metadata.encode()
     val metaLen = metaBytes.size
@@ -316,14 +263,11 @@ fun encodeMuxFrame(metadata: MuxFrameMetadata, payload: ByteArray?): ByteArray {
     val capacity = 2 + metaBytes.size + if (hasData && payload != null) 2 + payload.size else 0
     val frame = ByteArrayOutputStream(capacity)
 
-    // Metadata length (2B big-endian)
     frame.write((metaLen shr 8) and 0xFF)
     frame.write(metaLen and 0xFF)
 
-    // Metadata
     frame.write(metaBytes)
 
-    // Payload (if HasData flag set)
     if (hasData && payload != null) {
         val payloadLen = payload.size
         frame.write((payloadLen shr 8) and 0xFF)
@@ -334,20 +278,11 @@ fun encodeMuxFrame(metadata: MuxFrameMetadata, payload: ByteArray?): ByteArray {
     return frame.toByteArray()
 }
 
-// =============================================================================
-// Streaming Frame Parser
-// =============================================================================
-
-/**
- * Streaming parser that buffers partial reads and emits complete frames.
- */
+/** Streaming parser that buffers partial reads and emits complete frames. */
 class MuxFrameParser {
     private var buffer = ByteArrayOutputStream()
     private var bufferData = byteArrayOf()
 
-    /**
-     * Feeds raw bytes into the parser and returns any complete frames.
-     */
     fun feed(data: ByteArray): List<Pair<MuxFrameMetadata, ByteArray?>> {
         buffer.write(data)
         bufferData = buffer.toByteArray()
@@ -357,19 +292,17 @@ class MuxFrameParser {
         while (true) {
             val remaining = bufferData.size - offset
 
-            // Need at least 2 bytes for metadata length
             if (remaining < 2) break
 
             val metaLen = ((bufferData[offset].toInt() and 0xFF) shl 8) or
                     (bufferData[offset + 1].toInt() and 0xFF)
 
-            // Need full metadata
             if (remaining < 2 + metaLen) break
 
             val metaData = bufferData.copyOfRange(offset + 2, offset + 2 + metaLen)
             val decoded = MuxFrameMetadata.decode(metaData)
             if (decoded == null) {
-                // Corrupt frame -- discard buffer
+                // Corrupt frame: discard buffer.
                 buffer.reset()
                 bufferData = byteArrayOf()
                 break
@@ -380,16 +313,13 @@ class MuxFrameParser {
             var payload: ByteArray? = null
 
             if ((metadata.option and MuxOption.DATA) != 0) {
-                // Need 2 bytes for payload length
                 if (remaining < consumed + 2) break
 
                 val payloadLen = ((bufferData[offset + consumed].toInt() and 0xFF) shl 8) or
                         (bufferData[offset + consumed + 1].toInt() and 0xFF)
                 consumed += 2
 
-                // Need full payload
                 if (remaining < consumed + payloadLen) {
-                    // Revert -- not enough payload data yet
                     break
                 }
 
@@ -403,7 +333,6 @@ class MuxFrameParser {
             offset += consumed
         }
 
-        // Keep unconsumed data in buffer
         if (offset > 0) {
             val leftover = bufferData.copyOfRange(offset, bufferData.size)
             buffer.reset()
@@ -416,9 +345,6 @@ class MuxFrameParser {
         return results
     }
 
-    /**
-     * Resets the parser state.
-     */
     fun reset() {
         buffer.reset()
         bufferData = byteArrayOf()

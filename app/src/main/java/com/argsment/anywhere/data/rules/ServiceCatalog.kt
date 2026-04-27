@@ -5,8 +5,6 @@ import com.argsment.anywhere.data.model.DomainRule
 
 /**
  * Bundled list of built-in service rule sets loaded from Rules.db metadata.
- *
- * Swift counterpart: [Shared/Catalog/ServiceCatalog.swift].
  */
 class ServiceCatalog private constructor(
     val supportedServices: List<String>,

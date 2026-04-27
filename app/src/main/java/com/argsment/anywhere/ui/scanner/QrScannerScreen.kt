@@ -97,7 +97,6 @@ fun QrScannerScreen(
                         }
                     )
 
-                    // Scanning overlay
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -109,7 +108,6 @@ fun QrScannerScreen(
                         )
                     }
 
-                    // Title
                     Text(
                         text = stringResource(R.string.scan_your_qr_code),
                         color = Color.White,
@@ -139,7 +137,6 @@ fun QrScannerScreen(
                 }
             }
 
-            // Close button
             IconButton(
                 onClick = onDismiss,
                 modifier = Modifier

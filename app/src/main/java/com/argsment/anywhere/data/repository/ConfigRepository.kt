@@ -7,6 +7,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonArray
 import java.io.File
 import java.util.UUID
 
@@ -52,10 +54,21 @@ class ConfigRepository(context: Context) {
         saveToDisk()
     }
 
+    /**
+     * Decodes the configuration list element-by-element, dropping entries that
+     * fail to decode, so an unrecognized entry — e.g. a saved configuration
+     * referencing a removed `outboundProtocol` — is skipped instead of
+     * corrupting the entire list.
+     */
     private fun loadFromDisk(): List<ProxyConfiguration> {
         if (!file.exists()) return emptyList()
         return runCatching {
-            json.decodeFromString<List<ProxyConfiguration>>(file.readText())
+            val array = json.parseToJsonElement(file.readText()).jsonArray
+            array.mapNotNull { element ->
+                runCatching {
+                    json.decodeFromJsonElement<ProxyConfiguration>(element)
+                }.getOrNull()
+            }
         }.getOrElse {
             println("Failed to load configurations: $it")
             emptyList()
@@ -63,9 +76,10 @@ class ConfigRepository(context: Context) {
     }
 
     private fun saveToDisk() {
-        runCatching {
-            file.writeText(json.encodeToString(_configurations.value))
-        }.onFailure {
+        // Snapshot here so an in-flight write doesn't observe a later mutation.
+        // Mirrors iOS `Task.detached { try data.write(to: url, options: .atomic) }`.
+        val payload = json.encodeToString(_configurations.value)
+        file.writeTextAsync(payload) {
             println("Failed to save configurations: $it")
         }
     }

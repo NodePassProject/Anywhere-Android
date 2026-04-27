@@ -54,9 +54,8 @@ class SubscriptionRepository(context: Context) {
     }
 
     private fun saveToDisk() {
-        runCatching {
-            file.writeText(json.encodeToString(_subscriptions.value))
-        }.onFailure {
+        val payload = json.encodeToString(_subscriptions.value)
+        file.writeTextAsync(payload) {
             println("Failed to save subscriptions: $it")
         }
     }

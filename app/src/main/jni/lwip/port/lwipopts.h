@@ -35,16 +35,12 @@
 #define LWIP_STATS_DISPLAY              0
 
 /* --- Single network interface optimization --- */
-#define LWIP_SINGLE_NETIF              1
+#define LWIP_SINGLE_NETIF               1
 
 /* --- Raw API only (no sockets/netconn) --- */
 #define LWIP_CALLBACK_API               1
 
 /* --- Memory configuration --- */
-/* Use libc malloc/free for the heap (matching iOS). MEM_SIZE is unused
- * when MEM_LIBC_MALLOC is enabled; the MEMP_NUM_* pools below still use
- * static arrays, only the per-allocation heap (pbufs, mem_malloc) is
- * backed by libc so memory scales with demand instead of being capped. */
 #define MEM_LIBC_MALLOC                 1
 #define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
@@ -62,35 +58,24 @@
 
 /* --- Pbuf configuration --- */
 #define PBUF_POOL_SIZE                  2048
-#define PBUF_POOL_BUFSIZE               1400
+#define PBUF_POOL_BUFSIZE               1500
 
 /* --- TCP configuration --- */
-#define TCP_MSS                         1360
+#define TCP_MSS                         1460
 #define TCP_WND                         (1024 * TCP_MSS)
 #define TCP_SND_BUF                     (1024 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_SNDLOWAT                    ((2 * TCP_MSS) + 1)
-#define TCP_QUEUE_OOSEQ                 1
-#define TCP_OOSEQ_MAX_BYTES             (1024 * 1024)
-#define TCP_OOSEQ_MAX_PBUFS             1024
-#define TCP_OVERSIZE                    TCP_MSS
+#define TCP_QUEUE_OOSEQ                 0
+#define TCP_OVERSIZE                    (4 * TCP_MSS)
 #define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 8))
 #define TCP_MAXRTX                      8
 #define TCP_SYNMAXRTX                   3
-/* Backstop timeout for SYN_RCVD PCBs whose SYN-ACK we deferred while dialing
- * upstream. Must exceed TunnelConstants.handshakeTimeoutMs (60 s) so the
- * Kotlin handshake timer fires first and tears the connection down through
- * our own path; otherwise lwIP's tcp_slowtmr would purge the PCB with
- * ERR_ABRT and fire tcp_err out from under an in-flight dial. See
- * ANYWHERE_PATCHES.md "deferred SYN-ACK". */
-#define TCP_SYN_RCVD_TIMEOUT            75000 /* ms */
 #define LWIP_TCP_TIMESTAMPS             0
-/* SACK output is dead code on the in-memory TUN flow — the Android kernel
- * peer never reorders or drops packets, so cumulative ACKs are always
- * sufficient. Disabled to match iOS. */
 #define LWIP_TCP_SACK_OUT               0
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(32U * (mss)))
-
+#define LWIP_TCP_RTO_TIME               1000
+#define TCP_TMR_INTERVAL                100
 #define TCP_LISTEN_BACKLOG              0
 
 /* --- TCP window scaling (RFC 1323) --- */

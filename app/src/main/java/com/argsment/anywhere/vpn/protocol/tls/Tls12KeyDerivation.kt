@@ -5,10 +5,8 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * TLS 1.2 key material derived from the master secret.
- *
- * Mirrors iOS `TLS12Keys` (no `masterSecret` field — that lives outside the struct
- * because the master secret is reused at the call site for Finished computation).
+ * TLS 1.2 key material derived from the master secret. The master secret itself
+ * is held by the caller because it is reused for Finished computation.
  */
 data class Tls12Keys(
     val clientMACKey: ByteArray,
@@ -38,9 +36,6 @@ data class Tls12Keys(
 
 /**
  * TLS 1.2 key derivation (RFC 5246 + RFC 7627).
- *
- * Pure Kotlin implementation using javax.crypto.Mac for HMAC and
- * java.security.MessageDigest for hashing.
  */
 object Tls12KeyDerivation {
 
@@ -102,8 +97,6 @@ object Tls12KeyDerivation {
      * Standard master secret (RFC 5246 §8.1):
      * `master_secret = PRF(pre_master_secret, "master secret",
      *                      ClientHello.random + ServerHello.random)[0..47]`
-     *
-     * Mirrors iOS `TLS12KeyDerivation.masterSecret`.
      */
     fun masterSecret(
         preMasterSecret: ByteArray,
@@ -121,8 +114,6 @@ object Tls12KeyDerivation {
      * Extended master secret (RFC 7627):
      * `master_secret = PRF(pre_master_secret, "extended master secret",
      *                      Hash(handshake_messages))[0..47]`
-     *
-     * Mirrors iOS `TLS12KeyDerivation.extendedMasterSecret`.
      */
     fun extendedMasterSecret(
         preMasterSecret: ByteArray,
@@ -142,10 +133,6 @@ object Tls12KeyDerivation {
      * The key block is partitioned into:
      * `client_write_MAC_key + server_write_MAC_key + client_write_key + server_write_key
      *  + client_write_IV + server_write_IV`
-     *
-     * Mirrors iOS `TLS12KeyDerivation.keysFromMasterSecret`. The Android signature
-     * accepts the cipher-suite identifier directly so callers don't have to look up
-     * the per-suite lengths themselves.
      */
     fun keysFromMasterSecret(
         masterSecret: ByteArray,
@@ -158,7 +145,7 @@ object Tls12KeyDerivation {
         val ivLen = TlsCipherSuite.ivLength(cipherSuite)
         val useSHA384 = TlsCipherSuite.usesSHA384(cipherSuite)
 
-        // Note: seed order is server_random + client_random (reversed from master secret derivation)
+        // Seed order is server_random + client_random (reversed from master secret derivation).
         val seed = ByteArray(serverRandom.size + clientRandom.size)
         System.arraycopy(serverRandom, 0, seed, 0, serverRandom.size)
         System.arraycopy(clientRandom, 0, seed, serverRandom.size, clientRandom.size)
@@ -191,8 +178,6 @@ object Tls12KeyDerivation {
      * `verify_data = PRF(master_secret, label, Hash(handshake_messages))[0..11]`
      *
      * @param label `"client finished"` or `"server finished"`.
-     *
-     * Mirrors iOS `TLS12KeyDerivation.computeFinishedVerifyData`.
      */
     fun computeFinishedVerifyData(
         masterSecret: ByteArray,
@@ -203,21 +188,13 @@ object Tls12KeyDerivation {
         return prf(masterSecret, label, handshakeHash, 12, useSHA384)
     }
 
-    // -- Transcript Hash --
-
-    /**
-     * Hash handshake messages for key derivation and Finished verification.
-     */
     fun transcriptHash(messages: ByteArray, useSHA384: Boolean = false): ByteArray {
         val algo = if (useSHA384) "SHA-384" else "SHA-256"
         return MessageDigest.getInstance(algo).digest(messages)
     }
 
-    // -- TLS 1.0/1.2 MAC --
-
     /**
-     * Compute record MAC for CBC cipher suites.
-     *
+     * Record MAC for CBC cipher suites:
      * MAC = HMAC(macKey, seqNum(8) || contentType(1) || version(2) || length(2) || payload)
      */
     fun tls10MAC(

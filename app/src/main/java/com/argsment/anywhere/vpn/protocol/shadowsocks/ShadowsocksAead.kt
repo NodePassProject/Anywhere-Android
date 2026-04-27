@@ -11,13 +11,6 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-// =============================================================================
-// ShadowsocksCipher
-// =============================================================================
-
-/**
- * Supported Shadowsocks AEAD cipher methods.
- */
 enum class ShadowsocksCipher(
     val keySize: Int,
     val isSS2022: Boolean = false
@@ -26,21 +19,14 @@ enum class ShadowsocksCipher(
     AES_256_GCM(32),
     CHACHA20_POLY1305(32),
     NONE(0),
-    // Shadowsocks 2022 (BLAKE3-based)
     BLAKE3_AES_128_GCM(16, true),
     BLAKE3_AES_256_GCM(32, true),
     BLAKE3_CHACHA20_POLY1305(32, true);
 
-    /** Salt size — equals keySize for all ciphers. */
     val saltSize: Int get() = keySize
-
-    /** AEAD authentication tag size (16 for all AEAD ciphers). */
     val tagSize: Int get() = if (this == NONE) 0 else 16
-
-    /** AEAD nonce size (12 for GCM and ChaCha20-Poly1305). */
     val nonceSize: Int get() = if (this == NONE) 0 else 12
 
-    /** Whether this cipher uses ChaCha20-Poly1305 (vs AES-GCM). */
     val isChaCha: Boolean
         get() = this == CHACHA20_POLY1305 || this == BLAKE3_CHACHA20_POLY1305
 
@@ -58,19 +44,9 @@ enum class ShadowsocksCipher(
     }
 }
 
-// =============================================================================
-// Key Derivation
-// =============================================================================
-
-/**
- * Shadowsocks key derivation utilities.
- */
 object ShadowsocksKeyDerivation {
 
-    /**
-     * Derives a master key from a password using EVP_BytesToKey (MD5-based).
-     * Matches `passwordToCipherKey()` in Xray-core config.go.
-     */
+    /** EVP_BytesToKey (MD5-based) master-key derivation from a password. */
     fun deriveKey(password: String, keySize: Int): ByteArray {
         if (keySize <= 0) return byteArrayOf()
         val pass = password.toByteArray(Charsets.UTF_8)
@@ -89,18 +65,15 @@ object ShadowsocksKeyDerivation {
         return result.toByteArray().copyOf(keySize)
     }
 
-    /**
-     * Derives a subkey from the master key and salt using HKDF-SHA1.
-     * info = "ss-subkey", matching Xray-core's `hkdfSHA1()`.
-     */
+    /** HKDF-SHA1 subkey derivation with info = "ss-subkey". */
     fun deriveSubkey(masterKey: ByteArray, salt: ByteArray, keySize: Int): ByteArray {
         val info = "ss-subkey".toByteArray(Charsets.UTF_8)
         return hkdfSha1(masterKey, salt, info, keySize)
     }
 
     /**
-     * Decodes a base64-encoded PSK for Shadowsocks 2022.
-     * Supports colon-separated multi-PSK (returns the last one for client).
+     * Decodes a base64-encoded SS 2022 PSK. Colon-separated multi-PSK returns
+     * only the last entry (the client PSK).
      */
     fun decodePSK(password: String, keySize: Int): ByteArray? {
         val parts = password.split(":")
@@ -113,9 +86,7 @@ object ShadowsocksKeyDerivation {
         return if (psk.size == keySize) psk else null
     }
 
-    /**
-     * Decodes ALL colon-separated base64-encoded PSKs for multi-user mode.
-     */
+    /** Decodes every colon-separated base64-encoded PSK for multi-user mode. */
     fun decodePSKList(password: String, keySize: Int): List<ByteArray>? {
         val parts = password.split(":")
         val result = mutableListOf<ByteArray>()
@@ -131,19 +102,13 @@ object ShadowsocksKeyDerivation {
         return result.ifEmpty { null }
     }
 
-    /**
-     * Computes the first 16 bytes of BLAKE3 hash of the given data.
-     * Used for identity header pskHash computation.
-     */
+    /** First 16 bytes of BLAKE3(data). Used for the identity-header pskHash. */
     fun blake3Hash16(data: ByteArray): ByteArray {
         val hash = NativeBridge.nativeBlake3Hash(data)
         return hash.copyOf(16)
     }
 
-    /**
-     * Derives an identity subkey using BLAKE3 DeriveKey mode.
-     * context = "shadowsocks 2022 identity subkey", input = psk + salt.
-     */
+    /** BLAKE3 DeriveKey: context "shadowsocks 2022 identity subkey", input = psk + salt. */
     fun deriveIdentitySubkey(psk: ByteArray, salt: ByteArray, keySize: Int): ByteArray {
         val input = psk + salt
         return NativeBridge.nativeBlake3DeriveKey(
@@ -151,11 +116,7 @@ object ShadowsocksKeyDerivation {
         )
     }
 
-    /**
-     * Derives a session key using BLAKE3 DeriveKey mode.
-     * context = "shadowsocks 2022 session subkey", input = psk + salt.
-     * Matching sing-shadowsocks SessionKey().
-     */
+    /** BLAKE3 DeriveKey: context "shadowsocks 2022 session subkey", input = psk + salt. */
     fun deriveSessionKey(psk: ByteArray, salt: ByteArray, keySize: Int): ByteArray {
         val input = psk + salt
         return NativeBridge.nativeBlake3DeriveKey(
@@ -169,9 +130,6 @@ object ShadowsocksKeyDerivation {
         else string + "=".repeat(4 - remainder)
     }
 
-    /**
-     * HKDF-SHA1: Extract + Expand.
-     */
     private fun hkdfSha1(
         ikm: ByteArray,
         salt: ByteArray,
@@ -181,12 +139,10 @@ object ShadowsocksKeyDerivation {
         val hmacAlgo = "HmacSHA1"
         val hashLen = 20
 
-        // Extract
         val extractMac = Mac.getInstance(hmacAlgo)
         extractMac.init(SecretKeySpec(salt, hmacAlgo))
         val prk = extractMac.doFinal(ikm)
 
-        // Expand
         val expandMac = Mac.getInstance(hmacAlgo)
         expandMac.init(SecretKeySpec(prk, hmacAlgo))
         val result = ByteArrayOutputStream()
@@ -207,19 +163,13 @@ object ShadowsocksKeyDerivation {
     }
 }
 
-// =============================================================================
-// Nonce Generator
-// =============================================================================
-
 /**
- * Generates incrementing AEAD nonces matching Xray-core's GenerateAEADNonceWithSize.
- * Starts at all 0xFF, increments little-endian before each use.
- * First returned nonce = all zeros.
+ * Incrementing AEAD nonce. Initialized to all 0xFF so the first [next] returns all zeros;
+ * increments little-endian on each call.
  */
 class ShadowsocksNonce(size: Int) {
     private val bytes = ByteArray(size) { 0xFF.toByte() }
 
-    /** Increments the nonce (little-endian) and returns the new value. */
     fun next(): ByteArray {
         for (i in bytes.indices) {
             bytes[i]++
@@ -229,19 +179,12 @@ class ShadowsocksNonce(size: Int) {
     }
 }
 
-// =============================================================================
-// AEAD Seal/Open
-// =============================================================================
-
-/**
- * Low-level AEAD operations.
- */
 object ShadowsocksAEADCrypto {
 
     private val random = SecureRandom()
 
-    // Cached Cipher instances per thread to avoid Cipher.getInstance() on every operation.
-    // Cipher is not thread-safe, so ThreadLocal ensures each thread reuses its own instance.
+    // Per-thread Cipher cache: Cipher is not thread-safe, so each thread keeps its own
+    // instance to avoid Cipher.getInstance() per operation.
     private val tlAesGcm = ThreadLocal<Cipher>()
     private val tlChaCha = ThreadLocal<Cipher>()
 
@@ -304,10 +247,7 @@ object ShadowsocksAEADCrypto {
     }
 }
 
-// =============================================================================
-// AES-ECB Single Block (for SS 2022 identity headers)
-// =============================================================================
-
+/** Single-block AES-ECB used for SS 2022 identity headers. */
 object AesEcb {
     private val tlCipher = ThreadLocal<Cipher>()
 
@@ -330,16 +270,11 @@ object AesEcb {
     }
 }
 
-// =============================================================================
-// ShadowsocksAEADWriter (Encrypt)
-// =============================================================================
-
 /**
- * Encrypts data into Shadowsocks AEAD chunk format.
+ * Encrypts data into Shadowsocks AEAD chunks.
  *
- * Chunk format: `[Encrypted 2-byte length + 16-byte tag] [Encrypted payload + 16-byte tag]`
- * Max payload per chunk: 0x3FFF (16383 bytes).
- * The salt is prepended to the first output.
+ * Chunk: `[Encrypted 2-byte length + 16-byte tag] [Encrypted payload + 16-byte tag]`.
+ * Max payload per chunk is 0x3FFF (16,383 bytes). The salt is prepended on the first output.
  */
 class ShadowsocksAEADWriter(
     private val cipher: ShadowsocksCipher,
@@ -360,7 +295,7 @@ class ShadowsocksAEADWriter(
         }
     }
 
-    /** Encrypts plaintext into AEAD chunks. Prepends salt on first call. */
+    /** Prepends salt on first call; subsequent calls emit chunks only. */
     fun seal(plaintext: ByteArray): ByteArray {
         if (cipher == ShadowsocksCipher.NONE) return plaintext
 
@@ -377,11 +312,9 @@ class ShadowsocksAEADWriter(
             val chunkSize = minOf(remaining, MAX_PAYLOAD_SIZE)
             val chunk = plaintext.copyOfRange(offset, offset + chunkSize)
 
-            // Encrypt 2-byte length header
             val lengthBytes = byteArrayOf((chunkSize shr 8).toByte(), (chunkSize and 0xFF).toByte())
             output.write(ShadowsocksAEADCrypto.seal(cipher, subkey, nonce.next(), lengthBytes))
 
-            // Encrypt payload
             output.write(ShadowsocksAEADCrypto.seal(cipher, subkey, nonce.next(), chunk))
 
             offset += chunkSize
@@ -391,19 +324,13 @@ class ShadowsocksAEADWriter(
     }
 
     companion object {
-        /** Maximum payload bytes per chunk (matching Xray-core). */
         const val MAX_PAYLOAD_SIZE = 0x3FFF // 16383
     }
 }
 
-// =============================================================================
-// ShadowsocksAEADReader (Decrypt)
-// =============================================================================
-
 /**
- * Decrypts Shadowsocks AEAD chunk format.
- *
- * State machine: `.waitingSalt` -> `.readingLength` -> `.readingPayload`
+ * Decrypts Shadowsocks AEAD chunks. State machine:
+ * `WAITING_SALT` → `READING_LENGTH` ⇄ `READING_PAYLOAD`.
  */
 class ShadowsocksAEADReader(
     private val cipher: ShadowsocksCipher,
@@ -423,7 +350,7 @@ class ShadowsocksAEADReader(
         READING_PAYLOAD
     }
 
-    /** Compaction threshold — avoid O(n) shifts until dead space is significant. */
+    /** Defer compaction until dead space is significant to avoid O(n) shifts on each read. */
     private companion object {
         const val COMPACT_THRESHOLD = 4096
     }
@@ -434,11 +361,9 @@ class ShadowsocksAEADReader(
         }
     }
 
-    /** Feeds ciphertext and returns any available decrypted plaintext. */
     fun open(ciphertext: ByteArray): ByteArray {
         if (cipher == ShadowsocksCipher.NONE) return ciphertext
 
-        // Append to buffer
         val newBuf = ByteArray(bufferBytes.size - bufferOffset + ciphertext.size)
         System.arraycopy(bufferBytes, bufferOffset, newBuf, 0, bufferBytes.size - bufferOffset)
         System.arraycopy(ciphertext, 0, newBuf, bufferBytes.size - bufferOffset, ciphertext.size)
@@ -486,7 +411,6 @@ class ShadowsocksAEADReader(
             break
         }
 
-        // Compact buffer
         if (bufferOffset > COMPACT_THRESHOLD) {
             bufferBytes = bufferBytes.copyOfRange(bufferOffset, bufferBytes.size)
             bufferOffset = 0
@@ -499,30 +423,22 @@ class ShadowsocksAEADReader(
     }
 }
 
-// =============================================================================
-// UDP Crypto
-// =============================================================================
-
-/**
- * Per-packet encryption/decryption for legacy Shadowsocks UDP.
- */
+/** Per-packet AEAD for legacy Shadowsocks UDP. */
 object ShadowsocksUDPCrypto {
 
-    /** Encrypts a UDP packet: random salt + single AEAD seal (no chunking). */
+    /** UDP encrypt: random salt + single AEAD seal with all-zero nonce, no chunking. */
     fun encrypt(cipher: ShadowsocksCipher, masterKey: ByteArray, payload: ByteArray): ByteArray {
         if (cipher == ShadowsocksCipher.NONE) return payload
 
         val salt = ShadowsocksAEADCrypto.generateRandomSalt(cipher.saltSize)
         val subkey = ShadowsocksKeyDerivation.deriveSubkey(masterKey, salt, cipher.keySize)
 
-        // Single AEAD seal with all-zero nonce
         val nonce = ByteArray(cipher.nonceSize)
         val encrypted = ShadowsocksAEADCrypto.seal(cipher, subkey, nonce, payload)
 
         return salt + encrypted
     }
 
-    /** Decrypts a UDP packet: extract salt, derive subkey, AEAD open. */
     fun decrypt(cipher: ShadowsocksCipher, masterKey: ByteArray, data: ByteArray): ByteArray {
         if (cipher == ShadowsocksCipher.NONE) return data
 
@@ -536,10 +452,6 @@ object ShadowsocksUDPCrypto {
         return ShadowsocksAEADCrypto.open(cipher, subkey, nonce, ciphertext)
     }
 }
-
-// =============================================================================
-// Errors
-// =============================================================================
 
 sealed class ShadowsocksError(message: String) : Exception(message) {
     class InvalidMethod(method: String) : ShadowsocksError("Unsupported Shadowsocks method: $method")

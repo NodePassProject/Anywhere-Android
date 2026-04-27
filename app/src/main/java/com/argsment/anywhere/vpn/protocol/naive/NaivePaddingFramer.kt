@@ -3,7 +3,7 @@ package com.argsment.anywhere.vpn.protocol.naive
 import java.io.ByteArrayOutputStream
 
 /**
- * Encodes and decodes NaiveProxy padding frames for the first N read/write operations.
+ * Encodes and decodes NaiveProxy padding frames for the first [maxFrames] operations.
  *
  * Wire format per frame:
  * ```
@@ -28,7 +28,6 @@ class NaivePaddingFramer(private val maxFrames: Int = 8) {
     var numWrittenFrames = 0
         private set
 
-    // Read state machine
     private enum class ReadState {
         PAYLOAD_LENGTH_1,
         PAYLOAD_LENGTH_2,
@@ -41,20 +40,13 @@ class NaivePaddingFramer(private val maxFrames: Int = 8) {
     private var readPayloadLength = 0
     private var readPaddingLength = 0
 
-    /** Whether padding is still active for reads. */
     val isReadPaddingActive: Boolean get() = numReadFrames < maxFrames
-
-    /** Whether padding is still active for writes. */
     val isWritePaddingActive: Boolean get() = numWrittenFrames < maxFrames
 
-    // -- Read --
-
     /**
-     * Reads padded input and extracts payload bytes.
-     *
-     * Handles partial reads — the framer's state machine resumes across calls.
-     * Returns the number of payload bytes written to [output].
-     * A return value of 0 means only padding/header bytes were consumed (not EOF).
+     * Reads padded input and writes payload bytes to [into]. Returns payload-byte count
+     * (0 means only padding/header was consumed, not EOF). State machine resumes across
+     * partial reads.
      */
     fun read(padded: ByteArray, into: ByteArrayOutputStream): Int {
         var offset = 0
@@ -64,7 +56,6 @@ class NaivePaddingFramer(private val maxFrames: Int = 8) {
             when (state) {
                 ReadState.PAYLOAD_LENGTH_1 -> {
                     if (numReadFrames >= maxFrames) {
-                        // Past padding threshold — raw passthrough
                         into.write(padded, offset, padded.size - offset)
                         offset = padded.size
                         continue
@@ -115,13 +106,7 @@ class NaivePaddingFramer(private val maxFrames: Int = 8) {
         return into.size() - startCount
     }
 
-    // -- Write --
-
-    /**
-     * Wraps [payload] in a padding frame with the given padding size.
-     *
-     * Returns the framed data (header + payload + zero-padding).
-     */
+    /** Wraps [payload] in a padding frame (header + payload + zero-padding). */
     fun write(payload: ByteArray, paddingSize: Int): ByteArray {
         val actualPadding = minOf(paddingSize, MAX_PADDING_SIZE)
         val frameSize = FRAME_HEADER_SIZE + payload.size + actualPadding
@@ -131,7 +116,6 @@ class NaivePaddingFramer(private val maxFrames: Int = 8) {
         frame[1] = (payload.size % 256).toByte()
         frame[2] = actualPadding.toByte()
         System.arraycopy(payload, 0, frame, FRAME_HEADER_SIZE, payload.size)
-        // Remaining bytes are already zero (padding)
 
         if (numWrittenFrames < Int.MAX_VALUE - 1) {
             numWrittenFrames++

@@ -33,7 +33,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Wire VPN permission request
         viewModel.onRequestVpnPermission = { intent ->
             vpnPermissionLauncher.launch(intent)
         }

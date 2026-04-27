@@ -7,7 +7,7 @@ import com.argsment.anywhere.vpn.protocol.TunneledTransport
 import com.argsment.anywhere.vpn.protocol.tls.TlsClient
 import com.argsment.anywhere.vpn.protocol.tls.TlsError
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.vpn.util.NioSocket
 import kotlinx.coroutines.delay
@@ -17,18 +17,16 @@ private val logger = AnywhereLogger("TrojanClient")
 /**
  * Client for establishing Trojan proxy connections.
  *
- * Trojan mandates TLS on the wire; the server inspects the SHA224 hash of
- * the password and falls back to its decoy HTTP site for anything that
- * doesn't match, so there is no plaintext or Reality variant. UDP rides the
- * same TLS stream via [TrojanUdpConnection]'s per-packet framing.
- * Mux is not supported.
+ * Trojan mandates TLS on the wire; the server inspects the SHA224 hash of the
+ * password and falls back to its decoy HTTP site for anything that doesn't
+ * match, so there is no plaintext or Reality variant. UDP rides the same TLS
+ * stream via [TrojanUdpConnection]'s per-packet framing. Mux is not supported.
  *
- * Retry logic: 5 attempts with linear backoff 0/200/400/600/800ms (matches
- * [com.argsment.anywhere.vpn.protocol.vless.VlessClient]).
+ * Retry logic: 5 attempts with linear backoff 0/200/400/600/800ms.
  */
 class TrojanClient(
     private val configuration: ProxyConfiguration,
-    private val tunnel: VlessConnection? = null
+    private val tunnel: ProxyConnection? = null
 ) {
     companion object {
         private const val MAX_RETRY_ATTEMPTS = 5
@@ -39,7 +37,7 @@ class TrojanClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray? = null
-    ): VlessConnection {
+    ): ProxyConnection {
         val password = requirePassword()
         val tlsConfig = requireTls()
 
@@ -54,7 +52,7 @@ class TrojanClient(
     suspend fun connectUDP(
         destinationHost: String,
         destinationPort: Int
-    ): VlessConnection {
+    ): ProxyConnection {
         val password = requirePassword()
         val tlsConfig = requireTls()
 
@@ -76,9 +74,9 @@ class TrojanClient(
     }
 
     /**
-     * Opens the mandatory TLS tunnel. Direct dials retry with linear backoff
-     * matching the VLESS client; chained dials bubble the first failure up so
-     * the enclosing chain driver can rebuild the upstream tunnel.
+     * Opens the mandatory TLS tunnel. Direct dials retry with linear backoff;
+     * chained dials bubble the first failure up so the enclosing chain driver
+     * can rebuild the upstream tunnel.
      */
     private suspend fun connectTls(tlsConfig: TlsConfiguration): TlsRecordConnection {
         if (tunnel != null) {

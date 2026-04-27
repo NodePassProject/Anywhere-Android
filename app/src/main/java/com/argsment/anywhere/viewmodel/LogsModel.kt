@@ -12,13 +12,9 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
- * Exposes the user-facing log buffer to the UI layer. Mirrors iOS
- * `LogsModel`: entries are refreshed while polling is active and can
- * be paused (e.g. while the user is in select mode).
- *
- * Unlike iOS (which polls the Network Extension over IPC every second),
- * Android's VPN service runs in the same process as the UI, so we observe
- * [LogBuffer.state] directly via a coroutine.
+ * Exposes the user-facing log buffer to the UI layer. Entries are
+ * refreshed while polling is active and can be paused (e.g. while
+ * the user is in select mode).
  */
 class LogsModel : ViewModel() {
 
@@ -26,7 +22,7 @@ class LogsModel : ViewModel() {
 
     data class LogEntry(
         val id: UUID = UUID.randomUUID(),
-        val timestamp: Long,   // epoch milliseconds
+        val timestamp: Long,
         val level: LogLevel,
         val message: String
     )

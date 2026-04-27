@@ -8,8 +8,6 @@ import java.io.IOException
 
 private val logger = AnywhereLogger("HTTP2")
 
-// -- Error --
-
 sealed class Http2Error(message: String) : IOException(message) {
     class NotReady : Http2Error("HTTP/2 connection not ready")
     class ConnectionFailed(msg: String) : Http2Error("HTTP/2 connection failed: $msg")
@@ -21,15 +19,8 @@ sealed class Http2Error(message: String) : IOException(message) {
 }
 
 /**
- * HTTP/2 session manager for a single CONNECT tunnel through a NaiveProxy server.
- *
- * Handles the full HTTP/2 lifecycle:
- * 1. Send connection preface and SETTINGS
- * 2. Exchange SETTINGS with the server
- * 3. Open a CONNECT tunnel on stream 1 with padding negotiation
- * 4. Bidirectional DATA relay through the tunnel
- *
- * Flow control uses NaiveProxy's window sizes (64 MB stream, 128 MB connection).
+ * HTTP/2 connection that opens a single CONNECT tunnel on stream 1 through a NaiveProxy
+ * server. Flow control uses NaiveProxy's window sizes (64 MB stream, 128 MB connection).
  */
 class Http2Connection(
     private val transport: NaiveTlsTransport,
@@ -38,17 +29,14 @@ class Http2Connection(
     private val destination: String
 ) {
     companion object {
-        /** Chrome-like User-Agent for the CONNECT request. */
         private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
-        /** The HTTP/2 connection preface (RFC 7540 §3.5). */
+        /** RFC 7540 §3.5 connection preface. */
         private val CONNECTION_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".toByteArray(Charsets.US_ASCII)
 
-        /** Maximum receive buffer size (2 MB). Protects against unbounded growth. */
+        /** Cap on receive buffer growth (2 MB). */
         private const val MAX_RECEIVE_BUFFER_SIZE = 2_097_152
     }
-
-    // -- State --
 
     enum class State {
         IDLE,
@@ -68,25 +56,11 @@ class Http2Connection(
     private var flowControl = Http2FlowControl()
     private var receiveBuffer = Http2Buffer()
 
-    /** The padding type negotiated with the server during CONNECT. */
     var negotiatedPaddingType = NaivePaddingNegotiator.PaddingType.NONE
         private set
 
-    /** Whether the tunnel is open and ready for data transfer. */
     val isConnected: Boolean get() = state == State.TUNNEL_OPEN
 
-    // -- Open Tunnel --
-
-    /**
-     * Establishes the HTTP/2 connection and opens a CONNECT tunnel.
-     *
-     * Performs the full setup sequence:
-     * 1. TLS connection to the proxy server
-     * 2. HTTP/2 connection preface and SETTINGS exchange
-     * 3. Connection-level WINDOW_UPDATE (expand to 128 MB)
-     * 4. CONNECT request with padding negotiation headers
-     * 5. Receives and validates the 200 OK response
-     */
     suspend fun openTunnel() {
         if (state != State.IDLE) throw Http2Error.ProtocolError("Invalid state for openTunnel")
         state = State.CONNECTING
@@ -101,47 +75,27 @@ class Http2Connection(
         }
     }
 
-    // -- Data Transfer --
-
-    /**
-     * Sends data through the CONNECT tunnel as HTTP/2 DATA frames.
-     *
-     * Data is split into frames of at most 16,384 bytes (the HTTP/2 default
-     * SETTINGS_MAX_FRAME_SIZE). Respects both connection and stream send windows.
-     */
     suspend fun sendData(data: ByteArray) {
         if (state != State.TUNNEL_OPEN) throw Http2Error.NotReady()
         sendDataFrames(data, 0)
     }
 
-    /**
-     * Receives the next chunk of data from the CONNECT tunnel.
-     *
-     * Reads and processes HTTP/2 frames until a DATA frame for stream 1 is found.
-     * Control frames (PING, WINDOW_UPDATE, SETTINGS) are handled transparently.
-     */
     suspend fun receiveData(): ByteArray? {
         if (state != State.TUNNEL_OPEN) throw Http2Error.NotReady()
         return readNextDataFrame()
     }
 
-    /** Closes the HTTP/2 connection. */
     fun close() {
         if (state == State.CLOSED) return
         state = State.CLOSED
+        flowControl.cancelAwaiters(Http2Error.ConnectionFailed("Connection closed"))
         transport.cancel()
     }
 
-    // -- Connection Preface --
-
-    /** Sends the connection preface, initial SETTINGS, and connection-level WINDOW_UPDATE. */
     private suspend fun sendConnectionPreface() {
         val buf = java.io.ByteArrayOutputStream()
-
-        // Connection preface (24 bytes)
         buf.write(CONNECTION_PREFACE)
 
-        // SETTINGS matching Chrome/NaiveProxy defaults
         val settings = Http2Framer.settingsFrame(listOf(
             0x1 to 65536,     // HEADER_TABLE_SIZE
             0x2 to 0,         // ENABLE_PUSH (disabled for CONNECT)
@@ -152,7 +106,7 @@ class Http2Connection(
         ))
         buf.write(Http2Framer.serialize(settings))
 
-        // WINDOW_UPDATE on stream 0: expand connection receive window to 128 MB
+        // Expand connection receive window from default 65,535 to 128 MB.
         val windowUpdate = Http2Framer.windowUpdateFrame(
             streamID = 0,
             increment = Http2FlowControl.CONNECTION_WINDOW_UPDATE_INCREMENT
@@ -163,33 +117,23 @@ class Http2Connection(
         state = State.PREFACE_SENT
     }
 
-    // -- Handshake Processing --
-
-    /**
-     * Processes HTTP/2 frames during the handshake phase (SETTINGS exchange → CONNECT).
-     *
-     * Reads frames from the receive buffer, handles control frames, and advances
-     * through the state machine: prefaceSent → ready → tunnelPending → tunnelOpen.
-     */
     private suspend fun processHandshake() {
         while (true) {
             val frame = Http2Framer.deserialize(receiveBuffer)
             if (frame == null) {
-                // Need more data from transport
                 readFromTransport()
                 continue
             }
 
             when (frame.type) {
                 Http2FrameType.SETTINGS -> {
-                    if (frame.hasFlag(Http2FrameFlags.ACK)) continue // Server ACK'd our SETTINGS
+                    if (frame.hasFlag(Http2FrameFlags.ACK)) continue
                     handleServerSettings(frame)
                     sendFrame(Http2Framer.settingsAckFrame())
 
                     if (state == State.PREFACE_SENT) {
                         state = State.READY
                         sendConnectRequest()
-                        // Continue processing — response may already be buffered
                         continue
                     }
                 }
@@ -233,26 +177,18 @@ class Http2Connection(
                     }
                 }
 
-                else -> {} // Skip unknown frame types (RFC 7540 §4.1)
+                else -> {} // Unknown frame types skipped per RFC 7540 §4.1
             }
         }
     }
 
-    // -- CONNECT Request --
-
-    /** Sends the HTTP/2 CONNECT request on stream 1 with padding negotiation headers. */
     private suspend fun sendConnectRequest() {
         val extraHeaders = mutableListOf<Pair<String, String>>()
 
-        // Proxy-Authorization (Basic auth)
         configuration.basicAuth?.let { auth ->
             extraHeaders.add("proxy-authorization" to "Basic $auth")
         }
-
-        // User-Agent (required by some NaiveProxy servers for probe resistance)
         extraHeaders.add("user-agent" to USER_AGENT)
-
-        // Padding negotiation headers
         extraHeaders.addAll(NaivePaddingNegotiator.requestHeaders())
 
         val headerBlock = HpackEncoder.encodeConnectRequest(
@@ -269,9 +205,6 @@ class Http2Connection(
         transport.send(Http2Framer.serialize(headersFrame))
     }
 
-    // -- CONNECT Response --
-
-    /** Handles the server's CONNECT response HEADERS frame. */
     private fun handleConnectResponse(frame: Http2Frame) {
         val headers = HpackEncoder.decodeHeaders(frame.payload)
         if (headers == null) {
@@ -304,9 +237,6 @@ class Http2Connection(
         }
     }
 
-    // -- Server Settings --
-
-    /** Processes a SETTINGS frame from the server, applying relevant parameters. */
     private fun handleServerSettings(frame: Http2Frame) {
         val settings = Http2Framer.parseSettings(frame.payload)
         for ((id, value) in settings) {
@@ -317,13 +247,7 @@ class Http2Connection(
         }
     }
 
-    // -- Data Frame Send --
-
-    /**
-     * Sends data as one or more HTTP/2 DATA frames on stream 1.
-     *
-     * Splits at SETTINGS_MAX_FRAME_SIZE (16,384 bytes) and respects flow control.
-     */
+    /** Splits data at SETTINGS_MAX_FRAME_SIZE (16,384 bytes) and respects flow control. */
     private suspend fun sendDataFrames(data: ByteArray, offset: Int) {
         if (offset >= data.size) return
 
@@ -344,8 +268,12 @@ class Http2Connection(
         }
 
         if (framesBuf.size() == 0) {
-            logger.warning("Send blocked by flow control")
-            throw Http2Error.ProtocolError("Flow control blocked")
+            // Flow control blocked. Suspend until WINDOW_UPDATE arrives instead
+            // of throwing — mirrors iOS HTTP2Connection.swift:427-433.
+            if (state == State.CLOSED) throw Http2Error.ConnectionFailed("Connection closed")
+            flowControl.awaitWindow()
+            sendDataFrames(data, currentOffset)
+            return
         }
 
         transport.send(framesBuf.toByteArray())
@@ -355,19 +283,11 @@ class Http2Connection(
         }
     }
 
-    // -- Data Frame Receive --
-
-    /**
-     * Reads HTTP/2 frames until a DATA frame for stream 1 is found.
-     *
-     * Control frames (PING, WINDOW_UPDATE, SETTINGS) are handled transparently.
-     * GOAWAY and RST_STREAM terminate the connection.
-     */
+    /** Reads frames until a DATA frame for stream 1 arrives, handling control frames inline. */
     private suspend fun readNextDataFrame(): ByteArray? {
         while (true) {
             val frame = Http2Framer.deserialize(receiveBuffer)
             if (frame == null) {
-                // Need more data from transport
                 readFromTransport()
                 continue
             }
@@ -376,7 +296,6 @@ class Http2Connection(
                 Http2FrameType.DATA -> {
                     if (frame.streamID != 1) continue
 
-                    // Flow control: track received bytes and send WINDOW_UPDATE when needed
                     if (frame.payload.isNotEmpty()) {
                         val increments = flowControl.consumeRecvWindow(frame.payload.size)
                         increments.connectionIncrement?.let { connInc ->
@@ -395,7 +314,6 @@ class Http2Connection(
                     if (frame.payload.isNotEmpty()) {
                         return frame.payload
                     }
-                    // Empty DATA frame (no END_STREAM) — keep reading
                 }
 
                 Http2FrameType.PING -> {
@@ -433,14 +351,11 @@ class Http2Connection(
                     }
                 }
 
-                else -> {} // Skip unknown frame types (RFC 7540 §4.1)
+                else -> {} // Unknown frame types skipped per RFC 7540 §4.1
             }
         }
     }
 
-    // -- Transport I/O --
-
-    /** Reads data from the transport and appends to the receive buffer. */
     private suspend fun readFromTransport() {
         val data = transport.receive()
         if (data == null || data.isEmpty()) {
@@ -455,7 +370,6 @@ class Http2Connection(
         }
     }
 
-    /** Sends a single control frame (fire-and-forget). */
     private suspend fun sendFrame(frame: Http2Frame) {
         try {
             transport.send(Http2Framer.serialize(frame))

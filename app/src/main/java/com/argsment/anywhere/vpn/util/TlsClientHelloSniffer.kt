@@ -4,20 +4,14 @@ import com.argsment.anywhere.vpn.TunnelConstants
 
 /**
  * Incremental, bounds-checked parser that extracts the SNI hostname from
- * an inbound TLS ClientHello. Used by
- * [com.argsment.anywhere.vpn.LwipTcpConnection] to enable domain-based
- * routing for traffic that reaches the tunnel by real IP (hardcoded IPs,
- * DoH clients, etc.) — cases where the fake-IP ↔ domain mapping is
- * unavailable.
+ * an inbound TLS ClientHello. Enables domain-based routing for traffic
+ * that reaches the tunnel by real IP (hardcoded IPs, DoH clients, etc.)
+ * where the fake-IP / domain mapping is unavailable.
  *
- * The parser is strictly passive: it buffers up to [bufferLimit] bytes,
- * walks the record / handshake / extensions structure with explicit
- * bounds checks, and returns a terminal state as soon as the first byte
- * rules out TLS or the first server_name extension is reached. No bytes
- * beyond the ClientHello are retained.
- *
- * Mirrors iOS `TLSClientHelloSniffer` in
- * `Anywhere Network Extension/TLSClientHelloSniffer.swift`.
+ * Strictly passive: buffers up to [bufferLimit] bytes, walks the record /
+ * handshake / extensions structure with explicit bounds checks, and
+ * returns a terminal state as soon as the first byte rules out TLS or the
+ * first server_name extension is reached.
  */
 class TlsClientHelloSniffer(
     private val bufferLimit: Int = TunnelConstants.tlsSnifferBufferLimit
@@ -47,15 +41,13 @@ class TlsClientHelloSniffer(
         private set
 
     /**
-     * Appends [data] (of length [length]) and advances the parse state.
-     * Returns the new state. After a terminal state is reached, further
-     * calls are no-ops.
+     * Appends [data] and advances the parse state. After a terminal state
+     * is reached, further calls are no-ops.
      */
     fun feed(data: ByteArray, offset: Int = 0, length: Int = data.size - offset): State {
         if (state != State.NeedMore || length <= 0) return state
 
-        // Fast reject before copying: a real TLS record starts with 0x16.
-        // This keeps the buffer empty for non-TLS protocols.
+        // Fast reject before copying: keeps the buffer empty for non-TLS protocols.
         if (bufferLen == 0 && data[offset] != 0x16.toByte()) {
             state = State.NotTls
             return state
@@ -81,14 +73,12 @@ class TlsClientHelloSniffer(
         bufferLen += length
     }
 
-    // -- Parsing --
-
     /** TLS record layer: `[content_type:1][legacy_version:2][length:2][fragment]` */
     private fun parse(): State {
         if (bufferLen < 5) return State.NeedMore
         if (buffer[0] != 0x16.toByte()) return State.Unavailable
 
-        // RFC 8446 §5.1: record fragment length ≤ 2^14.
+        // RFC 8446 5.1: record fragment length <= 2^14.
         val fragLen = ((buffer[3].toInt() and 0xFF) shl 8) or (buffer[4].toInt() and 0xFF)
         if (fragLen <= 0 || fragLen > 16384) return State.Unavailable
 
@@ -102,7 +92,7 @@ class TlsClientHelloSniffer(
     private fun parseHandshake(start: Int, end: Int): State {
         val cur = Cursor(buffer, start, end)
         val msgType = cur.readU8() ?: return State.Unavailable
-        if (msgType != 0x01) return State.Unavailable  // ClientHello
+        if (msgType != 0x01) return State.Unavailable
         val bodyLen = cur.readU24() ?: return State.Unavailable
         val bodyEnd = cur.pos + bodyLen
         if (bodyEnd > end) return State.Unavailable
@@ -174,8 +164,6 @@ class TlsClientHelloSniffer(
         }
         return null
     }
-
-    // -- Cursor --
 
     private class Cursor(val data: ByteArray, start: Int, val end: Int) {
         var pos: Int = start

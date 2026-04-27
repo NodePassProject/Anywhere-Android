@@ -40,11 +40,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.data.model.HttpUpgradeConfiguration
-import com.argsment.anywhere.data.model.HysteriaUploadMbpsDefault
-import com.argsment.anywhere.data.model.HysteriaUploadMbpsRange
 import com.argsment.anywhere.data.model.NaiveProtocol
 import com.argsment.anywhere.data.model.OutboundProtocol
-import com.argsment.anywhere.data.model.clampHysteriaUploadMbps
 import com.argsment.anywhere.data.model.RealityConfiguration
 import com.argsment.anywhere.data.model.TlsConfiguration
 import com.argsment.anywhere.data.model.TlsFingerprint
@@ -76,15 +73,12 @@ fun ProxyEditorScreen(
     var flow by remember { mutableStateOf("") }
     var security by remember { mutableStateOf("none") }
 
-    // WebSocket fields
     var wsHost by remember { mutableStateOf("") }
     var wsPath by remember { mutableStateOf("/") }
 
-    // HTTPUpgrade fields
     var httpUpgradeHost by remember { mutableStateOf("") }
     var httpUpgradePath by remember { mutableStateOf("/") }
 
-    // XHTTP fields
     var xhttpHost by remember { mutableStateOf("") }
     var xhttpPath by remember { mutableStateOf("/") }
     var xhttpMode by remember { mutableStateOf("auto") }
@@ -94,49 +88,38 @@ fun ProxyEditorScreen(
     var grpcMultiMode by remember { mutableStateOf(false) }
     var grpcUserAgent by remember { mutableStateOf("") }
 
-    // TLS fields
     var tlsSNI by remember { mutableStateOf("") }
     var tlsALPN by remember { mutableStateOf("") }
     var tlsAllowInsecure by remember { mutableStateOf(false) }
     var tlsMinVersion by remember { mutableStateOf<TlsVersion?>(null) }
     var tlsMaxVersion by remember { mutableStateOf<TlsVersion?>(null) }
 
-    // Mux + XUDP
     var muxEnabled by remember { mutableStateOf(true) }
     var xudpEnabled by remember { mutableStateOf(true) }
 
-    // Reality fields
     var sni by remember { mutableStateOf("") }
     var publicKey by remember { mutableStateOf("") }
     var shortId by remember { mutableStateOf("") }
     var fingerprint by remember { mutableStateOf(TlsFingerprint.CHROME_133) }
 
-    // Shadowsocks fields
     var ssPassword by remember { mutableStateOf("") }
     var ssMethod by remember { mutableStateOf("aes-128-gcm") }
 
-    // Naive fields
     var naiveUsername by remember { mutableStateOf("") }
     var naivePassword by remember { mutableStateOf("") }
 
-    // SOCKS5 fields
     var socks5Username by remember { mutableStateOf("") }
     var socks5Password by remember { mutableStateOf("") }
 
-    // Hysteria fields. Matches iOS ProxyEditorView which only edits password +
-    // uploadMbps. SNI/insecure flags stay on the original config's TLS blob.
-    var hysteriaPassword by remember { mutableStateOf("") }
-    var hysteriaUploadMbpsText by remember { mutableStateOf(HysteriaUploadMbpsDefault.toString()) }
-
-    // Trojan fields (TLS knobs reuse the VLESS tlsSNI/tlsALPN/fingerprint state,
-    // matching iOS ProxyEditorView).
+    // Trojan: password lives here; TLS knobs reuse the shared
+    // tlsSNI/tlsALPN/fingerprint state.
     var trojanPassword by remember { mutableStateOf("") }
 
     val isShadowsocks = selectedProtocol == OutboundProtocol.SHADOWSOCKS
     val isSocks5 = selectedProtocol == OutboundProtocol.SOCKS5
     val isNaive = selectedProtocol.isNaive
-    val isHysteria = selectedProtocol == OutboundProtocol.HYSTERIA
     val isTrojan = selectedProtocol == OutboundProtocol.TROJAN
+    val isVless = selectedProtocol == OutboundProtocol.VLESS
     val isReality = security == "reality"
     val isTLS = security == "tls"
 
@@ -146,10 +129,7 @@ fun ProxyEditorScreen(
             when {
                 isNaive -> naiveUsername.isNotEmpty() && naivePassword.isNotEmpty()
                 isShadowsocks -> ssPassword.isNotEmpty()
-                isSocks5 -> true  // SOCKS5 username/password are optional
-                isHysteria -> hysteriaPassword.isNotEmpty() &&
-                        (hysteriaUploadMbpsText.toIntOrNull()
-                            ?.let { it in HysteriaUploadMbpsRange } == true)
+                isSocks5 -> true
                 isTrojan -> trojanPassword.isNotEmpty()
                 else -> runCatching { UUID.fromString(uuid) }.isSuccess &&
                         (!isReality || (sni.isNotEmpty() && publicKey.isNotEmpty()))
@@ -208,11 +188,6 @@ fun ProxyEditorScreen(
             naivePassword = config.naivePassword ?: ""
             socks5Username = config.socks5Username ?: ""
             socks5Password = config.socks5Password ?: ""
-            hysteriaPassword = config.hysteriaPassword ?: ""
-            hysteriaUploadMbpsText =
-                (config.hysteriaUploadMbps ?: HysteriaUploadMbpsDefault).toString()
-            // Trojan state mirrors iOS: the password lives on trojanPassword and
-            // the TLS knobs reuse the shared tlsSNI/tlsALPN/fingerprint state.
             trojanPassword = config.trojanPassword ?: ""
             config.trojanTls?.let {
                 tlsSNI = it.serverName
@@ -240,7 +215,7 @@ fun ProxyEditorScreen(
                     IconButton(onClick = {
                         val port = serverPort.toUShortOrNull() ?: return@IconButton
                         val needsUuid =
-                            !(isShadowsocks || isNaive || isSocks5 || isHysteria || isTrojan)
+                            !(isShadowsocks || isNaive || isSocks5 || isTrojan)
                         val parsedUUID = if (!needsUuid) {
                             configuration?.uuid ?: UUID.randomUUID()
                         } else {
@@ -248,7 +223,7 @@ fun ProxyEditorScreen(
                         }
 
                         var tlsConfiguration: TlsConfiguration? = null
-                        if (isTLS && !isNaive && !isHysteria) {
+                        if (isTLS && isVless) {
                             val resolvedSNI = tlsSNI.ifEmpty { serverAddress }
                             val alpn = tlsALPN.takeIf { it.isNotEmpty() }?.split(",")
                             tlsConfiguration = TlsConfiguration(
@@ -261,16 +236,8 @@ fun ProxyEditorScreen(
                             )
                         }
 
-                        // Hysteria: preserve the original TLS blob (which carries
-                        // SNI/insecure flags populated by URL import). The editor
-                        // itself doesn't expose those knobs — matching iOS, which
-                        // only edits password + upload Mbps for Hysteria.
-                        if (isHysteria) {
-                            tlsConfiguration = configuration?.tls
-                        }
-
-                        // Trojan: TLS is mandatory. Build from the shared tlsSNI/
-                        // tlsALPN/fingerprint state (matching iOS ProxyEditorView).
+                        // Trojan: TLS is mandatory. Build from the shared
+                        // tlsSNI/tlsALPN/fingerprint state.
                         var trojanTlsConfiguration: TlsConfiguration? = null
                         if (isTrojan) {
                             val resolvedSni = tlsSNI.ifEmpty { serverAddress }
@@ -284,7 +251,7 @@ fun ProxyEditorScreen(
                         }
 
                         var realityConfiguration: RealityConfiguration? = null
-                        if (isReality && !isNaive && !isShadowsocks && !isSocks5 && !isHysteria && !isTrojan) {
+                        if (isReality && isVless) {
                             val pk = publicKey.base64UrlToByteArrayOrNull() ?: return@IconButton
                             val sid = shortId.hexToByteArrayOrNull() ?: byteArrayOf()
                             realityConfiguration = RealityConfiguration(
@@ -296,19 +263,19 @@ fun ProxyEditorScreen(
                         }
 
                         var wsConfiguration: WebSocketConfiguration? = null
-                        if (transport == "ws" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
+                        if (transport == "ws" && isVless) {
                             val host = wsHost.ifEmpty { serverAddress }
                             wsConfiguration = WebSocketConfiguration(host = host, path = wsPath)
                         }
 
                         var httpUpgradeConfiguration: HttpUpgradeConfiguration? = null
-                        if (transport == "httpupgrade" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
+                        if (transport == "httpupgrade" && isVless) {
                             val host = httpUpgradeHost.ifEmpty { serverAddress }
                             httpUpgradeConfiguration = HttpUpgradeConfiguration(host = host, path = httpUpgradePath)
                         }
 
                         var xhttpConfiguration: XHttpConfiguration? = null
-                        if (transport == "xhttp" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
+                        if (transport == "xhttp" && isVless) {
                             val host = xhttpHost.ifEmpty { serverAddress }
                             val mode = XHttpMode.fromRaw(xhttpMode)
                             xhttpConfiguration = XHttpConfiguration.fromExtraJson(
@@ -317,7 +284,7 @@ fun ProxyEditorScreen(
                         }
 
                         var grpcConfiguration: com.argsment.anywhere.vpn.protocol.grpc.GrpcConfiguration? = null
-                        if (transport == "grpc" && !isNaive && !isSocks5 && !isHysteria && !isTrojan) {
+                        if (transport == "grpc" && isVless) {
                             grpcConfiguration = com.argsment.anywhere.vpn.protocol.grpc.GrpcConfiguration(
                                 serviceName = grpcServiceName,
                                 authority = grpcAuthority,
@@ -332,17 +299,10 @@ fun ProxyEditorScreen(
                         val naiveProto = when (selectedProtocol) {
                             OutboundProtocol.NAIVE_HTTP11 -> NaiveProtocol.HTTP11
                             OutboundProtocol.NAIVE_HTTP2 -> NaiveProtocol.HTTP2
-                            OutboundProtocol.NAIVE_HTTP3 -> NaiveProtocol.HTTP2 // placeholder
                             else -> null
                         }
 
-                        val hysteriaMbps = if (isHysteria) {
-                            clampHysteriaUploadMbps(
-                                hysteriaUploadMbpsText.toIntOrNull() ?: HysteriaUploadMbpsDefault
-                            )
-                        } else null
-
-                        val nonVless = isShadowsocks || isNaive || isSocks5 || isHysteria || isTrojan
+                        val nonVless = isShadowsocks || isNaive || isSocks5 || isTrojan
 
                         val config = ProxyConfiguration(
                             id = configuration?.id ?: UUID.randomUUID(),
@@ -351,10 +311,10 @@ fun ProxyEditorScreen(
                             serverPort = port,
                             uuid = parsedUUID,
                             encryption = if (nonVless) "none" else encryption,
-                            transport = if (isNaive || isSocks5 || isHysteria || isTrojan) "tcp" else transport,
+                            transport = if (nonVless) "tcp" else transport,
                             flow = if (nonVless) null else flow.ifEmpty { null },
                             security = when {
-                                isNaive || isHysteria -> "none"
+                                isNaive || isShadowsocks || isSocks5 -> "none"
                                 isTrojan -> "tls"
                                 else -> security
                             },
@@ -375,12 +335,9 @@ fun ProxyEditorScreen(
                             naiveUsername = if (isNaive) naiveUsername else null,
                             naivePassword = if (isNaive) naivePassword else null,
                             naiveProtocol = naiveProto,
-                            hysteriaPassword = if (isHysteria) hysteriaPassword else null,
-                            hysteriaUploadMbps = hysteriaMbps,
                             trojanPassword = if (isTrojan) trojanPassword else null,
                             trojanTls = if (isTrojan) trojanTlsConfiguration else null,
-                            // Preserve the original testseed — matches iOS which reads
-                            // self.configuration?.testseed rather than resetting to default.
+                            // Preserve the original testseed rather than resetting to default.
                             testseed = configuration?.testseed ?: listOf(900u, 500u, 900u, 256u)
                         )
                         onSave(config)
@@ -398,7 +355,6 @@ fun ProxyEditorScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Name section
             SectionHeader(stringResource(R.string.name))
             OutlinedTextField(
                 value = name,
@@ -408,33 +364,29 @@ fun ProxyEditorScreen(
                 singleLine = true
             )
 
-            // Protocol picker. Order mirrors iOS ProxyEditorView so users see
-            // the same list across platforms.
             SectionHeader(stringResource(R.string.protocol_label))
             DropdownField(
                 label = stringResource(R.string.protocol_label),
                 selectedValue = selectedProtocol.name,
                 options = listOf(
                     OutboundProtocol.VLESS.name to "VLESS",
-                    OutboundProtocol.HYSTERIA.name to "Hysteria",
                     OutboundProtocol.TROJAN.name to "Trojan",
                     OutboundProtocol.SHADOWSOCKS.name to "Shadowsocks",
                     OutboundProtocol.SOCKS5.name to "SOCKS5",
                     OutboundProtocol.NAIVE_HTTP11.name to "HTTPS",
-                    OutboundProtocol.NAIVE_HTTP2.name to "HTTP2",
-                    OutboundProtocol.NAIVE_HTTP3.name to "QUIC"
+                    OutboundProtocol.NAIVE_HTTP2.name to "HTTP2"
                 ),
                 onSelect = { value ->
-                    selectedProtocol = OutboundProtocol.valueOf(value)
-                    if (isShadowsocks || isSocks5 || isHysteria || isTrojan || selectedProtocol.isNaive) {
+                    val nextProtocol = OutboundProtocol.valueOf(value)
+                    selectedProtocol = nextProtocol
+                    if (nextProtocol != OutboundProtocol.VLESS) {
                         flow = ""
-                        if (security == "reality") security = "none"
+                        transport = "tcp"
+                        security = if (nextProtocol == OutboundProtocol.TROJAN) "tls" else "none"
                     }
-                    if (isTrojan) security = "tls"
                 }
             )
 
-            // Server section
             SectionHeader(stringResource(R.string.server))
             OutlinedTextField(
                 value = serverAddress,
@@ -453,7 +405,6 @@ fun ProxyEditorScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
             )
 
-            // Protocol-specific credential fields
             if (isNaive) {
                 OutlinedTextField(
                     value = naiveUsername,
@@ -509,31 +460,9 @@ fun ProxyEditorScreen(
                     ),
                     onSelect = { ssMethod = it }
                 )
-            } else if (isHysteria) {
-                // Matches iOS ProxyEditorView: Hysteria exposes only a password
-                // and an upload-bandwidth field; SNI is preserved from the
-                // original config (populated via URL import) but not edited here.
-                OutlinedTextField(
-                    value = hysteriaPassword,
-                    onValueChange = { hysteriaPassword = it },
-                    label = { Text(stringResource(R.string.password)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation()
-                )
-                OutlinedTextField(
-                    value = hysteriaUploadMbpsText,
-                    onValueChange = { new ->
-                        hysteriaUploadMbpsText = new.filter { it.isDigit() }
-                    },
-                    label = { Text(stringResource(R.string.upload_mbps)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                )
             } else if (isTrojan) {
-                // Matches iOS ProxyEditorView: Trojan exposes only a password;
-                // TLS SNI/ALPN/fingerprint live in the shared TLS section below.
+                // Trojan exposes only a password here; TLS SNI/ALPN/fingerprint
+                // live in the shared TLS section below.
                 OutlinedTextField(
                     value = trojanPassword,
                     onValueChange = { trojanPassword = it },
@@ -543,7 +472,6 @@ fun ProxyEditorScreen(
                     visualTransformation = PasswordVisualTransformation()
                 )
             } else {
-                // VLESS fields
                 OutlinedTextField(
                     value = uuid,
                     onValueChange = { uuid = it },
@@ -559,11 +487,8 @@ fun ProxyEditorScreen(
                 )
             }
 
-            // Transport section: only VLESS exposes a user-selectable transport
-            // (matches iOS `if isVLESS { Section("Transport") }`). Trojan
-            // mandates TCP+TLS, Hysteria runs over QUIC, Naive/SOCKS5/Shadowsocks
-            // have no transport knob on iOS either.
-            val isVless = selectedProtocol == OutboundProtocol.VLESS
+            // Only VLESS exposes a user-selectable transport. Trojan mandates
+            // TCP+TLS; Naive/SOCKS5/Shadowsocks have no transport knob.
             if (isVless) {
                 SectionHeader(stringResource(R.string.transport))
                 DropdownField(
@@ -714,30 +639,19 @@ fun ProxyEditorScreen(
                 }
             }
 
-            // TLS section (not for Naive, SOCKS5, or Hysteria — Hysteria's
-            // QUIC handshake carries its own TLS internally, so there's nothing
-            // for the user to configure here.)
-            if (!isNaive && !isSocks5 && !isHysteria) {
+            if (isVless || isTrojan) {
                 SectionHeader("TLS")
                 // For Trojan the TLS layer is mandatory: don't show the
-                // none/TLS/Reality picker, just render the TLS fields
-                // directly (matches iOS ProxyEditorView).
+                // none/TLS/Reality picker, just render the TLS fields directly.
                 if (!isTrojan) {
                     DropdownField(
                         label = stringResource(R.string.security),
                         selectedValue = security,
-                        options = if (isShadowsocks) {
-                            listOf(
-                                "none" to stringResource(R.string.none),
-                                "tls" to "TLS"
-                            )
-                        } else {
-                            listOf(
-                                "none" to stringResource(R.string.none),
-                                "tls" to "TLS",
-                                "reality" to "Reality"
-                            )
-                        },
+                        options = listOf(
+                            "none" to stringResource(R.string.none),
+                            "tls" to "TLS",
+                            "reality" to "Reality"
+                        ),
                         onSelect = { security = it }
                     )
                 }
@@ -927,7 +841,7 @@ private fun FingerprintDropdown(
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
-            TlsFingerprint.entries.forEach { fp ->
+            TlsFingerprint.pickerFingerprints.forEach { fp ->
                 DropdownMenuItem(
                     text = { Text(fp.displayName) },
                     onClick = {

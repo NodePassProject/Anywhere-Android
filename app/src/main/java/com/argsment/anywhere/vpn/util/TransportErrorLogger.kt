@@ -6,23 +6,17 @@ import com.argsment.anywhere.vpn.protocol.naive.http2.Http2Error
 /**
  * Shared error-reporting helper for TCP/UDP connections.
  *
- * Consolidates the classification logic that both [com.argsment.anywhere.vpn.LwipTcpConnection]
- * and [com.argsment.anywhere.vpn.LwipUdpFlow] used to duplicate: trimming
- * redundant prefixes from socket error descriptions, demoting expected
- * cascade errors so one peer reset doesn't produce a wall of lines, and
- * attributing failures to a recent tunnel interruption when one is still
- * within the attribution window.
- *
- * Mirrors iOS `TransportErrorLogger` in
- * `Anywhere Network Extension/TransportErrorLogger.swift`.
+ * Consolidates classification logic: trimming redundant prefixes from
+ * socket error descriptions, demoting expected cascade errors so one peer
+ * reset doesn't produce a wall of lines, and attributing failures to a
+ * recent tunnel interruption when one is still within the attribution
+ * window.
  */
 object TransportErrorLogger {
 
-    // -- Formatting --
-
     /**
      * Strips the `"<Operation>: "` prefix that protocol errors already bake
-     * in, because the operation word is also in our log line.
+     * in, since the operation word is also in the log line.
      */
     fun conciseErrorDescription(error: Throwable): String {
         var message = (error.message ?: error.toString()).trim()
@@ -42,34 +36,48 @@ object TransportErrorLogger {
     }
 
     /**
-     * Matches strerror outputs for errors that only occur after the peer
-     * has already dropped — secondary to an earlier RST/EOF, no new
-     * information. Mirrors iOS `TransportErrorLogger` `EPIPE` demotion to
-     * `.cascade`.
+     * Walks the cause chain looking for an [android.system.ErrnoException].
+     * Returns the underlying POSIX errno, or null if none is found.
      */
-    private fun isPeerGoneCascade(description: String): Boolean =
-        description == "Broken pipe"
+    private fun extractErrno(error: Throwable): Int? {
+        var cur: Throwable? = error
+        var depth = 0
+        while (cur != null && depth < 8) {
+            if (cur is android.system.ErrnoException) return cur.errno
+            cur = cur.cause
+            depth++
+        }
+        return null
+    }
 
     /**
-     * Matches strerror outputs for a peer-initiated RST — normal
-     * termination from the remote's side, not a failure of ours. Mirrors
-     * iOS `TransportErrorLogger` `ECONNRESET` demotion to `.reset` so
-     * peer resets stay visible in the log viewer but out of the error
-     * stream. iOS uses `SocketError.posixErrno == ECONNRESET`; Android
-     * matches against the localized description the kernel surfaces
-     * through `ErrnoException` / `IOException`.
+     * Matches errors that only occur after the peer has already dropped —
+     * secondary to an earlier RST/EOF, no new information. Errno-based to
+     * match iOS `SocketError.posixErrno == EPIPE`; falls back to a string
+     * check for paths where the JVM didn't preserve errno.
      */
-    private fun isPeerReset(description: String): Boolean =
-        description == "Connection reset by peer" ||
-            description == "Connection reset"
+    private fun isPeerGoneCascade(error: Throwable, description: String): Boolean {
+        val errno = extractErrno(error)
+        if (errno == android.system.OsConstants.EPIPE) return true
+        return description == "Broken pipe"
+    }
 
-    // -- lwIP Error Codes --
+    /**
+     * Peer-initiated RST — normal termination from the remote, not a failure
+     * here. Demoted to info so peer resets stay visible in the log viewer
+     * but out of the error stream. Errno-based to match iOS
+     * `SocketError.posixErrno == ECONNRESET`.
+     */
+    private fun isPeerReset(error: Throwable, description: String): Boolean {
+        val errno = extractErrno(error)
+        if (errno == android.system.OsConstants.ECONNRESET) return true
+        return description == "Connection reset by peer" ||
+            description == "Connection reset"
+    }
 
     /**
      * Human-readable description for an lwIP `err_t` value delivered via
-     * the `tcp_err` callback. Mirrors the definitions in
-     * `lwip/src/include/lwip/err.h` and iOS
-     * `TransportErrorLogger.describeLwIPError`.
+     * the `tcp_err` callback.
      */
     fun describeLwIPError(err: Int): String = when (err) {
         0 -> "ERR_OK"
@@ -92,21 +100,16 @@ object TransportErrorLogger {
         else -> "lwIP err=$err"
     }
 
-    // -- Classified Logging --
-
     /**
      * Logs a transport-level failure with a consistent shape and level.
      *
      * Classification, in order:
-     * 1. [Http2Error] is downgraded to `debug` — GOAWAY / stream reset
-     *    is normal churn in a long-lived h2 tunnel and doesn't indicate
-     *    a user-visible problem.
+     * 1. [Http2Error] is downgraded to `debug` — GOAWAY / stream reset is
+     *    normal churn in a long-lived h2 tunnel.
      * 2. "Broken pipe" on send is demoted to `debug` — by definition a
-     *    cascade behind an earlier receive error or RST. Logging it
-     *    would double-report.
+     *    cascade behind an earlier receive error or RST.
      * 3. "Connection reset by peer" is demoted to `info` — expected
-     *    termination from the remote's side, not our failure. Matches
-     *    iOS `ECONNRESET` → `.reset` demotion.
+     *    termination from the remote's side, not a local failure.
      * 4. Otherwise the failure logs at [defaultLevel].
      */
     fun log(
@@ -124,12 +127,12 @@ object TransportErrorLogger {
             return
         }
 
-        if (isPeerGoneCascade(errorDescription)) {
+        if (isPeerGoneCascade(error, errorDescription)) {
             logger.debug("$prefix $operation after peer close: $endpoint: $errorDescription")
             return
         }
 
-        if (isPeerReset(errorDescription)) {
+        if (isPeerReset(error, errorDescription)) {
             logger.info("$prefix $operation failed: $endpoint: $errorDescription")
             return
         }

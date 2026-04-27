@@ -7,8 +7,6 @@ import java.util.Locale
 /**
  * Country-bypass catalog: supported country codes + language → country suggestion,
  * plus domain rules per country. All data loaded from Rules.db metadata/rules.
- *
- * Swift counterpart: [Shared/Catalog/CountryBypassCatalog.swift].
  */
 class CountryBypassCatalog private constructor(
     val supportedCountryCodes: List<String>,

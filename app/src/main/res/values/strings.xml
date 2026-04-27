@@ -1,6 +1,10 @@
 <resources>
     <string name="app_name">Anywhere</string>
 
+    <!-- Notifications -->
+    <string name="routing_rules_updated_title">Routing Rules Updated</string>
+    <string name="routing_rules_updated_message">The proxy used by the following routing rules was deleted. They have been reset to Default: %1$s</string>
+
     <!-- General -->
     <string name="about">About</string>
     <string name="acknowledgements">Acknowledgements</string>
@@ -136,6 +140,7 @@
     <string name="remnawave_hwid">Remnawave HWID</string>
     <string name="remnawave_hwid_prompt">Enable Remnawave HWID to continue.</string>
     <string name="enable">Enable</string>
+    <string name="block_quic">Block QUIC</string>
 
     <!-- Custom Rule Set -->
     <string name="custom">Custom</string>
@@ -184,7 +189,6 @@
     <!-- Phase 9: Proxy Editor -->
     <string name="protocol_label">Protocol</string>
     <string name="password">Password</string>
-    <string name="upload_mbps">Upload (Mbps)</string>
     <string name="username">Username</string>
     <string name="method">Method</string>
     <string name="grpc_service_name">Service Name</string>
@@ -193,7 +197,7 @@
 
     <!-- Phase 9: Proxy List -->
     <string name="copy_link">Copy Link</string>
-    <string name="supports_proxy_link">Supports VLESS, Shadowsocks, NaiveProxy, QUIC, subscription, and Clash links</string>
+    <string name="supports_proxy_link">Supports VLESS, Shadowsocks, NaiveProxy, subscription, and Clash links</string>
 
     <!-- Formatted strings -->
     <string name="latency_ms">%d ms</string>

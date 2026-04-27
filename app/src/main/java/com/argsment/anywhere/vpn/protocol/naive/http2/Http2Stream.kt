@@ -9,12 +9,8 @@ import kotlinx.coroutines.channels.Channel
 private val logger = AnywhereLogger("HTTP2Stream")
 
 /**
- * A single HTTP/2 CONNECT tunnel stream, multiplexed on an [Http2Session].
- *
- * Implements [NaiveTunnel] so it can be used directly by [NaiveProxyConnection]
- * without an [Http2Tunnel] wrapper.
- *
- * Lifecycle: IDLE → TUNNEL_PENDING → TUNNEL_OPEN → CLOSED
+ * A single HTTP/2 CONNECT tunnel stream multiplexed on an [Http2Session].
+ * Lifecycle: IDLE → TUNNEL_PENDING → TUNNEL_OPEN → CLOSED.
  */
 class Http2Stream(
     val streamID: Int,
@@ -27,13 +23,10 @@ class Http2Stream(
     @Volatile
     private var state = State.IDLE
 
-    /** Per-stream flow control (send window + receive tracking). */
     val flowControl = Http2StreamFlowControl(session.serverInitialWindowSize)
 
-    /** Data channel — session's read loop sends DATA payloads here. */
     private val dataChannel = Channel<ByteArray>(Channel.UNLIMITED)
 
-    /** Completes when the CONNECT response arrives. */
     private val tunnelReady = CompletableDeferred<Unit>()
 
     override var negotiatedPaddingType = NaivePaddingNegotiator.PaddingType.NONE
@@ -41,12 +34,6 @@ class Http2Stream(
 
     override val isConnected: Boolean get() = state == State.TUNNEL_OPEN
 
-    // -- Tunnel Lifecycle --
-
-    /**
-     * Opens a CONNECT tunnel on this stream.
-     * Sends the CONNECT request via the session, then suspends until the server responds.
-     */
     override suspend fun openTunnel() {
         if (state != State.IDLE) throw Http2Error.ProtocolError("Stream $streamID: invalid state for openTunnel")
         state = State.TUNNEL_PENDING
@@ -61,8 +48,6 @@ class Http2Stream(
         }
     }
 
-    // -- Data Transfer --
-
     override suspend fun sendData(data: ByteArray) {
         if (state != State.TUNNEL_OPEN) throw Http2Error.NotReady()
         session.sendData(streamID, data, flowControl)
@@ -70,26 +55,35 @@ class Http2Stream(
 
     override suspend fun receiveData(): ByteArray? {
         if (state == State.CLOSED) return null
-        return try {
+        val data = try {
             dataChannel.receive()
         } catch (e: Exception) {
-            null
+            return null
         }
+        // Defer WINDOW_UPDATE to consume time so back-pressure is preserved
+        // through the channel — mirrors iOS HTTP2Stream.acknowledgeConsumedData.
+        if (data.isNotEmpty()) {
+            session.acknowledgeConsumedData(streamID, data.size)
+        }
+        return data
     }
 
     override fun close() {
         if (state == State.CLOSED) return
+        val priorState = state
         state = State.CLOSED
         dataChannel.close()
+        flowControl.cancelAwaiters(Http2Error.ConnectionFailed("Stream closed"))
+        // Send RST_STREAM(CANCEL) so the server reclaims the slot when we
+        // close while the stream is still open. Mirrors iOS HTTP2Stream.close
+        // (HTTP2Stream.swift:160-184).
+        if (priorState == State.TUNNEL_PENDING || priorState == State.TUNNEL_OPEN) {
+            session.sendReset(streamID, Http2Framer.ErrorCode.CANCEL)
+        }
         session.removeStream(streamID)
     }
 
-    // -- Session Callbacks (called from session's read loop) --
-
-    /**
-     * Delivers a HEADERS frame (CONNECT response) to this stream.
-     * Completes [tunnelReady] on 200, or fails it on error status.
-     */
+    /** Completes [tunnelReady] on a 200 CONNECT response, fails it on error status. */
     fun deliverHeaders(headers: List<Pair<String, String>>) {
         val statusHeader = headers.firstOrNull { it.first == ":status" }
         if (statusHeader == null) {
@@ -117,54 +111,60 @@ class Http2Stream(
         }
     }
 
-    /** Delivers a DATA payload to this stream's data channel. */
     fun deliverData(data: ByteArray) {
         if (state == State.CLOSED) return
         dataChannel.trySend(data)
     }
 
-    /** Applies a WINDOW_UPDATE for this stream. */
     fun deliverWindowUpdate(increment: Int) {
         flowControl.applyWindowUpdate(increment)
     }
 
-    /** Handles RST_STREAM for this stream. */
     fun deliverReset() {
         if (state == State.CLOSED) return
         val wasOpen = state == State.TUNNEL_OPEN
         state = State.CLOSED
         dataChannel.close()
+        flowControl.cancelAwaiters(Http2Error.StreamReset(streamID))
 
         if (!wasOpen) {
             tunnelReady.completeExceptionally(Http2Error.StreamReset(streamID))
         }
     }
 
-    /** Handles GOAWAY affecting this stream. */
+    /** Server END_STREAM = clean half-close. Closes data channel without throwing. */
+    fun deliverEndStream() {
+        if (state == State.CLOSED) return
+        state = State.CLOSED
+        dataChannel.close()
+        flowControl.cancelAwaiters(Http2Error.ConnectionFailed("Stream END_STREAM"))
+    }
+
     fun deliverGoaway() {
         if (state == State.CLOSED) return
         val wasOpen = state == State.TUNNEL_OPEN
         state = State.CLOSED
         dataChannel.close()
+        flowControl.cancelAwaiters(Http2Error.Goaway())
 
         if (!wasOpen) {
             tunnelReady.completeExceptionally(Http2Error.Goaway())
         }
     }
 
-    /** Handles a transport-level error. */
     fun deliverError(error: Exception) {
         if (state == State.CLOSED) return
         val wasOpen = state == State.TUNNEL_OPEN
         state = State.CLOSED
         dataChannel.close()
+        flowControl.cancelAwaiters(error)
 
         if (!wasOpen) {
             tunnelReady.completeExceptionally(error)
         }
     }
 
-    /** Adjusts the send window when SETTINGS_INITIAL_WINDOW_SIZE changes (RFC 7540 §6.9.2). */
+    /** RFC 7540 §6.9.2: adjusts send window when SETTINGS_INITIAL_WINDOW_SIZE changes. */
     fun adjustSendWindow(delta: Int) {
         flowControl.adjustSendWindow(delta)
     }

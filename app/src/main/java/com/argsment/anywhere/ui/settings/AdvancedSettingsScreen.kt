@@ -12,6 +12,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Science
@@ -35,11 +36,6 @@ import androidx.compose.ui.unit.dp
 import com.argsment.anywhere.R
 import com.argsment.anywhere.viewmodel.VpnViewModel
 
-/**
- * Advanced Settings screen, matching iOS `AdvancedSettingsView`:
- *   Network → IPv6, Encrypted DNS
- *   Diagnostics → Logs
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AdvancedSettingsScreen(
@@ -91,6 +87,7 @@ private fun AdvancedSettingsRoot(
 ) {
     var experimentalEnabled by remember { mutableStateOf(viewModel.experimentalEnabled) }
     var remnawaveHWIDEnabled by remember { mutableStateOf(viewModel.remnawaveHWIDEnabled) }
+    var blockQuicEnabled by remember { mutableStateOf(viewModel.blockQuicEnabled) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -112,6 +109,16 @@ private fun AdvancedSettingsRoot(
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             SectionHeader(stringResource(R.string.network))
+            SettingsSwitch(
+                icon = Icons.Filled.Block,
+                iconTint = Color(0xFFE53935),
+                label = stringResource(R.string.block_quic),
+                checked = blockQuicEnabled,
+                onCheckedChange = {
+                    blockQuicEnabled = it
+                    viewModel.blockQuicEnabled = it
+                }
+            )
             SettingsNavRow(
                 icon = Icons.Filled.Language,
                 iconTint = Color(0xFF2196F3),

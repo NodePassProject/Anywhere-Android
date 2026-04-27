@@ -22,13 +22,10 @@ import kotlin.coroutines.resumeWithException
 private val logger = AnywhereLogger("GRPC")
 
 /**
- * gRPC transport over HTTP/2. Mirrors iOS `GRPCConnection`.
+ * gRPC transport over HTTP/2.
  *
  * Opens a single bidirectional streaming RPC to `/<serviceName>/Tun` (or `/TunMulti`) and
  * tunnels raw bytes as `Hunk` protobuf messages framed with gRPC's 5-byte length prefix.
- *
- * Uses Android's pure-Kotlin HPACK / HTTP-2 framer (adapted from `XHttpConnection`'s
- * implementation) rather than pulling in a new HTTP/2 library.
  */
 class GrpcConnection private constructor(
     private val configuration: GrpcConfiguration,
@@ -37,8 +34,6 @@ class GrpcConnection private constructor(
     private val transportReceive: suspend () -> ByteArray?,
     private val transportCancel: () -> Unit
 ) {
-    // -- State --
-
     private val lock = ReentrantLock()
     private var _isConnected: Boolean = true
 
@@ -54,9 +49,7 @@ class GrpcConnection private constructor(
     private var decodedBuffer = ByteArray(0)
     private var decodedBufferLen = 0
 
-    /** Whether the gRPC response HEADERS (status 200) have been validated. */
     private var h2ResponseReceived = false
-    /** Whether the server has closed its side of the stream. */
     private var h2StreamClosed = false
 
     /** Peer's flow-control windows (bytes we can still send). */
@@ -64,10 +57,8 @@ class GrpcConnection private constructor(
     private var h2PeerStreamSendWindow: Int = 65535
     private var h2PeerInitialWindowSize: Int = 65535
 
-    /** Our local window sizes. */
     private var h2LocalWindowSize: Int = H2_STREAM_WINDOW_SIZE
 
-    /** Maximum HTTP/2 frame payload size. */
     private var h2MaxFrameSize: Int = 16384
 
     /** Bytes received but not yet acknowledged via WINDOW_UPDATE. */
@@ -77,7 +68,6 @@ class GrpcConnection private constructor(
     /** Send-side continuations waiting for a WINDOW_UPDATE. */
     private val h2FlowResumptions: MutableList<CancellableContinuation<Unit>> = mutableListOf()
 
-    /** Keepalive ping coroutine (null when idleTimeout == 0). */
     private var keepaliveJob: Job? = null
     private val keepaliveScope: CoroutineScope by lazy {
         CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -92,9 +82,6 @@ class GrpcConnection private constructor(
         }
     }
 
-    // -- Factory constructors --
-
-    /** gRPC over a plain [NioSocket]. */
     constructor(
         socket: NioSocket,
         configuration: GrpcConfiguration,
@@ -107,7 +94,6 @@ class GrpcConnection private constructor(
         transportCancel = { socket.forceCancel() }
     )
 
-    /** gRPC over a [TlsRecordConnection] (TLS or Reality). */
     constructor(
         tlsConnection: TlsRecordConnection,
         configuration: GrpcConfiguration,
@@ -120,7 +106,6 @@ class GrpcConnection private constructor(
         transportCancel = { tlsConnection.cancel() }
     )
 
-    /** gRPC over a chained transport (proxy chain). */
     constructor(
         transport: Transport,
         configuration: GrpcConfiguration,
@@ -133,7 +118,6 @@ class GrpcConnection private constructor(
         transportCancel = { transport.forceCancel() }
     )
 
-    /** gRPC over a generic [TransportClosures] (shared with XHTTP). */
     constructor(
         closures: TransportClosures,
         configuration: GrpcConfiguration,
@@ -146,10 +130,6 @@ class GrpcConnection private constructor(
         transportCancel = closures.cancel
     )
 
-    // =========================================================================
-    // Setup
-    // =========================================================================
-
     /**
      * Performs the HTTP/2 connection preface + SETTINGS exchange and opens the bidirectional
      * gRPC stream. HEADERS is sent eagerly without waiting for the server's SETTINGS.
@@ -157,7 +137,6 @@ class GrpcConnection private constructor(
     suspend fun performSetup() {
         var initData = ByteArray(0)
 
-        // HTTP/2 connection preface
         initData += H2_PREFACE
 
         // Client SETTINGS: ENABLE_PUSH=0, INITIAL_WINDOW_SIZE, MAX_HEADER_LIST_SIZE=10MB
@@ -231,7 +210,7 @@ class GrpcConnection private constructor(
                             throw GrpcError.SetupFailed("gRPC response rejected: $rejection")
                         }
                         // Trailers-only response with :status 200 — HTTP succeeded but
-                        // the gRPC call itself failed.
+                        // the gRPC call itself failed
                         if ((frame.flags.toInt() and H2_FLAG_END_STREAM.toInt()) != 0) {
                             val grpcError = parseGrpcTrailer(frame.payload)
                             lock.withLock { h2StreamClosed = true }
@@ -277,10 +256,6 @@ class GrpcConnection private constructor(
         }
     }
 
-    // =========================================================================
-    // Public send / receive
-    // =========================================================================
-
     /** Sends a raw byte chunk as one gRPC `Hunk` message. */
     suspend fun send(data: ByteArray) {
         val hunk = encodeHunk(data)
@@ -321,10 +296,6 @@ class GrpcConnection private constructor(
         }
         transportCancel()
     }
-
-    // =========================================================================
-    // HTTP/2 frame I/O
-    // =========================================================================
 
     private data class H2Frame(val type: Byte, val flags: Byte, val streamId: UInt, val payload: ByteArray)
 
@@ -448,56 +419,46 @@ class GrpcConnection private constructor(
         }
     }
 
-    // =========================================================================
-    // HPACK encoding for request HEADERS
-    // =========================================================================
-
     private fun encodeGrpcRequestHeaders(): ByteArray {
         val block = mutableListOf<Byte>()
 
-        // Pseudo-header order required by RFC 7540 §8.1.2.1: :authority, :method, :path, :scheme.
+        // Pseudo-header order required by RFC 7540 §8.1.2.1: :authority, :method, :path, :scheme
 
-        // :authority — literal w/ incremental indexing, static-table name index 1.
         val authBytes = hpackEncodeInteger(1, 6)
         authBytes[0] = (authBytes[0].toInt() or 0x40).toByte()
         block.addAll(authBytes.toList())
         block.addAll(hpackEncodeString(authority).toList())
 
-        // :method POST — static-table entry 3.
+        // :method POST — static-table entry 3
         block.add(0x83.toByte())
 
-        // :path — literal w/ incremental indexing, static-table name index 4.
         val path = configuration.resolvedPath()
         val pathBytes = hpackEncodeInteger(4, 6)
         pathBytes[0] = (pathBytes[0].toInt() or 0x40).toByte()
         block.addAll(pathBytes.toList())
         block.addAll(hpackEncodeString(path).toList())
 
-        // :scheme https — static-table entry 7.
+        // :scheme https — static-table entry 7
         block.add(0x87.toByte())
 
-        // content-type: application/grpc — literal w/ incremental indexing, name index 31.
         val ctBytes = hpackEncodeInteger(31, 6)
         ctBytes[0] = (ctBytes[0].toInt() or 0x40).toByte()
         block.addAll(ctBytes.toList())
         block.addAll(hpackEncodeString("application/grpc").toList())
 
-        // te: trailers — required by the gRPC protocol spec.
+        // te: trailers — required by the gRPC protocol spec
         block.add(0x40)
         block.addAll(hpackEncodeString("te").toList())
         block.addAll(hpackEncodeString("trailers").toList())
 
-        // grpc-encoding: identity
         block.add(0x40)
         block.addAll(hpackEncodeString("grpc-encoding").toList())
         block.addAll(hpackEncodeString("identity").toList())
 
-        // grpc-accept-encoding: identity
         block.add(0x40)
         block.addAll(hpackEncodeString("grpc-accept-encoding").toList())
         block.addAll(hpackEncodeString("identity").toList())
 
-        // user-agent — literal w/ incremental indexing, static-table name index 58.
         val ua = configuration.userAgent.ifEmpty { DEFAULT_USER_AGENT }
         val uaBytes = hpackEncodeInteger(58, 6)
         uaBytes[0] = (uaBytes[0].toInt() or 0x40).toByte()
@@ -527,10 +488,6 @@ class GrpcConnection private constructor(
         return lenBytes + bytes
     }
 
-    // =========================================================================
-    // HPACK decoding for response :status
-    // =========================================================================
-
     /** Returns `null` if :status is 200, or a short error string otherwise. */
     private fun checkH2ResponseStatus(headerBlock: ByteArray): String? {
         if (headerBlock.isEmpty()) return "empty header block"
@@ -551,7 +508,6 @@ class GrpcConnection private constructor(
 
         val first = headerBlock[offset].toInt() and 0xFF
 
-        // Indexed representation (top bit set).
         if ((first and 0x80) != 0) {
             if (first == 0x88) return null
             return when (first) {
@@ -565,7 +521,7 @@ class GrpcConnection private constructor(
             }
         }
 
-        // Literal :status — static table indices 8-14 all have name ":status".
+        // Literal :status — static table indices 8-14 all have name ":status"
         val nameIndex: Int = when {
             (first and 0xF0) == 0x00 -> first and 0x0F
             (first and 0xF0) == 0x10 -> first and 0x0F
@@ -619,11 +575,6 @@ class GrpcConnection private constructor(
         return sb.toString()
     }
 
-    // =========================================================================
-    // gRPC / protobuf framing
-    // =========================================================================
-
-    /** Encodes a `Hunk` protobuf message with `bytes data = 1`. */
     private fun encodeHunk(data: ByteArray): ByteArray {
         val varint = varintEncode(data.size.toLong())
         val out = ByteArray(1 + varint.size + data.size)
@@ -725,10 +676,6 @@ class GrpcConnection private constructor(
         return out.toByteArray()
     }
 
-    // =========================================================================
-    // HTTP/2 DATA send (respects flow control)
-    // =========================================================================
-
     /**
      * Sends [data] as one or more HTTP/2 DATA frames on the gRPC stream, respecting peer
      * flow control. If the window fills, the remainder waits for a WINDOW_UPDATE.
@@ -792,10 +739,6 @@ class GrpcConnection private constructor(
             }
         }
     }
-
-    // =========================================================================
-    // Receive pipeline
-    // =========================================================================
 
     /**
      * Pulls H2 frames until at least one application payload is ready, handling
@@ -1014,10 +957,6 @@ class GrpcConnection private constructor(
         }
     }
 
-    // =========================================================================
-    // Keepalive
-    // =========================================================================
-
     private fun startKeepaliveIfNeeded() {
         val interval = configuration.idleTimeout
         if (interval <= 0) return
@@ -1028,7 +967,6 @@ class GrpcConnection private constructor(
                     delay(interval * 1000L)
                     val closed = lock.withLock { h2StreamClosed }
                     if (closed) return@launch
-                    // 8-byte opaque PING payload.
                     val ping = buildH2Frame(
                         H2_FRAME_PING, 0, 0u,
                         byteArrayOf(0, 0, 0, 0, 0, 0, 0, 0)
@@ -1038,10 +976,6 @@ class GrpcConnection private constructor(
             }
         }
     }
-
-    // =========================================================================
-    // gRPC trailer + HPACK decoder (minimal)
-    // =========================================================================
 
     /** Returns a [GrpcError.CallFailed] on non-OK grpc-status, or null otherwise. */
     private fun parseGrpcTrailer(payload: ByteArray): GrpcError? {
@@ -1215,10 +1149,6 @@ class GrpcConnection private constructor(
         return String(out.toByteArray(), Charsets.UTF_8)
     }
 
-    // =========================================================================
-    // Error payload descriptions
-    // =========================================================================
-
     private fun describeGoaway(payload: ByteArray): String {
         if (payload.size < 8) return "truncated GOAWAY payload"
         val lastStreamId = ((payload[0].toInt() and 0xFF) shl 24) or
@@ -1265,10 +1195,6 @@ class GrpcConnection private constructor(
         else -> "UNKNOWN($code)"
     }
 
-    // =========================================================================
-    // Constants + static tables
-    // =========================================================================
-
     companion object {
         /** HTTP/2 connection preface (RFC 7540 §3.5). */
         private val H2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".toByteArray(Charsets.UTF_8)
@@ -1302,7 +1228,7 @@ class GrpcConnection private constructor(
         private val DEFAULT_USER_AGENT: String
             get() = com.argsment.anywhere.vpn.protocol.ProxyUserAgent.chrome
 
-        // -- HPACK Huffman table (RFC 7541 Appendix B); only used when decoding trailers. --
+        /** HPACK Huffman table (RFC 7541 Appendix B); only used when decoding trailers. */
         private data class HuffmanKey(val code: Long, val length: Int)
 
         private val HUFFMAN_TABLE: Map<HuffmanKey, Int> = buildMap {
@@ -1371,7 +1297,71 @@ class GrpcConnection private constructor(
                 intArrayOf(0x7b, 7, 122), intArrayOf(0x7ffe, 15, 123),
                 intArrayOf(0x7fc, 11, 124), intArrayOf(0x3ffd, 14, 125),
                 intArrayOf(0x1ffd, 13, 126), intArrayOf(0xffffffc, 28, 127),
-                intArrayOf(0x3fffffff, 30, 256)  // EOS
+                intArrayOf(0xfffe6, 20, 128), intArrayOf(0x3fffd2, 22, 129),
+                intArrayOf(0xfffe7, 20, 130), intArrayOf(0xfffe8, 20, 131),
+                intArrayOf(0x3fffd3, 22, 132), intArrayOf(0x3fffd4, 22, 133),
+                intArrayOf(0x3fffd5, 22, 134), intArrayOf(0x7fffd9, 23, 135),
+                intArrayOf(0x3fffd6, 22, 136), intArrayOf(0x7fffda, 23, 137),
+                intArrayOf(0x7fffdb, 23, 138), intArrayOf(0x7fffdc, 23, 139),
+                intArrayOf(0x7fffdd, 23, 140), intArrayOf(0x7fffde, 23, 141),
+                intArrayOf(0xffffeb, 24, 142), intArrayOf(0x7fffdf, 23, 143),
+                intArrayOf(0xffffec, 24, 144), intArrayOf(0xffffed, 24, 145),
+                intArrayOf(0x3fffd7, 22, 146), intArrayOf(0x7fffe0, 23, 147),
+                intArrayOf(0xffffee, 24, 148), intArrayOf(0x7fffe1, 23, 149),
+                intArrayOf(0x7fffe2, 23, 150), intArrayOf(0x7fffe3, 23, 151),
+                intArrayOf(0x7fffe4, 23, 152), intArrayOf(0x1fffdc, 21, 153),
+                intArrayOf(0x3fffd8, 22, 154), intArrayOf(0x7fffe5, 23, 155),
+                intArrayOf(0x3fffd9, 22, 156), intArrayOf(0x7fffe6, 23, 157),
+                intArrayOf(0x7fffe7, 23, 158), intArrayOf(0xffffef, 24, 159),
+                intArrayOf(0x3fffda, 22, 160), intArrayOf(0x1fffdd, 21, 161),
+                intArrayOf(0xfffe9, 20, 162), intArrayOf(0x3fffdb, 22, 163),
+                intArrayOf(0x3fffdc, 22, 164), intArrayOf(0x7fffe8, 23, 165),
+                intArrayOf(0x7fffe9, 23, 166), intArrayOf(0x1fffde, 21, 167),
+                intArrayOf(0x7fffea, 23, 168), intArrayOf(0x3fffdd, 22, 169),
+                intArrayOf(0x3fffde, 22, 170), intArrayOf(0xfffff0, 24, 171),
+                intArrayOf(0x1fffdf, 21, 172), intArrayOf(0x3fffdf, 22, 173),
+                intArrayOf(0x7fffeb, 23, 174), intArrayOf(0x7fffec, 23, 175),
+                intArrayOf(0x1fffe0, 21, 176), intArrayOf(0x1fffe1, 21, 177),
+                intArrayOf(0x3fffe0, 22, 178), intArrayOf(0x1fffe2, 21, 179),
+                intArrayOf(0x7fffed, 23, 180), intArrayOf(0x3fffe1, 22, 181),
+                intArrayOf(0x7fffee, 23, 182), intArrayOf(0x7fffef, 23, 183),
+                intArrayOf(0xfffea, 20, 184), intArrayOf(0x3fffe2, 22, 185),
+                intArrayOf(0x3fffe3, 22, 186), intArrayOf(0x3fffe4, 22, 187),
+                intArrayOf(0x7ffff0, 23, 188), intArrayOf(0x3fffe5, 22, 189),
+                intArrayOf(0x3fffe6, 22, 190), intArrayOf(0x7ffff1, 23, 191),
+                intArrayOf(0x3ffffe0, 26, 192), intArrayOf(0x3ffffe1, 26, 193),
+                intArrayOf(0xfffeb, 20, 194), intArrayOf(0x7fff1, 19, 195),
+                intArrayOf(0x3fffe7, 22, 196), intArrayOf(0x7ffff2, 23, 197),
+                intArrayOf(0x3fffe8, 22, 198), intArrayOf(0x1ffffec, 25, 199),
+                intArrayOf(0x3ffffe2, 26, 200), intArrayOf(0x3ffffe3, 26, 201),
+                intArrayOf(0x3ffffe4, 26, 202), intArrayOf(0x7ffffde, 27, 203),
+                intArrayOf(0x7ffffdf, 27, 204), intArrayOf(0x3ffffe5, 26, 205),
+                intArrayOf(0xfffff1, 24, 206), intArrayOf(0x1ffffed, 25, 207),
+                intArrayOf(0x7fff2, 19, 208), intArrayOf(0x1fffe3, 21, 209),
+                intArrayOf(0x3ffffe6, 26, 210), intArrayOf(0x7ffffe0, 27, 211),
+                intArrayOf(0x7ffffe1, 27, 212), intArrayOf(0x3ffffe7, 26, 213),
+                intArrayOf(0x7ffffe2, 27, 214), intArrayOf(0xfffff2, 24, 215),
+                intArrayOf(0x1fffe4, 21, 216), intArrayOf(0x1fffe5, 21, 217),
+                intArrayOf(0x3ffffe8, 26, 218), intArrayOf(0x3ffffe9, 26, 219),
+                intArrayOf(0xffffffd, 28, 220), intArrayOf(0x7ffffe3, 27, 221),
+                intArrayOf(0x7ffffe4, 27, 222), intArrayOf(0x7ffffe5, 27, 223),
+                intArrayOf(0xfffec, 20, 224), intArrayOf(0xfffff3, 24, 225),
+                intArrayOf(0xfffed, 20, 226), intArrayOf(0x1fffe6, 21, 227),
+                intArrayOf(0x3fffe9, 22, 228), intArrayOf(0x1fffe7, 21, 229),
+                intArrayOf(0x1fffe8, 21, 230), intArrayOf(0x7ffff3, 23, 231),
+                intArrayOf(0x3fffea, 22, 232), intArrayOf(0x3fffeb, 22, 233),
+                intArrayOf(0x1ffffee, 25, 234), intArrayOf(0x1ffffef, 25, 235),
+                intArrayOf(0xfffff4, 24, 236), intArrayOf(0xfffff5, 24, 237),
+                intArrayOf(0x3ffffea, 26, 238), intArrayOf(0x7ffff4, 23, 239),
+                intArrayOf(0x3ffffeb, 26, 240), intArrayOf(0x7ffffe6, 27, 241),
+                intArrayOf(0x3ffffec, 26, 242), intArrayOf(0x3ffffed, 26, 243),
+                intArrayOf(0x7ffffe7, 27, 244), intArrayOf(0x7ffffe8, 27, 245),
+                intArrayOf(0x7ffffe9, 27, 246), intArrayOf(0x7ffffea, 27, 247),
+                intArrayOf(0x7ffffeb, 27, 248), intArrayOf(0xffffffe, 28, 249),
+                intArrayOf(0x7ffffec, 27, 250), intArrayOf(0x7ffffed, 27, 251),
+                intArrayOf(0x7ffffee, 27, 252), intArrayOf(0x7ffffef, 27, 253),
+                intArrayOf(0x7fffff0, 27, 254), intArrayOf(0x3ffffee, 26, 255),
+                intArrayOf(0x3fffffff, 30, 256)
             )
             for (e in entries) {
                 put(HuffmanKey(e[0].toLong() and 0xFFFFFFFFL, e[1]), e[2])

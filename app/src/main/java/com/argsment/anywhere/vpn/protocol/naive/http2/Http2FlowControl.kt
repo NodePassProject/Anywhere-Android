@@ -1,44 +1,67 @@
 package com.argsment.anywhere.vpn.protocol.naive.http2
 
 /**
- * Per-stream flow control for multiplexed HTTP/2 streams.
- *
- * Each stream has its own send window (limited by the peer) and tracks received bytes
- * to issue WINDOW_UPDATE frames at 50% of the stream's 64 MB receive window.
+ * Per-stream HTTP/2 flow control. Issues WINDOW_UPDATE at 50% of the 64 MB receive window.
  */
 class Http2StreamFlowControl(initialSendWindow: Int = Http2FlowControl.DEFAULT_INITIAL_WINDOW_SIZE) {
 
-    /** How many bytes we can send on this stream. */
     var sendWindow: Int = initialSendWindow
         private set
 
-    /** Bytes received but not yet acknowledged via WINDOW_UPDATE. */
     private var recvConsumed: Int = 0
-
-    /** The receive window size we advertised for streams. */
     private val recvWindowSize: Int = Http2FlowControl.NAIVE_INITIAL_WINDOW_SIZE
 
-    /** Consumes [bytes] from the send window. Returns true if allowed. */
+    private val windowLock = Any()
+    private var windowAwaiter: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
     fun consumeSend(bytes: Int): Boolean {
         if (sendWindow < bytes) return false
         sendWindow -= bytes
         return true
     }
 
-    /** Applies a WINDOW_UPDATE received from the server for this stream. */
     fun applyWindowUpdate(increment: Int) {
-        sendWindow += increment
-    }
-
-    /** Adjusts the send window when SETTINGS_INITIAL_WINDOW_SIZE changes (RFC 7540 §6.9.2). */
-    fun adjustSendWindow(delta: Int) {
-        sendWindow += delta
+        synchronized(windowLock) {
+            sendWindow += increment
+            windowAwaiter?.complete(Unit)
+            windowAwaiter = null
+        }
     }
 
     /**
-     * Records that [bytes] of DATA have been received on this stream.
-     * Returns the WINDOW_UPDATE increment to send, or null if not needed yet.
+     * Suspends until the send window opens (WINDOW_UPDATE arrives or stream closes).
+     * Mirrors iOS HTTP2Session's flow-control wait pattern.
      */
+    suspend fun awaitWindow() {
+        val awaiter = synchronized(windowLock) {
+            if (sendWindow > 0) return
+            windowAwaiter ?: kotlinx.coroutines.CompletableDeferred<Unit>().also {
+                windowAwaiter = it
+            }
+        }
+        awaiter.await()
+    }
+
+    /** Wakes any sender suspended on [awaitWindow] with the given exception. */
+    fun cancelAwaiters(error: Throwable) {
+        synchronized(windowLock) {
+            windowAwaiter?.completeExceptionally(error)
+            windowAwaiter = null
+        }
+    }
+
+    /** RFC 7540 §6.9.2: adjust send window by delta when SETTINGS_INITIAL_WINDOW_SIZE changes. */
+    fun adjustSendWindow(delta: Int) {
+        synchronized(windowLock) {
+            sendWindow += delta
+            if (sendWindow > 0) {
+                windowAwaiter?.complete(Unit)
+                windowAwaiter = null
+            }
+        }
+    }
+
+    /** Returns WINDOW_UPDATE increment when half the receive window has been consumed. */
     fun consumeRecv(bytes: Int): Int? {
         recvConsumed += bytes
         if (recvConsumed >= recvWindowSize / 2) {
@@ -51,62 +74,34 @@ class Http2StreamFlowControl(initialSendWindow: Int = Http2FlowControl.DEFAULT_I
 }
 
 /**
- * Tracks HTTP/2 send and receive flow-control windows for a single connection + stream.
- *
- * Window sizing matches NaiveProxy's bandwidth-delay product calculation:
- * - `kMaxBandwidthMBps = 125`, `kTypicalRttSecond = 0.256`
- * - `kMaxBdpMB = 32 MB`, `kTypicalWindow = 64 MB` (2× BDP)
- * - Session max receive window = 128 MB (2× stream window)
+ * HTTP/2 connection + stream flow control. Window sizing follows NaiveProxy's BDP
+ * calculation: 64 MB stream window, 128 MB connection window.
  */
 class Http2FlowControl {
 
     companion object {
-        /** HTTP/2 default initial window size (RFC 7540 §6.9.2). */
+        /** RFC 7540 §6.9.2 default. */
         const val DEFAULT_INITIAL_WINDOW_SIZE = 65_535
 
-        /** NaiveProxy's stream initial window size (64 MB). */
         const val NAIVE_INITIAL_WINDOW_SIZE = 67_108_864
-
-        /** NaiveProxy's session (connection) max receive window (128 MB). */
         const val NAIVE_SESSION_MAX_RECV_WINDOW = 134_217_728
 
-        /** WINDOW_UPDATE increment to send on stream 0 after SETTINGS exchange.
-         * Expands connection receive window from 65,535 to 128 MB. */
+        /** Increment for the post-SETTINGS WINDOW_UPDATE on stream 0 (raises 65,535 → 128 MB). */
         val CONNECTION_WINDOW_UPDATE_INCREMENT: Int =
             NAIVE_SESSION_MAX_RECV_WINDOW - DEFAULT_INITIAL_WINDOW_SIZE
     }
 
-    // -- Send Windows (limited by remote peer's settings) --
-
-    /** How many bytes we can send on the connection. */
     var connectionSendWindow: Int = DEFAULT_INITIAL_WINDOW_SIZE
         private set
 
-    /** How many bytes we can send on stream 1. */
     var streamSendWindow: Int = DEFAULT_INITIAL_WINDOW_SIZE
         private set
 
-    // -- Receive Windows (limited by our settings) --
-
-    /** Bytes received but not yet acknowledged via WINDOW_UPDATE (connection level). */
     private var connectionRecvConsumed: Int = 0
-
-    /** Bytes received but not yet acknowledged via WINDOW_UPDATE (stream level). */
     private var streamRecvConsumed: Int = 0
-
-    /** The receive window size we advertised for streams. */
     private var streamRecvWindowSize: Int = NAIVE_INITIAL_WINDOW_SIZE
-
-    /** The receive window size for the connection (after our WINDOW_UPDATE). */
     private var connectionRecvWindowSize: Int = NAIVE_SESSION_MAX_RECV_WINDOW
 
-    // -- Send --
-
-    /**
-     * Checks if we can send [bytes] and consumes from both connection and stream send windows.
-     *
-     * Returns true if the send is allowed; false if it would exceed a window.
-     */
     fun consumeSendWindow(bytes: Int): Boolean {
         if (connectionSendWindow < bytes || streamSendWindow < bytes) return false
         connectionSendWindow -= bytes
@@ -114,17 +109,9 @@ class Http2FlowControl {
         return true
     }
 
-    /** Returns the maximum number of bytes we can send right now. */
     val maxSendBytes: Int get() = minOf(connectionSendWindow, streamSendWindow)
 
-    // -- Receive --
-
-    /**
-     * Records that [bytes] of DATA have been received.
-     *
-     * Returns WINDOW_UPDATE increments to send: (connectionIncrement, streamIncrement).
-     * Either may be null if no update is needed yet.
-     */
+    /** Returns WINDOW_UPDATE increments (connection, stream); either may be null if not yet due. */
     fun consumeRecvWindow(bytes: Int): RecvWindowResult {
         connectionRecvConsumed += bytes
         streamRecvConsumed += bytes
@@ -132,7 +119,6 @@ class Http2FlowControl {
         var connInc: Int? = null
         var streamInc: Int? = null
 
-        // Send WINDOW_UPDATE when >= 50% of window has been consumed
         if (connectionRecvConsumed >= connectionRecvWindowSize / 2) {
             connInc = connectionRecvConsumed
             connectionRecvConsumed = 0
@@ -150,25 +136,50 @@ class Http2FlowControl {
         val streamIncrement: Int?
     )
 
-    // -- Remote Updates --
+    private val windowLock = Any()
+    private var windowAwaiter: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
-    /** Applies a WINDOW_UPDATE received from the server. */
     fun applyWindowUpdate(streamID: Int, increment: Int) {
-        if (streamID == 0) {
-            connectionSendWindow += increment
-        } else {
-            streamSendWindow += increment
+        synchronized(windowLock) {
+            if (streamID == 0) {
+                connectionSendWindow += increment
+            } else {
+                streamSendWindow += increment
+            }
+            if (maxSendBytes > 0) {
+                windowAwaiter?.complete(Unit)
+                windowAwaiter = null
+            }
         }
     }
 
-    /**
-     * Applies the server's SETTINGS_INITIAL_WINDOW_SIZE.
-     *
-     * Adjusts our stream send window by the difference between the new and old values
-     * (RFC 7540 §6.9.2).
-     */
+    /** Suspends until both connection and stream send windows have headroom. */
+    suspend fun awaitWindow() {
+        val awaiter = synchronized(windowLock) {
+            if (maxSendBytes > 0) return
+            windowAwaiter ?: kotlinx.coroutines.CompletableDeferred<Unit>().also {
+                windowAwaiter = it
+            }
+        }
+        awaiter.await()
+    }
+
+    fun cancelAwaiters(error: Throwable) {
+        synchronized(windowLock) {
+            windowAwaiter?.completeExceptionally(error)
+            windowAwaiter = null
+        }
+    }
+
+    /** RFC 7540 §6.9.2: shifts stream send window by delta from default. */
     fun applySettings(initialWindowSize: Int) {
-        val delta = initialWindowSize - DEFAULT_INITIAL_WINDOW_SIZE
-        streamSendWindow += delta
+        synchronized(windowLock) {
+            val delta = initialWindowSize - DEFAULT_INITIAL_WINDOW_SIZE
+            streamSendWindow += delta
+            if (maxSendBytes > 0) {
+                windowAwaiter?.complete(Unit)
+                windowAwaiter = null
+            }
+        }
     }
 }

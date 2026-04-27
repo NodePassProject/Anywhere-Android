@@ -72,12 +72,11 @@ fun OnboardingScreen(
     var selectedCountry by remember { mutableStateOf(defaultCountry) }
     var adBlockEnabled by remember { mutableStateOf(false) }
 
-    // Mirrors iOS OnboardingView: fixed branded gradient with a dark-mode
-    // variant (see Assets.xcassets/GradientStart + GradientEnd). Must NOT
-    // use MaterialTheme.colorScheme.primary/tertiary — with
-    // `dynamicColor = true` those adapt to the user's wallpaper and can
-    // become light pastels in light mode, at which point the hardcoded
-    // white text on this screen has no contrast.
+    // Fixed branded gradient with a dark-mode variant. Must NOT use
+    // MaterialTheme.colorScheme.primary/tertiary — with `dynamicColor = true`
+    // those adapt to the user's wallpaper and can become light pastels in
+    // light mode, at which point the hardcoded white text on this screen has
+    // no contrast.
     val isDark = isSystemInDarkTheme()
     val gradientStart = if (isDark) GradientConnectedStartDark else GradientConnectedStartLight
     val gradientEnd = if (isDark) GradientConnectedEndDark else GradientConnectedEndLight
@@ -120,7 +119,6 @@ fun OnboardingScreen(
                 }
             }
 
-            // Bottom bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -211,7 +209,6 @@ private fun CountryBypassPage(
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color.White.copy(alpha = 0.2f))
         ) {
-            // Disable option
             CountryRow(
                 label = stringResource(R.string.disable),
                 isSelected = selectedCountry.isEmpty(),

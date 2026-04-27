@@ -1,15 +1,11 @@
 package com.argsment.anywhere.vpn.protocol
 
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
-
 /**
- * Adapts a [VlessConnection] (from a previous chain link) to the [Transport] interface.
- *
- * Used for proxy chaining: the output of one proxy connection becomes the "socket" for the next.
- * Sends and receives use the raw (unframed) methods to bypass the tunnel's traffic statistics,
- * since each chain link tracks its own stats.
+ * Adapts a [ProxyConnection] (from a previous chain link) to the [Transport] interface.
+ * Sends and receives use the raw (unframed) methods to bypass the tunnel's traffic
+ * statistics, since each chain link tracks its own stats.
  */
-class TunneledTransport(private val tunnel: VlessConnection) : Transport {
+class TunneledTransport(private val tunnel: ProxyConnection) : Transport {
 
     override suspend fun send(data: ByteArray) = tunnel.sendRaw(data)
 

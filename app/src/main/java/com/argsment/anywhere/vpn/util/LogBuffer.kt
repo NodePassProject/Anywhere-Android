@@ -9,9 +9,8 @@ import kotlin.concurrent.withLock
 /**
  * Thread-safe ring buffer for user-facing logs forwarded from [AnywhereLogger.logSink].
  *
- * Mirrors iOS `LWIPStack` log buffer: entries older than
- * [TunnelConstants.logRetentionIntervalSec] are evicted on every write,
- * and the buffer is capped at [TunnelConstants.logMaxEntries].
+ * Entries older than [TunnelConstants.logRetentionIntervalSec] are evicted on
+ * every write, and the buffer is capped at [TunnelConstants.logMaxEntries].
  */
 object LogBuffer {
 
@@ -19,7 +18,7 @@ object LogBuffer {
     private val MAX_ENTRIES = TunnelConstants.logMaxEntries
 
     data class Entry(
-        val timestamp: Long,  // epoch milliseconds
+        val timestamp: Long,
         val level: AnywhereLogger.Level,
         val message: String
     )

@@ -14,6 +14,6 @@ data class Subscription(
     val total: Long? = null,
     val expire: Long? = null,
     val collapsed: Boolean = false,
-    /** Whether the user manually renamed this subscription — prevents auto-overwrite on update. Mirrors iOS. */
+    /** Whether the user manually renamed this subscription — prevents auto-overwrite on update. */
     val isNameCustomized: Boolean = false
 )

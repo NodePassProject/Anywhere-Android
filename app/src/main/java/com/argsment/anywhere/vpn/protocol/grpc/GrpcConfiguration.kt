@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 import java.net.URLEncoder
 
 /**
- * gRPC transport configuration. Mirrors iOS `GRPCConfiguration`.
+ * gRPC transport configuration.
  *
  *  - [serviceName] has two interpretations:
  *    * Plain name (e.g. `"example"`) — standard stream names `Tun` / `TunMulti` are used;
@@ -98,14 +98,13 @@ data class GrpcConfiguration(
     }
 
     private fun urlPathEscape(value: String): String {
-        // URLEncoder encodes ' ' as '+' — replace back to %20 for path semantics, and
-        // decode '/' in case a caller pre-escaped it (we've already split on '/').
+        // URLEncoder encodes ' ' as '+' — replace back to %20 for path semantics
         return URLEncoder.encode(value, "UTF-8")
             .replace("+", "%20")
     }
 }
 
-/** gRPC transport errors. Mirrors iOS `GRPCError`. */
+/** gRPC transport errors. */
 sealed class GrpcError(message: String) : Exception(message) {
     class SetupFailed(reason: String) : GrpcError("gRPC setup failed: $reason")
     class ConnectionClosed : GrpcError("gRPC connection closed")

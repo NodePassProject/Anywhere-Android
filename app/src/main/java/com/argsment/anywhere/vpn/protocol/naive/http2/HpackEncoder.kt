@@ -3,38 +3,19 @@ package com.argsment.anywhere.vpn.protocol.naive.http2
 import java.io.ByteArrayOutputStream
 
 /**
- * Minimal HPACK encoder/decoder for the NaiveProxy CONNECT tunnel.
- *
- * Only implements the subset needed for a single CONNECT request/response:
- * - Integer encoding/decoding (RFC 7541 §5.1)
- * - String encoding (raw only) and decoding (raw + Huffman)
- * - Indexed header field (1xxxxxxx)
- * - Literal without indexing (0000xxxx)
- * - Literal with incremental indexing (01xxxxxx) — decode only
- * - Static table lookup
+ * Minimal HPACK encoder/decoder (RFC 7541) for the CONNECT tunnel: integer enc/dec (§5.1),
+ * raw + Huffman string decoding, indexed header fields, literal without indexing,
+ * literal with incremental indexing (decode only), and static table lookup.
  */
 object HpackEncoder {
 
-    // -- CONNECT Request Encoding --
-
-    /**
-     * Encodes an HTTP/2 CONNECT request header block.
-     *
-     * Produces HPACK-encoded headers:
-     * - `:method = CONNECT` (literal with indexed name, static index 2)
-     * - `:authority = <authority>` (literal with indexed name, static index 1)
-     * - Extra headers (proxy-authorization, padding, etc.)
-     */
     fun encodeConnectRequest(
         authority: String,
         extraHeaders: List<Pair<String, String>>
     ): ByteArray {
         val block = ByteArrayOutputStream()
-        // :method = CONNECT — literal without indexing, name index 2 (:method)
         encodeLiteralWithoutIndexing(nameIndex = 2, value = "CONNECT", into = block)
-        // :authority = host:port — literal without indexing, name index 1 (:authority)
         encodeLiteralWithoutIndexing(nameIndex = 1, value = authority, into = block)
-        // Extra headers
         for ((name, value) in extraHeaders) {
             val nameIdx = staticTableNameIndex(name)
             if (nameIdx != null) {
@@ -46,13 +27,10 @@ object HpackEncoder {
         return block.toByteArray()
     }
 
-    // -- Response Decoding --
-
     /**
-     * Decodes an HPACK header block into name-value pairs.
-     *
-     * Handles indexed, literal with/without indexing, and dynamic table size updates.
-     * Maintains a local dynamic table for the duration of the decode.
+     * Decodes an HPACK header block. Maintains a local dynamic table for the
+     * duration of this decode call only — for streams that span multiple header
+     * blocks use [HpackDecoder] instead.
      */
     fun decodeHeaders(data: ByteArray): List<Pair<String, String>>? {
         val headers = mutableListOf<Pair<String, String>>()
@@ -64,42 +42,38 @@ object HpackEncoder {
 
             when {
                 byte and 0x80 != 0 -> {
-                    // §6.1 Indexed Header Field (1xxxxxxx)
+                    // RFC 7541 §6.1 Indexed Header Field
                     val index = decodeInteger(data, offset, 7) ?: return null
                     val entry = lookupEntry(index, dynamicTable) ?: return null
                     headers.add(entry)
                 }
 
                 byte and 0xC0 == 0x40 -> {
-                    // §6.2.1 Literal with Incremental Indexing (01xxxxxx)
+                    // RFC 7541 §6.2.1 Literal with Incremental Indexing
                     val (name, value) = decodeLiteral(data, offset, 6, dynamicTable) ?: return null
                     headers.add(name to value)
                     dynamicTable.add(0, name to value)
                 }
 
                 byte and 0xF0 == 0x00 || byte and 0xF0 == 0x10 -> {
-                    // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
+                    // RFC 7541 §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
                     val (name, value) = decodeLiteral(data, offset, 4, dynamicTable) ?: return null
                     headers.add(name to value)
                 }
 
                 byte and 0xE0 == 0x20 -> {
-                    // §6.3 Dynamic Table Size Update (001xxxxx)
-                    decodeInteger(data, offset, 5) // consume but don't enforce
+                    // RFC 7541 §6.3 Dynamic Table Size Update — consume without enforcing
+                    decodeInteger(data, offset, 5)
                 }
 
-                else -> return null  // Unknown representation
+                else -> return null
             }
         }
 
         return headers
     }
 
-    // -- Integer Encoding (RFC 7541 §5.1) --
-
-    /**
-     * Encodes an integer with the given prefix bit width, appending to [data].
-     */
+    /** RFC 7541 §5.1 integer encoding with [prefixBits]-wide prefix. */
     private fun encodeInteger(value: Int, prefixBits: Int, into: ByteArrayOutputStream) {
         val maxPrefix = (1 shl prefixBits) - 1
         if (value < maxPrefix) {
@@ -115,10 +89,6 @@ object HpackEncoder {
         }
     }
 
-    /**
-     * Decodes an integer with the given prefix bit width from [data] at [offset].
-     * Advances [offset] past the consumed bytes.
-     */
     private fun decodeInteger(data: ByteArray, offset: IntArray, prefixBits: Int): Int? {
         if (offset[0] >= data.size) return null
         val maxPrefix = (1 shl prefixBits) - 1
@@ -142,21 +112,17 @@ object HpackEncoder {
         return value
     }
 
-    // -- String Encoding (RFC 7541 §5.2) --
-
-    /** Encodes a string in raw (non-Huffman) format. */
+    /** RFC 7541 §5.2 string encoding (raw, non-Huffman). */
     private fun encodeString(string: String, into: ByteArrayOutputStream) {
         val bytes = string.toByteArray(Charsets.UTF_8)
-        // H=0 (raw), length
         val lengthBuf = ByteArrayOutputStream()
         encodeInteger(bytes.size, 7, lengthBuf)
         val lengthBytes = lengthBuf.toByteArray()
-        lengthBytes[0] = (lengthBytes[0].toInt() and 0x7F).toByte() // Clear H bit
+        lengthBytes[0] = (lengthBytes[0].toInt() and 0x7F).toByte() // H=0 for raw
         into.write(lengthBytes)
         into.write(bytes)
     }
 
-    /** Decodes a string (raw or Huffman) from [data] at [offset]. */
     private fun decodeString(data: ByteArray, offset: IntArray): String? {
         if (offset[0] >= data.size) return null
         val huffman = data[offset[0]].toInt() and 0x80 != 0
@@ -174,27 +140,20 @@ object HpackEncoder {
         }
     }
 
-    // -- Literal Header Encoding --
-
-    /** Encodes a literal header without indexing, using an indexed name from the static table. */
     private fun encodeLiteralWithoutIndexing(nameIndex: Int, value: String, into: ByteArrayOutputStream) {
-        // 0000xxxx prefix + name index
         val indexBuf = ByteArrayOutputStream()
         encodeInteger(nameIndex, 4, indexBuf)
         val indexBytes = indexBuf.toByteArray()
-        indexBytes[0] = (indexBytes[0].toInt() and 0x0F).toByte() // Ensure 0000 prefix
+        indexBytes[0] = (indexBytes[0].toInt() and 0x0F).toByte() // 0000xxxx prefix
         into.write(indexBytes)
         encodeString(value, into)
     }
 
-    /** Encodes a literal header without indexing, using a literal name. */
     private fun encodeLiteralWithoutIndexing(name: String, value: String, into: ByteArrayOutputStream) {
-        into.write(0x00) // 0000 0000 — literal name, no indexing
+        into.write(0x00)
         encodeString(name, into)
         encodeString(value, into)
     }
-
-    // -- Literal Header Decoding --
 
     private fun decodeLiteral(
         data: ByteArray,
@@ -215,12 +174,7 @@ object HpackEncoder {
         return name to value
     }
 
-    // -- Table Lookup --
-
-    /**
-     * Looks up a header by index (1-based). Static table is indices 1–61,
-     * dynamic table starts at 62.
-     */
+    /** Looks up a 1-based header index. Static table is 1–61; dynamic table starts at 62. */
     private fun lookupEntry(
         index: Int,
         dynamicTable: List<Pair<String, String>>
@@ -234,19 +188,15 @@ object HpackEncoder {
         return dynamicTable[dynIndex]
     }
 
-    /** Returns the first static table index whose name matches (case-insensitive), or null. */
     private fun staticTableNameIndex(name: String): Int? {
         val lower = name.lowercase()
         for ((i, entry) in STATIC_TABLE.withIndex()) {
-            if (entry.first == lower) return i + 1 // 1-based
+            if (entry.first == lower) return i + 1
         }
         return null
     }
 
-    // -- HPACK Static Table (RFC 7541 Appendix A) --
-
-    // -- HPACK Static Table (accessible to HpackDecoder) --
-
+    /** RFC 7541 Appendix A static table. */
     internal val STATIC_TABLE: List<Pair<String, String>> = listOf(
         ":authority" to "",                          // 1
         ":method" to "GET",                          // 2
@@ -312,19 +262,15 @@ object HpackEncoder {
     )
 }
 
-// -- HPACK Huffman Decoder --
-
 /** Huffman decoder for HPACK string literals (RFC 7541 Appendix B). */
 object HpackHuffman {
 
-    /** Trie node for Huffman decoding. */
     private class Node {
         var left: Int = -1
         var right: Int = -1
         var symbol: Int = -1  // >= 0 for leaf nodes, 256 = EOS
     }
 
-    /** Lazily-built decode trie. */
     private val tree: Array<Node> by lazy { buildTree() }
 
     private fun buildTree(): Array<Node> {
@@ -353,7 +299,6 @@ object HpackHuffman {
         return nodes.toTypedArray()
     }
 
-    /** Decodes Huffman-encoded bytes into raw bytes. */
     fun decode(data: ByteArray): ByteArray? {
         val result = ByteArrayOutputStream()
         var nodeIdx = 0
@@ -377,10 +322,10 @@ object HpackHuffman {
         return result.toByteArray()
     }
 
-    // -- Huffman Code Table (RFC 7541 Appendix B) --
-    // Each entry is (code: UInt left-aligned, bitLength: Int).
-    // Indexed by symbol value 0–256 (256 = EOS).
-
+    /**
+     * RFC 7541 Appendix B Huffman code table. Each entry is (code: UInt left-aligned,
+     * bitLength: Int). Indexed by symbol value 0–256 (256 = EOS).
+     */
     private val HUFFMAN_TABLE: Array<Pair<UInt, Int>> = arrayOf(
         0xffc00000u to 13, 0xffffb000u to 23, 0xfffffe20u to 28, 0xfffffe30u to 28,
         0xfffffe40u to 28, 0xfffffe50u to 28, 0xfffffe60u to 28, 0xfffffe70u to 28,
@@ -458,12 +403,9 @@ object HpackHuffman {
 }
 
 /**
- * Stateful HPACK decoder with persistent dynamic table across calls.
- *
- * Used by [Http2Session] for multiplexed streams where the dynamic table must persist
- * across multiple HEADERS frames on the same connection (RFC 7541 §2.3.3).
- * The legacy [HpackEncoder.decodeHeaders] creates a fresh table per call, which is
- * correct only for single-stream connections like [Http2Connection].
+ * Stateful HPACK decoder with a dynamic table that persists across decode calls
+ * (RFC 7541 §2.3.3). Required for multiplexed sessions that span multiple HEADERS
+ * frames; [HpackEncoder.decodeHeaders] is correct only for single-stream connections.
  */
 class HpackDecoder {
     private val dynamicTable = mutableListOf<Pair<String, String>>()
@@ -478,27 +420,27 @@ class HpackDecoder {
 
             when {
                 byte and 0x80 != 0 -> {
-                    // §6.1 Indexed Header Field
+                    // RFC 7541 §6.1 Indexed Header Field
                     val index = decodeInteger(data, offset, 7) ?: return null
                     val entry = lookupEntry(index) ?: return null
                     headers.add(entry)
                 }
 
                 byte and 0xC0 == 0x40 -> {
-                    // §6.2.1 Literal with Incremental Indexing
+                    // RFC 7541 §6.2.1 Literal with Incremental Indexing
                     val (name, value) = decodeLiteral(data, offset, 6) ?: return null
                     headers.add(name to value)
                     dynamicTable.add(0, name to value)
                 }
 
                 byte and 0xF0 == 0x00 || byte and 0xF0 == 0x10 -> {
-                    // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
+                    // RFC 7541 §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
                     val (name, value) = decodeLiteral(data, offset, 4) ?: return null
                     headers.add(name to value)
                 }
 
                 byte and 0xE0 == 0x20 -> {
-                    // §6.3 Dynamic Table Size Update
+                    // RFC 7541 §6.3 Dynamic Table Size Update
                     decodeInteger(data, offset, 5)
                 }
 

@@ -18,10 +18,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 private val logger = AnywhereLogger("DirectUDP")
 
-/**
- * Direct UDP relay with DNS resolution.
- * Non-blocking connected UDP socket using a shared selector thread.
- */
+/** Non-blocking connected UDP socket using a shared selector thread. */
 class DirectUdpRelay {
 
     private var channel: DatagramChannel? = null
@@ -43,7 +40,6 @@ class DirectUdpRelay {
                 try {
                     sharedSelector.select(200)
 
-                    // Execute pending operations
                     while (true) {
                         val op = pendingOps.poll() ?: break
                         try { op() } catch (e: Exception) {
@@ -81,10 +77,6 @@ class DirectUdpRelay {
         }
     }
 
-    /**
-     * Creates a UDP socket and connects it to the destination.
-     * DNS resolution runs on the IO dispatcher.
-     */
     suspend fun connect(dstHost: String, dstPort: Int) {
         withContext(Dispatchers.IO) {
             val addresses = try {
@@ -119,7 +111,6 @@ class DirectUdpRelay {
     private fun connectToAddress(address: InetSocketAddress) {
         if (cancelled) throw NioSocketError.NotConnected()
 
-        // Use the address family matching the resolved address (IPv4 or IPv6)
         val family = if (address.address is java.net.Inet6Address)
             java.net.StandardProtocolFamily.INET6
         else
@@ -133,7 +124,6 @@ class DirectUdpRelay {
             throw NioSocketError.ConnectionFailed("Failed to protect UDP socket")
         }
 
-        // connect() on a UDP socket sets the default destination
         ch.connect(address)
 
         if (cancelled) {
@@ -144,9 +134,6 @@ class DirectUdpRelay {
         channel = ch
     }
 
-    /**
-     * Sends a UDP datagram to the connected destination.
-     */
     fun send(data: ByteArray) {
         val ch = channel ?: return
         if (cancelled || !ch.isOpen) return
@@ -159,10 +146,6 @@ class DirectUdpRelay {
         }
     }
 
-    /**
-     * Starts receiving datagrams asynchronously via the shared selector.
-     * The handler is called for each received datagram.
-     */
     fun startReceiving(handler: (ByteArray) -> Unit) {
         val ch = channel ?: return
         if (cancelled || !ch.isOpen) return
@@ -200,15 +183,12 @@ class DirectUdpRelay {
         }
     }
 
-    /**
-     * Cancels the relay and closes the socket.
-     */
     fun cancel() {
         if (cancelled) return
         cancelled = true
         receiveHandler = null
 
-        // Close channel (automatically cancels the selection key)
+        // Closing the channel automatically cancels the selection key
         try { channel?.close() } catch (_: Exception) {}
         channel = null
         selectionKey = null

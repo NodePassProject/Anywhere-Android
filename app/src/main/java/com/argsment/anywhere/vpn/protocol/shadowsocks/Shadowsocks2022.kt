@@ -1,14 +1,12 @@
 package com.argsment.anywhere.vpn.protocol.shadowsocks
 
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.Transport
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 import java.io.ByteArrayOutputStream
 import java.security.SecureRandom
 
 private val logger = AnywhereLogger("SS2022")
-private val udpLogger = AnywhereLogger("SS2022-UDP")
-private val chachaUdpLogger = AnywhereLogger("SS2022-ChaCha-UDP")
 
 private const val HEADER_TYPE_CLIENT: Byte = 0
 private const val HEADER_TYPE_SERVER: Byte = 1
@@ -16,22 +14,18 @@ private const val MAX_PADDING_LENGTH = 900
 private const val MAX_TIMESTAMP_DIFF = 30L
 private const val TAG_SIZE = 16
 
-// =============================================================================
-// Shadowsocks2022Connection (TCP)
-// =============================================================================
-
 /**
- * Wraps a transport with Shadowsocks 2022 AEAD encryption.
+ * Shadowsocks 2022 TCP connection wrapping a transport with AEAD encryption.
  *
- * Request format: salt + [identity headers] + seal(fixedHeader) + seal(variableHeader+payload) [+ AEAD chunks]
- * Response format: salt + seal(fixedHeader) + seal(data) [+ AEAD chunks]
+ * Request: `salt + [identity headers] + seal(fixedHeader) + seal(variableHeader+payload) [+ AEAD chunks]`
+ * Response: `salt + seal(fixedHeader) + seal(data) [+ AEAD chunks]`
  */
 class Shadowsocks2022Connection(
     private val transport: Transport,
     private val cipher: ShadowsocksCipher,
     private val pskList: List<ByteArray>,
     private var addressHeader: ByteArray?
-) : VlessConnection() {
+) : ProxyConnection() {
 
     private val random = SecureRandom()
     private val psk = pskList.last()
@@ -39,13 +33,11 @@ class Shadowsocks2022Connection(
         ShadowsocksKeyDerivation.blake3Hash16(pskList[it])
     }
 
-    // Write state
     private var requestSalt: ByteArray? = null
     private var writeNonce = ShadowsocksNonce(cipher.nonceSize)
     private var writeSubkey: ByteArray? = null
     private var handshakeSent = false
 
-    // Read state
     private var readNonce = ShadowsocksNonce(cipher.nonceSize)
     private var readSubkey: ByteArray? = null
     private var readBuffer = byteArrayOf()
@@ -54,16 +46,12 @@ class Shadowsocks2022Connection(
     private var pendingVarHeaderLen: Int? = null
     private var pendingPayloadLength: Int? = null
 
-    /** Compact threshold — avoid O(n) shifts until dead space is significant (matching iOS). */
+    /** Defer compaction until dead space is significant to avoid O(n) shifts on each read. */
     private companion object {
         const val COMPACT_THRESHOLD = 4096
     }
 
     private val sendLock = Any()
-
-    init {
-        responseHeaderReceived = true
-    }
 
     override val isConnected: Boolean get() = true
 
@@ -126,28 +114,23 @@ class Shadowsocks2022Connection(
         transport.forceCancel()
     }
 
-    // -- Request Construction --
-
     private fun buildRequest(payload: ByteArray, addressHeader: ByteArray): ByteArray {
         val keySize = cipher.keySize
 
-        // Generate random salt
         val salt = ShadowsocksAEADCrypto.generateRandomSalt(keySize)
         requestSalt = salt
 
-        // Derive session key via BLAKE3
         val sessionKey = ShadowsocksKeyDerivation.deriveSessionKey(psk, salt, keySize)
         writeSubkey = sessionKey
 
         val output = ByteArrayOutputStream()
         output.write(salt)
 
-        // Write extended identity headers for multi-user mode
         if (pskList.size >= 2) {
             writeIdentityHeaders(output, salt)
         }
 
-        // Fixed header: type(1) + timestamp(8) + variableHeaderLen(2) = 11 bytes
+        // Fixed header (11 bytes): type(1) + timestamp(8) + variableHeaderLen(2).
         val paddingLen = if (payload.size < MAX_PADDING_LENGTH) random.nextInt(MAX_PADDING_LENGTH) + 1 else 0
         val variableHeaderLen = addressHeader.size + 2 + paddingLen + payload.size
 
@@ -157,11 +140,10 @@ class Shadowsocks2022Connection(
         fixedHeader.write(timestamp.toBigEndianBytes())
         fixedHeader.write(variableHeaderLen.toUShortBigEndian())
 
-        // Seal fixed header
         val sealedFixed = ShadowsocksAEADCrypto.seal(cipher, sessionKey, writeNonce.next(), fixedHeader.toByteArray())
         output.write(sealedFixed)
 
-        // Variable header: address + paddingLen(2) + padding + payload
+        // Variable header: address + paddingLen(2) + padding + payload.
         val variableHeader = ByteArrayOutputStream(variableHeaderLen)
         variableHeader.write(addressHeader)
         variableHeader.write(paddingLen.toUShortBigEndian())
@@ -170,7 +152,6 @@ class Shadowsocks2022Connection(
         }
         variableHeader.write(payload)
 
-        // Seal variable header
         val sealedVariable = ShadowsocksAEADCrypto.seal(cipher, sessionKey, writeNonce.next(), variableHeader.toByteArray())
         output.write(sealedVariable)
 
@@ -186,7 +167,7 @@ class Shadowsocks2022Connection(
         }
     }
 
-    /** Encrypts data into standard AEAD chunks (for subsequent sends after handshake). */
+    /** Standard AEAD chunks for sends after the handshake. */
     private fun sealChunks(plaintext: ByteArray): ByteArray {
         val subkey = writeSubkey ?: throw ShadowsocksError.DecryptionFailed()
         val maxPayload = ShadowsocksAEADWriter.MAX_PAYLOAD_SIZE
@@ -198,11 +179,9 @@ class Shadowsocks2022Connection(
             val chunkSize = minOf(remaining, maxPayload)
             val chunk = plaintext.copyOfRange(offset, offset + chunkSize)
 
-            // Encrypted 2-byte length
             val lengthBytes = byteArrayOf((chunkSize shr 8).toByte(), (chunkSize and 0xFF).toByte())
             output.write(ShadowsocksAEADCrypto.seal(cipher, subkey, writeNonce.next(), lengthBytes))
 
-            // Encrypted payload
             output.write(ShadowsocksAEADCrypto.seal(cipher, subkey, writeNonce.next(), chunk))
 
             offset += chunkSize
@@ -211,18 +190,13 @@ class Shadowsocks2022Connection(
         return output.toByteArray()
     }
 
-    // -- Response Parsing --
-
-    /** Number of unprocessed bytes in the read buffer. */
     private var _readBufferEnd = 0
     private fun readBufferAvailable(): Int = _readBufferEnd - readBufferOffset
 
     private fun processReceived(data: ByteArray): ByteArray {
-        // Append incoming data
         val activeLen = readBufferAvailable()
         val needed = activeLen + data.size
         if (readBufferOffset + activeLen + data.size > readBuffer.size) {
-            // Compact or grow
             if (readBuffer.size >= needed && readBufferOffset > 0) {
                 System.arraycopy(readBuffer, readBufferOffset, readBuffer, 0, activeLen)
             } else {
@@ -238,7 +212,6 @@ class Shadowsocks2022Connection(
 
         val output = ByteArrayOutputStream()
 
-        // Try to finish parsing the variable header if waiting
         pendingVarHeaderLen?.let { varLen ->
             val parsed = parseVariableHeader(varLen) ?: return byteArrayOf()
             output.write(parsed)
@@ -253,7 +226,6 @@ class Shadowsocks2022Connection(
             output.write(decryptChunks())
         }
 
-        // Compact buffer when dead space exceeds threshold (matching iOS)
         if (readBufferOffset > COMPACT_THRESHOLD) {
             val remaining = readBufferAvailable()
             if (remaining > 0) {
@@ -272,18 +244,16 @@ class Shadowsocks2022Connection(
     private fun parseResponseHeader(): ByteArray? {
         val keySize = cipher.keySize
 
-        // Need: salt(keySize) + sealed fixed header(1+8+keySize+2 + tagSize)
+        // salt(keySize) + sealed fixed header(1+8+keySize+2 + tagSize)
         val fixedHeaderPlainLen = 1 + 8 + keySize + 2
         val minNeeded = keySize + fixedHeaderPlainLen + TAG_SIZE
         if (readBufferAvailable() < minNeeded) return null
 
         val salt = readBuffer.copyOfRange(readBufferOffset, readBufferOffset + keySize)
 
-        // Derive read session key
         val sessionKey = ShadowsocksKeyDerivation.deriveSessionKey(psk, salt, keySize)
         readSubkey = sessionKey
 
-        // Read and decrypt fixed header chunk
         val fixedChunkLen = fixedHeaderPlainLen + TAG_SIZE
         val fixedChunk = readBuffer.copyOfRange(readBufferOffset + keySize, readBufferOffset + keySize + fixedChunkLen)
         readBufferOffset += keySize + fixedChunkLen
@@ -296,20 +266,17 @@ class Shadowsocks2022Connection(
         offset++
         if (headerType != HEADER_TYPE_SERVER) throw ShadowsocksError.BadHeaderType()
 
-        // Validate timestamp
         val epoch = fixedHeader.readLongBE(offset)
         offset += 8
         val now = System.currentTimeMillis() / 1000
         if (Math.abs(now - epoch) > MAX_TIMESTAMP_DIFF) throw ShadowsocksError.BadTimestamp()
 
-        // Validate request salt
         val responseSalt = fixedHeader.copyOfRange(offset, offset + keySize)
         offset += keySize
         requestSalt?.let {
             if (!responseSalt.contentEquals(it)) throw ShadowsocksError.BadRequestSalt()
         }
 
-        // Read variable length
         val varLen = ((fixedHeader[offset].toInt() and 0xFF) shl 8) or (fixedHeader[offset + 1].toInt() and 0xFF)
 
         return parseVariableHeader(varLen) ?: byteArrayOf()
@@ -374,283 +341,15 @@ class Shadowsocks2022Connection(
     }
 }
 
-// =============================================================================
-// Shadowsocks2022AESUDPConnection
-// =============================================================================
-
-/**
- * Wraps a transport with Shadowsocks 2022 per-packet UDP encryption (AES variant).
- *
- * Packet format (outgoing):
- *   AES-ECB(sessionID(8) + packetID(8)) + AEAD(type + timestamp + paddingLen + padding + address + payload)
- *   AEAD nonce = packetHeader[4:16]
- */
-class Shadowsocks2022AESUDPConnection(
-    private val transport: Transport,
-    private val cipher: ShadowsocksCipher,
-    private val pskList: List<ByteArray>,
-    private val dstHost: String,
-    private val dstPort: Int
-) : VlessConnection() {
-
-    private val random = SecureRandom()
-    private val psk = pskList.last()
-    private val pskHashes: List<ByteArray> = (1 until pskList.size).map {
-        ShadowsocksKeyDerivation.blake3Hash16(pskList[it])
-    }
-    private val headerEncryptPSK = pskList.first()
-
-    // Session state
-    private val sessionID: Long
-    private var packetID: Long = 0
-    private val sessionCipher: ByteArray
-
-    // Remote session tracking
-    private var remoteSessionID: Long = 0
-    private var remoteSessionCipher: ByteArray? = null
-
-    init {
-        responseHeaderReceived = true
-        sessionID = random.nextLong()
-        val sidBytes = sessionID.toBigEndianBytes()
-        sessionCipher = ShadowsocksKeyDerivation.deriveSessionKey(psk, sidBytes, cipher.keySize)
-    }
-
-    override val isConnected: Boolean get() = true
-
-    override suspend fun sendRaw(data: ByteArray) {
-        transport.send(encryptPacket(data))
-    }
-
-    override fun sendRawAsync(data: ByteArray) {
-        try {
-            transport.sendAsync(encryptPacket(data))
-        } catch (e: Exception) {
-            udpLogger.error("[SS2022-UDP] Send error: ${e.message}")
-        }
-    }
-
-    override suspend fun receiveRaw(): ByteArray? {
-        val data = transport.receive() ?: return null
-        if (data.isEmpty()) return null
-        return decryptPacket(data)
-    }
-
-    override fun cancel() {
-        transport.forceCancel()
-    }
-
-    private fun encryptPacket(payload: ByteArray): ByteArray {
-        packetID++
-        // Build packet header: sessionID(8) + packetID(8) = 16 bytes
-        val header = sessionID.toBigEndianBytes() + packetID.toBigEndianBytes()
-
-        // Build identity headers for multi-user mode
-        val identityData = ByteArrayOutputStream()
-        if (pskHashes.isNotEmpty()) {
-            for (i in pskHashes.indices) {
-                val pskHash = pskHashes[i]
-                val xored = ByteArray(16) { j -> (pskHash[j].toInt() xor header[j].toInt()).toByte() }
-                identityData.write(AesEcb.encrypt(pskList[i], xored))
-            }
-        }
-
-        // Build body: type(1) + timestamp(8) + paddingLen(2) + padding + address + payload
-        val addressHeader = ShadowsocksProtocol.buildAddressHeader(dstHost, dstPort)
-        val paddingLen = if (dstPort == 53 && payload.size < MAX_PADDING_LENGTH)
-            random.nextInt(MAX_PADDING_LENGTH - payload.size) + 1 else 0
-
-        val body = ByteArrayOutputStream()
-        body.write(HEADER_TYPE_CLIENT.toInt())
-        body.write((System.currentTimeMillis() / 1000).toBigEndianBytes())
-        body.write(paddingLen.toUShortBigEndian())
-        if (paddingLen > 0) body.write(ByteArray(paddingLen))
-        body.write(addressHeader)
-        body.write(payload)
-
-        // AEAD seal body: nonce = header[4:16]
-        val nonce = header.copyOfRange(4, 16)
-        val sealedBody = ShadowsocksAEADCrypto.seal(cipher, sessionCipher, nonce, body.toByteArray())
-
-        // AES-ECB encrypt the 16-byte header
-        val encryptedHeader = AesEcb.encrypt(headerEncryptPSK, header)
-
-        return encryptedHeader + identityData.toByteArray() + sealedBody
-    }
-
-    private fun decryptPacket(data: ByteArray): ByteArray {
-        require(data.size >= 16 + TAG_SIZE)
-
-        // AES-ECB decrypt header using last PSK
-        val header = AesEcb.decrypt(psk, data.copyOf(16))
-
-        val remoteSession = header.readLongBE(0)
-
-        // Get or derive remote session cipher
-        val remoteCipherKey: ByteArray
-        val cachedCipher = remoteSessionCipher
-        if (remoteSession == remoteSessionID && cachedCipher != null) {
-            remoteCipherKey = cachedCipher
-        } else {
-            val rsData = remoteSession.toBigEndianBytes()
-            remoteCipherKey = ShadowsocksKeyDerivation.deriveSessionKey(psk, rsData, cipher.keySize)
-            remoteSessionID = remoteSession
-            remoteSessionCipher = remoteCipherKey
-        }
-
-        // AEAD open body: nonce = header[4:16]
-        val nonce = header.copyOfRange(4, 16)
-        val sealedBody = data.copyOfRange(16, data.size)
-        val body = ShadowsocksAEADCrypto.open(cipher, remoteCipherKey, nonce, sealedBody)
-
-        // Parse body: type(1) + timestamp(8) + clientSessionID(8) + paddingLen(2) + padding + address + payload
-        require(body.size >= 1 + 8 + 8 + 2)
-
-        var offset = 0
-        val headerType = body[offset]; offset++
-        if (headerType != HEADER_TYPE_SERVER) throw ShadowsocksError.BadHeaderType()
-
-        val epoch = body.readLongBE(offset); offset += 8
-        val now = System.currentTimeMillis() / 1000
-        if (Math.abs(now - epoch) > MAX_TIMESTAMP_DIFF) throw ShadowsocksError.BadTimestamp()
-
-        val clientSid = body.readLongBE(offset); offset += 8
-        if (clientSid != sessionID) throw ShadowsocksError.DecryptionFailed()
-
-        // Padding
-        require(body.size - offset >= 2)
-        val paddingLen = ((body[offset].toInt() and 0xFF) shl 8) or (body[offset + 1].toInt() and 0xFF)
-        offset += 2 + paddingLen
-
-        // Skip address header
-        val parsed = ShadowsocksProtocol.decodeUDPPacket(body.copyOfRange(offset, body.size))
-            ?: throw ShadowsocksError.InvalidAddress()
-        return parsed.payload
-    }
-}
-
-// =============================================================================
-// Shadowsocks2022ChaChaUDPConnection
-// =============================================================================
-
-/**
- * Wraps a transport with Shadowsocks 2022 per-packet UDP encryption (ChaCha20 variant).
- *
- * Uses XChaCha20-Poly1305 with 24-byte nonce.
- * Packet format: nonce(24) + XChaCha20-Poly1305(sessionID + packetID + type + timestamp + padding + address + payload)
- */
-class Shadowsocks2022ChaChaUDPConnection(
-    private val transport: Transport,
-    private val psk: ByteArray,
-    private val dstHost: String,
-    private val dstPort: Int
-) : VlessConnection() {
-
-    private val random = SecureRandom()
-    private val sessionID: Long = random.nextLong()
-    private var packetID: Long = 0
-
-    init {
-        responseHeaderReceived = true
-    }
-
-    override val isConnected: Boolean get() = true
-
-    override suspend fun sendRaw(data: ByteArray) {
-        transport.send(encryptPacket(data))
-    }
-
-    override fun sendRawAsync(data: ByteArray) {
-        try {
-            transport.sendAsync(encryptPacket(data))
-        } catch (e: Exception) {
-            chachaUdpLogger.error("[SS2022-ChaCha-UDP] Send error: ${e.message}")
-        }
-    }
-
-    override suspend fun receiveRaw(): ByteArray? {
-        val data = transport.receive() ?: return null
-        if (data.isEmpty()) return null
-        return decryptPacket(data)
-    }
-
-    override fun cancel() {
-        transport.forceCancel()
-    }
-
-    private fun encryptPacket(payload: ByteArray): ByteArray {
-        // Generate 24-byte nonce
-        val nonce = ByteArray(24)
-        random.nextBytes(nonce)
-
-        val addressHeader = ShadowsocksProtocol.buildAddressHeader(dstHost, dstPort)
-        val paddingLen = if (dstPort == 53 && payload.size < MAX_PADDING_LENGTH)
-            random.nextInt(MAX_PADDING_LENGTH - payload.size) + 1 else 0
-
-        packetID++
-        val body = ByteArrayOutputStream()
-        body.write(sessionID.toBigEndianBytes())
-        body.write(packetID.toBigEndianBytes())
-        body.write(HEADER_TYPE_CLIENT.toInt())
-        body.write((System.currentTimeMillis() / 1000).toBigEndianBytes())
-        body.write(paddingLen.toUShortBigEndian())
-        if (paddingLen > 0) body.write(ByteArray(paddingLen))
-        body.write(addressHeader)
-        body.write(payload)
-
-        val sealed = XChaCha20Poly1305.seal(psk, nonce, body.toByteArray())
-        return nonce + sealed
-    }
-
-    private fun decryptPacket(data: ByteArray): ByteArray {
-        require(data.size >= 24 + TAG_SIZE)
-
-        val nonce = data.copyOf(24)
-        val ciphertext = data.copyOfRange(24, data.size)
-        val body = XChaCha20Poly1305.open(psk, nonce, ciphertext)
-
-        // Parse: sessionID(8) + packetID(8) + type(1) + timestamp(8) + clientSessionID(8) + paddingLen(2) + padding + address + payload
-        require(body.size >= 8 + 8 + 1 + 8 + 8 + 2)
-
-        var offset = 16 // skip sessionID + packetID
-
-        val headerType = body[offset]; offset++
-        if (headerType != HEADER_TYPE_SERVER) throw ShadowsocksError.BadHeaderType()
-
-        val epoch = body.readLongBE(offset); offset += 8
-        val now = System.currentTimeMillis() / 1000
-        if (Math.abs(now - epoch) > MAX_TIMESTAMP_DIFF) throw ShadowsocksError.BadTimestamp()
-
-        val clientSid = body.readLongBE(offset); offset += 8
-        if (clientSid != sessionID) throw ShadowsocksError.DecryptionFailed()
-
-        // Padding
-        require(body.size - offset >= 2)
-        val paddingLen = ((body[offset].toInt() and 0xFF) shl 8) or (body[offset + 1].toInt() and 0xFF)
-        offset += 2 + paddingLen
-
-        val parsed = ShadowsocksProtocol.decodeUDPPacket(body.copyOfRange(offset, body.size))
-            ?: throw ShadowsocksError.InvalidAddress()
-        return parsed.payload
-    }
-}
-
-// =============================================================================
-// XChaCha20-Poly1305
-// =============================================================================
-
-/**
- * XChaCha20-Poly1305 implementation using HChaCha20 + ChaCha20-Poly1305.
- */
+/** XChaCha20-Poly1305 implemented as HChaCha20 + ChaCha20-Poly1305. */
 object XChaCha20Poly1305 {
 
     fun seal(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): ByteArray {
         require(nonce.size == 24 && key.size == 32)
 
-        // HChaCha20: derive subkey from key + nonce[0:16]
         val subkey = hChaCha20(key, nonce.copyOf(16))
 
-        // Standard ChaCha20-Poly1305 with subkey and nonce = [0,0,0,0] + nonce[16:24]
+        // ChaCha20-Poly1305 nonce = [0,0,0,0] + nonce[16:24]
         val chachaNonce = ByteArray(4) + nonce.copyOfRange(16, 24)
 
         return ShadowsocksAEADCrypto.seal(ShadowsocksCipher.CHACHA20_POLY1305, subkey, chachaNonce, plaintext)
@@ -666,43 +365,37 @@ object XChaCha20Poly1305 {
         return ShadowsocksAEADCrypto.open(ShadowsocksCipher.CHACHA20_POLY1305, subkey, chachaNonce, ciphertext)
     }
 
-    /**
-     * HChaCha20: derives a 256-bit subkey from a 256-bit key and 128-bit nonce.
-     */
+    /** Derives a 256-bit subkey from a 256-bit key and 128-bit nonce. */
     private fun hChaCha20(key: ByteArray, nonce: ByteArray): ByteArray {
         val state = IntArray(16)
 
-        // Constants: "expand 32-byte k"
+        // "expand 32-byte k"
         state[0] = 0x61707865
         state[1] = 0x3320646e
         state[2] = 0x79622d32
         state[3] = 0x6b206574
 
-        // Key (little-endian)
         for (i in 0 until 8) {
             state[4 + i] = key.readIntLE(i * 4)
         }
 
-        // Nonce (little-endian)
         for (i in 0 until 4) {
             state[12 + i] = nonce.readIntLE(i * 4)
         }
 
-        // 20 rounds (10 double rounds)
+        // 20 rounds = 10 double rounds (column + diagonal).
         repeat(10) {
-            // Column rounds
             quarterRound(state, 0, 4, 8, 12)
             quarterRound(state, 1, 5, 9, 13)
             quarterRound(state, 2, 6, 10, 14)
             quarterRound(state, 3, 7, 11, 15)
-            // Diagonal rounds
             quarterRound(state, 0, 5, 10, 15)
             quarterRound(state, 1, 6, 11, 12)
             quarterRound(state, 2, 7, 8, 13)
             quarterRound(state, 3, 4, 9, 14)
         }
 
-        // Output: words 0..3 and 12..15 (8 words = 32 bytes)
+        // Output is words 0..3 and 12..15 (8 words = 32 bytes).
         val output = ByteArray(32)
         for (i in 0 until 4) {
             output.writeIntLE(i * 4, state[i])
@@ -723,10 +416,6 @@ object XChaCha20Poly1305 {
     private fun Int.rotateLeft(count: Int): Int =
         (this shl count) or (this ushr (32 - count))
 }
-
-// =============================================================================
-// Byte manipulation extensions
-// =============================================================================
 
 internal fun Long.toBigEndianBytes(): ByteArray {
     val v = this

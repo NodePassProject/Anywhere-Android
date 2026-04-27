@@ -57,7 +57,6 @@ private enum class ImportMethod(val titleResId: Int, val iconResId: Int) {
     MANUAL(R.string.manual, android.R.drawable.ic_menu_edit);
 }
 
-/** Link type picker for https:// URLs — matches iOS AddProxyView's LinkType. */
 private enum class LinkType(val titleResId: Int) {
     SUBSCRIPTION(R.string.subscription),
     HTTPS_PROXY(R.string.https_proxy),
@@ -93,9 +92,8 @@ fun AddProxyScreen(
         else -> false
     }
 
-    // Auto-paste from clipboard when link method selected.
-    // Accepts the same scheme set iOS recognises, plus a bare http:// URL so
-    // users can paste a raw subscription endpoint.
+    // Auto-paste from clipboard when link method selected. Accepts a bare
+    // http:// URL so users can paste a raw subscription endpoint.
     LaunchedEffect(selectedMethod) {
         if (selectedMethod == ImportMethod.LINK && linkURL.isEmpty()) {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -133,14 +131,11 @@ fun AddProxyScreen(
         }
     }
 
-    // Shared import flow — used by both the Link button and the QR scanner result
-    // so a scanned subscription URL is handled the same way as a pasted one
-    // (matches iOS AddProxyView.importFromString).
     fun importFromString(string: String, fromQr: Boolean) {
         val trimmed = string.trim()
         val isHTTP = trimmed.startsWith("http://") || trimmed.startsWith("https://")
         // QR codes don't expose the segmented picker, so default to subscription
-        // for any http(s) URL (matches iOS where httpsLinkType defaults to .subscription).
+        // for any http(s) URL.
         val effectiveLinkType = if (fromQr) LinkType.SUBSCRIPTION else linkType
 
         // A definite single-proxy URL is one whose scheme is parsable and is NOT
@@ -180,7 +175,6 @@ fun AddProxyScreen(
             .fillMaxWidth()
             .padding(20.dp)
     ) {
-        // Header
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -197,7 +191,6 @@ fun AddProxyScreen(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Method picker
         ImportMethod.entries.forEach { method ->
             val isSelected = selectedMethod == method
             Row(
@@ -228,12 +221,9 @@ fun AddProxyScreen(
             }
         }
 
-        // Link input field
         if (selectedMethod == ImportMethod.LINK) {
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Show link type picker when URL starts with http:// or https://
-            // (matching iOS AddProxyView segmented picker)
             val trimmedUrl = linkURL.trim()
             if (trimmedUrl.startsWith("http://") || trimmedUrl.startsWith("https://")) {
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
@@ -268,7 +258,6 @@ fun AddProxyScreen(
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // Continue button
         Button(
             onClick = {
                 when (selectedMethod) {
@@ -299,9 +288,7 @@ fun AddProxyScreen(
         }
     }
 
-    // QR Scanner
     if (showQrScanner) {
-        // Navigate to QR scanner - will be a full screen composable
         com.argsment.anywhere.ui.scanner.QrScannerScreen(
             onResult = { code ->
                 showQrScanner = false
@@ -311,7 +298,6 @@ fun AddProxyScreen(
         )
     }
 
-    // Error dialog
     if (showLinkError) {
         AlertDialog(
             onDismissRequest = { showLinkError = false },
@@ -325,8 +311,8 @@ fun AddProxyScreen(
         )
     }
 
-    // Remnawave HWID opt-in prompt — mirrors iOS AddProxyView's alert for
-    // subscription URLs that require a device-bound `x-hwid` header.
+    // Remnawave HWID opt-in prompt for subscription URLs that require a
+    // device-bound `x-hwid` header.
     if (showRemnawaveHWIDAlert) {
         AlertDialog(
             onDismissRequest = { showRemnawaveHWIDAlert = false },

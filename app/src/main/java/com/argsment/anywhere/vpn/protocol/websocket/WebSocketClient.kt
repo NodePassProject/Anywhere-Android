@@ -20,11 +20,7 @@ import kotlin.concurrent.withLock
 
 private val logger = AnywhereLogger("WebSocket")
 
-/**
- * WebSocket connection implementing RFC 6455 framing over an arbitrary transport.
- *
- * Suspend-based transport abstraction avoids modifying [NioSocket] or [TlsRecordConnection].
- */
+/** WebSocket connection implementing RFC 6455 framing over an arbitrary transport. */
 class WebSocketConnection private constructor(
     private val configuration: WebSocketConfiguration,
     private val transportSend: suspend (ByteArray) -> Unit,
@@ -32,7 +28,6 @@ class WebSocketConnection private constructor(
     private val transportReceive: suspend () -> ByteArray?,
     private val transportCancel: () -> Unit
 ) {
-    // State
     private var receiveBuffer = ByteArray(0)
     private var receiveBufferLen = 0
     private val lock = ReentrantLock()
@@ -45,24 +40,12 @@ class WebSocketConnection private constructor(
         get() = lock.withLock { _isConnected }
 
     companion object {
-        private const val MAX_RECEIVE_BUFFER_SIZE = 1_048_576  // 1 MB (matching iOS)
+        private const val MAX_RECEIVE_BUFFER_SIZE = 1_048_576  // 1 MB
 
-        /**
-         * Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
-         * Delegates to the shared [com.argsment.anywhere.vpn.protocol.ProxyUserAgent]
-         * so all transports send the same UA on a given day.
-         */
         val chromeUserAgent: String
             get() = com.argsment.anywhere.vpn.protocol.ProxyUserAgent.chrome
     }
 
-    // =========================================================================
-    // Factory constructors
-    // =========================================================================
-
-    /**
-     * Creates a WebSocket connection over a plain NioSocket.
-     */
     constructor(socket: NioSocket, configuration: WebSocketConfiguration) : this(
         configuration = configuration,
         transportSend = { data -> socket.send(data) },
@@ -71,9 +54,6 @@ class WebSocketConnection private constructor(
         transportCancel = { socket.forceCancel() }
     )
 
-    /**
-     * Creates a WebSocket connection over a TLS record connection (WSS).
-     */
     constructor(tlsConnection: TlsRecordConnection, configuration: WebSocketConfiguration) : this(
         configuration = configuration,
         transportSend = { data -> tlsConnection.send(data) },
@@ -82,9 +62,6 @@ class WebSocketConnection private constructor(
         transportCancel = { tlsConnection.cancel() }
     )
 
-    /**
-     * Creates a WebSocket connection over a generic transport, including tunneled chaining.
-     */
     constructor(transport: Transport, configuration: WebSocketConfiguration) : this(
         configuration = configuration,
         transportSend = { data -> transport.send(data) },
@@ -93,22 +70,16 @@ class WebSocketConnection private constructor(
         transportCancel = { transport.forceCancel() }
     )
 
-    // =========================================================================
-    // HTTP Upgrade Handshake
-    // =========================================================================
-
     /**
      * Performs the WebSocket HTTP upgrade handshake.
      *
      * @param earlyData Optional early data to embed in the upgrade request header.
      */
     suspend fun performUpgrade(earlyData: ByteArray? = null) {
-        // Generate 16-byte random key, base64-encoded
         val keyBytes = ByteArray(16)
         SecureRandom().nextBytes(keyBytes)
         val wsKey = Base64.encodeToString(keyBytes, Base64.NO_WRAP)
 
-        // Build HTTP upgrade request
         val sb = StringBuilder()
         sb.append("GET ${configuration.path} HTTP/1.1\r\n")
         sb.append("Host: ${configuration.host}\r\n")
@@ -117,13 +88,10 @@ class WebSocketConnection private constructor(
         sb.append("Sec-WebSocket-Key: $wsKey\r\n")
         sb.append("Sec-WebSocket-Version: 13\r\n")
 
-        // Custom headers from configuration
         for ((key, value) in configuration.headers) {
             sb.append("$key: $value\r\n")
         }
 
-        // Default User-Agent (Chrome UA) if not set in custom headers.
-        // Matches Xray-core's GetRequestHeader() which sets utils.ChromeUA.
         if (configuration.headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
             sb.append("User-Agent: $chromeUserAgent\r\n")
         }
@@ -147,9 +115,6 @@ class WebSocketConnection private constructor(
         receiveUpgradeResponse()
     }
 
-    /**
-     * Reads the HTTP 101 response, buffers any leftover data after the header.
-     */
     private suspend fun receiveUpgradeResponse() {
         while (true) {
             val data = transportReceive()
@@ -161,10 +126,8 @@ class WebSocketConnection private constructor(
             lock.withLock {
                 appendToReceiveBuffer(data)
 
-                // Look for the end of HTTP headers (\r\n\r\n)
                 val headerEndIdx = findHeaderEnd(receiveBuffer, receiveBufferLen)
                 if (headerEndIdx < 0) {
-                    // Haven't received the full header yet, keep reading
                     return@withLock null
                 }
 
@@ -172,7 +135,6 @@ class WebSocketConnection private constructor(
                 val leftoverStart = headerEndIdx + 4 // skip \r\n\r\n
                 val leftoverLen = receiveBufferLen - leftoverStart
 
-                // Replace buffer with any leftover data after headers
                 if (leftoverLen > 0) {
                     val leftover = receiveBuffer.copyOfRange(leftoverStart, receiveBufferLen)
                     receiveBuffer = leftover
@@ -182,7 +144,6 @@ class WebSocketConnection private constructor(
                     receiveBufferLen = 0
                 }
 
-                // Validate HTTP 101 response
                 val headerString = String(headerData, Charsets.UTF_8)
                 val firstLine = headerString.split("\r\n", limit = 2).firstOrNull() ?: ""
                 if (!firstLine.contains("101")) {
@@ -191,42 +152,30 @@ class WebSocketConnection private constructor(
 
                 upgraded = true
                 return@withLock Unit
-            } ?: continue // null means need more data
+            } ?: continue
 
-            // Upgrade complete
             startHeartbeat()
             return
         }
     }
 
-    // =========================================================================
-    // Public API
-    // =========================================================================
-
-    /**
-     * Sends data as a binary WebSocket frame (masked, opcode 0x02).
-     */
+    /** Sends data as a binary WebSocket frame (masked, opcode 0x02). */
     suspend fun send(data: ByteArray) {
         val frame = buildFrame(0x02, data)
         transportSend(frame)
     }
 
-    /**
-     * Sends data as a binary WebSocket frame without tracking completion.
-     */
     fun sendAsync(data: ByteArray) {
         val frame = buildFrame(0x02, data)
         transportSendAsync(frame)
     }
 
     /**
-     * Receives a complete WebSocket frame payload.
-     * Uses a loop instead of recursion to handle control frames (Ping/Pong)
-     * without risk of stack overflow from many consecutive control frames.
+     * Loops instead of recursing so consecutive control frames (Ping/Pong) cannot
+     * blow the stack.
      */
     suspend fun receive(): ByteArray? {
         while (true) {
-            // Try to extract a frame from buffered data
             val result = lock.withLock { tryExtractFrame() }
             if (result != null) {
                 when (result) {
@@ -250,7 +199,6 @@ class WebSocketConnection private constructor(
                 }
             }
 
-            // Need more data from transport
             val data = transportReceive()
             if (data == null) return null  // true EOF
             if (data.isEmpty()) continue   // temporary empty read, retry
@@ -258,9 +206,6 @@ class WebSocketConnection private constructor(
         }
     }
 
-    /**
-     * Cancels the connection.
-     */
     fun cancel() {
         lock.withLock {
             _isConnected = false
@@ -273,12 +218,7 @@ class WebSocketConnection private constructor(
         transportCancel()
     }
 
-    // =========================================================================
-    // Heartbeat (Ping Sender)
-    // =========================================================================
-
     /**
-     * Starts a periodic ping sender matching Xray-core's heartbeat behavior.
      * Sends a WebSocket Ping frame every heartbeatPeriod seconds.
      * Stops automatically if the send fails (connection closed).
      */
@@ -308,13 +248,7 @@ class WebSocketConnection private constructor(
         }
     }
 
-    // =========================================================================
-    // Frame Building (Client -> Server, MUST be masked)
-    // =========================================================================
-
-    /**
-     * Builds a WebSocket frame with masking (client -> server).
-     */
+    /** Builds a WebSocket frame with masking (RFC 6455 requires client → server masking). */
     private fun buildFrame(opcode: Int, payload: ByteArray): ByteArray {
         val length = payload.size
         var headerSize = 2 + 4 // minimum header + mask key
@@ -342,13 +276,11 @@ class WebSocketConnection private constructor(
             }
         }
 
-        // 4-byte random mask key
         val maskKey = ByteArray(4)
         SecureRandom().nextBytes(maskKey)
         System.arraycopy(maskKey, 0, frame, offset, 4)
         offset += 4
 
-        // XOR-masked payload
         for (i in 0 until length) {
             frame[offset + i] = (payload[i].toInt() xor maskKey[i and 3].toInt()).toByte()
         }
@@ -356,13 +288,6 @@ class WebSocketConnection private constructor(
         return frame
     }
 
-    // =========================================================================
-    // Frame Parsing (Server -> Client, NOT masked)
-    // =========================================================================
-
-    /**
-     * Result of attempting to extract a frame from the buffer.
-     */
     private sealed class FrameResult {
         class Binary(val data: ByteArray) : FrameResult()
         class Ping(val data: ByteArray) : FrameResult()
@@ -370,9 +295,7 @@ class WebSocketConnection private constructor(
         class Close(val code: Int, val reason: String) : FrameResult()
     }
 
-    /**
-     * Tries to extract a complete frame from receiveBuffer. Must be called with lock held.
-     */
+    /** Must be called with lock held. */
     private fun tryExtractFrame(): FrameResult? {
         if (receiveBufferLen < 2) return null
 
@@ -430,8 +353,8 @@ class WebSocketConnection private constructor(
 
         val opcode = byte0 and 0x0F
         return when (opcode) {
-            0x01, 0x02 -> FrameResult.Binary(payload) // Text or Binary
-            0x08 -> { // Close
+            0x01, 0x02 -> FrameResult.Binary(payload)
+            0x08 -> {
                 var code = 1005 // No status code
                 var reason = ""
                 if (payload.size >= 2) {
@@ -448,15 +371,8 @@ class WebSocketConnection private constructor(
         }
     }
 
-    // =========================================================================
-    // Buffer Helpers
-    // =========================================================================
-
-    /**
-     * Appends data to the receive buffer. Must be called with lock held.
-     */
+    /** Must be called with lock held. */
     private fun appendToReceiveBuffer(data: ByteArray) {
-        // Buffer overflow protection (matching iOS maxReceiveBufferSize = 1MB)
         if (receiveBufferLen + data.size > MAX_RECEIVE_BUFFER_SIZE) {
             receiveBufferLen = 0
             throw IOException("WebSocket receive buffer overflow (>${MAX_RECEIVE_BUFFER_SIZE} bytes)")
@@ -471,9 +387,6 @@ class WebSocketConnection private constructor(
         receiveBufferLen += data.size
     }
 
-    /**
-     * Finds the position of \r\n\r\n in the buffer, or returns -1.
-     */
     private fun findHeaderEnd(buf: ByteArray, len: Int): Int {
         for (i in 0 until len - 3) {
             if (buf[i] == 0x0D.toByte() && buf[i + 1] == 0x0A.toByte() &&
@@ -485,25 +398,12 @@ class WebSocketConnection private constructor(
         return -1
     }
 
-    // =========================================================================
-    // Base64URL Encoding
-    // =========================================================================
-
-    /**
-     * RFC 4648 base64url encoding (no padding).
-     */
+    /** RFC 4648 base64url encoding (no padding). */
     private fun base64URLEncode(data: ByteArray): String {
         return Base64.encodeToString(data, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
     }
 }
 
-// =============================================================================
-// WebSocket Errors
-// =============================================================================
-
-/**
- * WebSocket transport errors.
- */
 sealed class WebSocketError(message: String) : Exception(message) {
     class UpgradeFailed(reason: String) : WebSocketError("WebSocket upgrade failed: $reason")
     class InvalidFrame(reason: String) : WebSocketError("WebSocket invalid frame: $reason")

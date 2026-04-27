@@ -57,15 +57,9 @@ class RealityClient(
     private var mlkemEncapsulationKey: ByteArray? = null
     private var mlkemPrivateKey: java.security.PrivateKey? = null
 
-    // =========================================================================
-    // Public API
-    // =========================================================================
-
     /**
      * Connects to a Reality server and performs the TLS handshake.
      *
-     * @param host The server hostname or IP address.
-     * @param port The server port number.
      * @return The established [TlsRecordConnection].
      */
     suspend fun connect(host: String, port: Int): TlsRecordConnection {
@@ -75,22 +69,28 @@ class RealityClient(
         ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
         mlkemEncapsulationKey = tryGenerateMLKEMKeyPair()
 
+        val privateKey = ephemeralPrivateKeyBytes
+            ?: throw RealityError.HandshakeFailed("No ephemeral key")
+
+        // Build the ClientHello up front so it can ride along with the TCP handshake
+        // as TFO payload, saving one round-trip on the server's first response.
+        val clientHello = buildRealityClientHello(privateKey)
+        storedClientHello = clientHello.copyOfRange(5, clientHello.size)
+
         val socket = NioSocket()
         connection = socket
 
         try {
-            socket.connect(host, port)
+            socket.connect(host, port, initialData = clientHello)
         } catch (e: Exception) {
             logger.error("[Reality] TCP connection failed: ${e.message}")
             throw RealityError.HandshakeFailed("TCP connection failed: ${e.message}")
         }
 
-        return performRealityHandshake()
+        return receiveServerResponse()
     }
 
-    /**
-     * Performs the Reality handshake over an existing transport (for proxy chaining).
-     */
+    /** Performs the Reality handshake over an existing transport (for proxy chaining). */
     suspend fun connect(transport: Transport): TlsRecordConnection {
         val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
         ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
@@ -101,18 +101,11 @@ class RealityClient(
         return performRealityHandshake()
     }
 
-    /**
-     * Cancels the connection and releases all resources.
-     */
     fun cancel() {
         clearHandshakeState()
         connection?.forceCancel()
         connection = null
     }
-
-    // =========================================================================
-    // Handshake
-    // =========================================================================
 
     /**
      * Performs the Reality TLS handshake: sends ClientHello, processes ServerHello,
@@ -135,17 +128,12 @@ class RealityClient(
         return receiveServerResponse()
     }
 
-    // =========================================================================
-    // ClientHello
-    // =========================================================================
-
     /**
      * Builds a TLS ClientHello with Reality authentication metadata.
      *
      * Embeds version, timestamp, and shortId in the SessionId field,
      * encrypted with AES-GCM using a key derived from ECDH with the server.
      *
-     * @param privateKey The ephemeral X25519 private key for this connection.
      * @return A complete TLS record containing the ClientHello.
      */
     private fun buildRealityClientHello(privateKey: ByteArray): ByteArray {
@@ -154,9 +142,9 @@ class RealityClient(
 
         // Build SessionId with Reality metadata in first 16 bytes
         val sessionId = ByteArray(32)
-        sessionId[0] = 26  // Xray-core version 26.1.18
-        sessionId[1] = 1
-        sessionId[2] = 18
+        sessionId[0] = 26  // version 26.4.25
+        sessionId[1] = 4
+        sessionId[2] = 25
         sessionId[3] = 0
 
         val timestamp = (System.currentTimeMillis() / 1000).toInt()
@@ -183,7 +171,7 @@ class RealityClient(
         val pubKeyBytes = ephemeralPublicKeyBytes
             ?: throw RealityError.HandshakeFailed("No public key bytes")
 
-        // Build ClientHello with zero SessionId for AAD (matching Xray-core)
+        // Build ClientHello with zero SessionId for AAD
         val zeroSessionId = ByteArray(32)
         val rawClientHelloForAAD = TlsClientHelloBuilder.buildRawClientHello(
             fingerprint = configuration.fingerprint,
@@ -218,16 +206,12 @@ class RealityClient(
         return TlsClientHelloBuilder.wrapInTLSRecord(finalClientHello)
     }
 
-    // =========================================================================
-    // Server Response Processing
-    // =========================================================================
-
     /**
      * Receives and processes the server's TLS response.
      *
      * Buffers partial reads until at least 5 bytes are available for the TLS
      * record header. The server may deliver data in small chunks, especially
-     * when tunneled through a proxy chain (matching iOS).
+     * when tunneled through a proxy chain.
      */
     private suspend fun receiveServerResponse(
         existingBuffer: ByteArray = ByteArray(0)
@@ -260,13 +244,10 @@ class RealityClient(
         return receiveServerResponse(existingBuffer + data)
     }
 
-    /**
-     * Continues receiving handshake messages until ServerHello is complete.
-     */
+    /** Continues receiving handshake messages until ServerHello is complete. */
     private suspend fun continueReceivingHandshake(buffer: ByteArray): TlsRecordConnection {
         var buf = buffer
 
-        // Keep reading until we have at least one complete TLS record (matching iOS)
         while (!bufferContainsCompleteTlsRecord(buf)) {
             val conn = connection
                 ?: throw RealityError.HandshakeFailed("Connection cancelled")
@@ -298,9 +279,7 @@ class RealityClient(
             // ML-KEM encapsulation key, so mlkemPrivateKey must be set here. A
             // decap failure produces the wrong shared secret — falling back to
             // X25519-only would derive the wrong handshake keys and surface as
-            // a misleading authentication failure later. Fail fast instead,
-            // matching iOS RealityClient.swift:359 which propagates the error
-            // out of `decapsulateMLKEM`.
+            // a misleading authentication failure later. Fail fast instead.
             val mlkemCt = serverKeyShare.copyOfRange(0, 1088)
             val x25519Key = serverKeyShare.copyOfRange(1088, 1120)
             val x25519Shared = NativeBridge.nativeX25519KeyAgreement(privateKey, x25519Key)
@@ -326,13 +305,7 @@ class RealityClient(
         return consumeRemainingHandshake(buf, 0)
     }
 
-    // =========================================================================
-    // ServerHello Parsing
-    // =========================================================================
-
-    /**
-     * Extracts the ServerHello handshake message from the buffer (without TLS record header).
-     */
+    /** Extracts the ServerHello handshake message from the buffer (without TLS record header). */
     private fun extractServerHelloMessage(buffer: ByteArray): ByteArray {
         var offset = 0
         while (offset + 5 < buffer.size) {
@@ -354,18 +327,8 @@ class RealityClient(
     }
 
     /**
-     * Parses the ServerHello to extract the server's X25519 key share and cipher suite.
-     * First tries the native C parser, then falls back to the Kotlin parser.
-     *
-     * @param data The raw TLS data containing the ServerHello record.
-     * @return A pair of (keyShare, cipherSuite) or null if parsing fails.
-     */
-    /**
-     * Checks whether the buffer contains a complete ServerHello by walking through
-     * all TLS records (matching iOS bufferContainsCompleteServerHello).
-     *
-     * Returns true when all records seen so far are complete — indicating
-     * enough data has been buffered for parseServerHello to proceed.
+     * Returns true when all TLS records seen so far are complete — indicating enough
+     * data has been buffered for parseServerHello to proceed.
      */
     private fun bufferContainsCompleteTlsRecord(buffer: ByteArray): Boolean {
         var offset = 0
@@ -379,7 +342,6 @@ class RealityClient(
     }
 
     private fun parseServerHello(data: ByteArray): Pair<ByteArray, Int>? {
-        // Try native parser first
         val nativeResult = com.argsment.anywhere.vpn.util.PacketUtil.parseServerHello(data)
         if (nativeResult != null && nativeResult.size == 34) {
             val keyShare = nativeResult.copyOfRange(0, 32)
@@ -388,13 +350,9 @@ class RealityClient(
             return Pair(keyShare, cipherSuite)
         }
 
-        // Fallback to Kotlin parser
         return parseServerHelloKotlin(data)
     }
 
-    /**
-     * Kotlin fallback for ServerHello parsing.
-     */
     private fun parseServerHelloKotlin(data: ByteArray): Pair<ByteArray, Int>? {
         var offset = 0
 
@@ -466,10 +424,9 @@ class RealityClient(
                     }
                 }
 
-                // Advance to the next extension header. Anchor on extDataStart
-                // because the 0x0033 branch above may have consumed group+keyLen
-                // (4 bytes) without returning, leaving shOffset advanced past
-                // the start of extData.
+                // Anchor on extDataStart because the 0x0033 branch above may have
+                // consumed group+keyLen (4 bytes) without returning, leaving shOffset
+                // advanced past the start of extData.
                 shOffset = extDataStart + extDataLen
             }
 
@@ -479,13 +436,8 @@ class RealityClient(
         return null
     }
 
-    // =========================================================================
-    // Encrypted Handshake Processing
-    // =========================================================================
-
     /**
      * Consumes remaining TLS handshake records (encrypted), looking for Server Finished.
-     *
      * Once Server Finished is found, derives application keys and sends Client Finished.
      */
     private suspend fun consumeRemainingHandshake(
@@ -600,7 +552,7 @@ class RealityClient(
 
             clearHandshakeState()
             // Pass any remaining buffer data (e.g., NewSessionTicket) to the
-            // TlsRecordConnection so it isn't lost (matching iOS prependToReceiveBuffer)
+            // TlsRecordConnection so it isn't lost.
             if (processedOffset < buffer.size) {
                 val remaining = buffer.copyOfRange(processedOffset, buffer.size)
                 realityConnection.prependToReceiveBuffer(remaining)
@@ -621,13 +573,7 @@ class RealityClient(
         }
     }
 
-    // =========================================================================
-    // Client Finished
-    // =========================================================================
-
-    /**
-     * Sends the ChangeCipherSpec and encrypted Client Finished messages.
-     */
+    /** Sends the ChangeCipherSpec and encrypted Client Finished messages. */
     private suspend fun sendClientFinished() {
         val keys = handshakeKeys
             ?: throw RealityError.HandshakeFailed("Missing handshake keys")
@@ -663,13 +609,6 @@ class RealityClient(
         conn.send(fullMessage)
     }
 
-    // =========================================================================
-    // Verification
-    // =========================================================================
-
-    /**
-     * Verifies the server response contains a valid ServerHello.
-     */
     private fun verifyServerResponse(data: ByteArray): Boolean {
         if (authKey == null) return false
 
@@ -694,15 +633,10 @@ class RealityClient(
         return false
     }
 
-    // =========================================================================
-    // CompressedCertificate (RFC 8879)
-    // =========================================================================
-
     /**
-     * Decompresses a CompressedCertificate message body.
+     * Decompresses a CompressedCertificate message body (RFC 8879).
      *
-     * RFC 8879 layout: algorithm (2) + uncompressed_length (3) + compressed_length (3) + data
-     * Supports zlib (0x0001).
+     * Layout: algorithm (2) + uncompressed_length (3) + compressed_length (3) + data.
      */
     private fun decompressCertificate(body: ByteArray): ByteArray? {
         if (body.size < 8) return null
@@ -756,10 +690,6 @@ class RealityClient(
         }
     }
 
-    // =========================================================================
-    // Reality Certificate Verification
-    // =========================================================================
-
     /**
      * Verifies a Reality server certificate by checking HMAC-SHA512 signature.
      *
@@ -777,12 +707,10 @@ class RealityClient(
         val (publicKey, signature) = components
         val currentAuthKey = authKey ?: return false
 
-        // Compute HMAC-SHA512(authKey, publicKey)
         val mac = javax.crypto.Mac.getInstance("HmacSHA512")
         mac.init(SecretKeySpec(currentAuthKey, "HmacSHA512"))
         val expected = mac.doFinal(publicKey)
 
-        // Compare with signature
         if (expected.size != signature.size) return false
         var result = 0
         for (i in expected.indices) {
@@ -801,7 +729,6 @@ class RealityClient(
 
         var offset = 0
 
-        // Certificate request context length
         val contextLen = certBody[offset].toInt() and 0xFF
         offset += 1 + contextLen
 
@@ -833,19 +760,15 @@ class RealityClient(
      * Returns null if the certificate is not ed25519.
      */
     private fun extractEd25519Components(certDER: ByteArray): Pair<ByteArray, ByteArray>? {
-        // Parse outer SEQUENCE
         val outerOffset = IntArray(1) { 0 }
         parseDERSequence(certDER, outerOffset) ?: return null
 
-        // Parse TBSCertificate SEQUENCE
         val tbsStart = outerOffset[0]
         val tbsContentLen = parseDERSequence(certDER, outerOffset) ?: return null
         val tbsEnd = outerOffset[0] + tbsContentLen
 
-        // Search for ed25519 OID [06 03 2b 65 70] within TBSCertificate.
-        // We search from the TBS SEQUENCE tag (tbsStart) up to tbsEnd minus the
-        // 8-byte SubjectPublicKeyInfo prefix we expect to follow the OID. Matches
-        // iOS extractEd25519Components which iterates from tbsHeaderStart..<tbsEnd.
+        // Search from the TBS SEQUENCE tag (tbsStart) up to tbsEnd minus the
+        // 8-byte SubjectPublicKeyInfo prefix expected to follow the OID.
         val ed25519OID = byteArrayOf(0x06, 0x03, 0x2b, 0x65, 0x70)
         var publicKey: ByteArray? = null
 
@@ -860,7 +783,6 @@ class RealityClient(
                 }
             }
             if (match) {
-                // Found OID, look for BIT STRING [03 21 00] + 32-byte key after it
                 val afterOID = i + ed25519OID.size
                 if (certDER[afterOID] == 0x03.toByte() &&
                     certDER[afterOID + 1] == 0x21.toByte() &&
@@ -875,7 +797,6 @@ class RealityClient(
 
         if (publicKey == null) return null
 
-        // Skip past TBSCertificate to signatureAlgorithm
         outerOffset[0] = tbsEnd
 
         // Skip signatureAlgorithm SEQUENCE
@@ -900,10 +821,9 @@ class RealityClient(
     }
 
     /**
-     * Parses a DER SEQUENCE tag at the given offset.
-     * Expects tag 0x30, then reads length.
-     * Updates offset past the tag and length bytes.
-     * Returns the content length, or null on failure.
+     * Parses a DER SEQUENCE tag at the given offset. Expects tag 0x30, then reads length.
+     * Updates offset past the tag and length bytes. Returns the content length, or null
+     * on failure.
      */
     private fun parseDERSequence(data: ByteArray, offset: IntArray): Int? {
         if (offset[0] >= data.size) return null
@@ -913,10 +833,8 @@ class RealityClient(
     }
 
     /**
-     * Parses a DER length at the given offset.
-     * Short form: single byte < 0x80.
-     * Long form: first byte & 0x7F = number of length bytes, then big-endian.
-     * Updates offset past the length bytes.
+     * Short form: single byte < 0x80. Long form: first byte & 0x7F = number of length
+     * bytes, then big-endian. Updates offset past the length bytes.
      */
     private fun parseDERLength(data: ByteArray, offset: IntArray): Int? {
         if (offset[0] >= data.size) return null
@@ -928,7 +846,7 @@ class RealityClient(
         }
 
         val numBytes = first and 0x7F
-        if (numBytes == 0 || numBytes > 4) return null
+        if (numBytes == 0 || numBytes > 3) return null
         if (offset[0] + numBytes > data.size) return null
 
         var length = 0
@@ -939,14 +857,7 @@ class RealityClient(
         return length
     }
 
-    // =========================================================================
-    // Crypto Helpers
-    // =========================================================================
-
-    /**
-     * Encrypts plaintext with AES-GCM.
-     * Returns ciphertext + tag (32 bytes for 16 bytes plaintext).
-     */
+    /** Returns ciphertext + tag (32 bytes for 16 bytes plaintext). */
     private fun encryptAESGCM(
         plaintext: ByteArray,
         key: ByteArray,
@@ -961,10 +872,7 @@ class RealityClient(
         return cipher.doFinal(plaintext)
     }
 
-    /**
-     * Encrypts a TLS 1.3 handshake record.
-     * Returns a complete TLS record (header + ciphertext + tag).
-     */
+    /** Returns a complete TLS record (header + ciphertext + tag). */
     private fun encryptHandshakeRecord(
         plaintext: ByteArray,
         key: ByteArray,
@@ -996,10 +904,7 @@ class RealityClient(
         return aad + ciphertextAndTag
     }
 
-    /**
-     * Decrypts a TLS 1.3 handshake record.
-     * Returns the decrypted handshake messages (stripped of inner content type and padding).
-     */
+    /** Returns the decrypted handshake messages (stripped of inner content type and padding). */
     private fun decryptHandshakeRecord(
         ciphertext: ByteArray,
         key: ByteArray,
@@ -1046,9 +951,6 @@ class RealityClient(
         }
     }
 
-    /**
-     * Builds a TLS 1.3 nonce by XORing the IV with the sequence number.
-     */
     private fun buildNonce(iv: ByteArray, seqNum: Long): ByteArray {
         val nonce = iv.copyOf()
         val base = nonce.size - 8
@@ -1059,9 +961,7 @@ class RealityClient(
         return nonce
     }
 
-    /**
-     * Derives a symmetric key from a shared secret using HKDF (via javax.crypto).
-     */
+    /** Derives a symmetric key from a shared secret using HKDF. */
     private fun deriveKeyHKDF(
         sharedSecret: ByteArray,
         salt: ByteArray,
@@ -1100,13 +1000,7 @@ class RealityClient(
         return result
     }
 
-    // =========================================================================
-    // Cleanup
-    // =========================================================================
-
-    /**
-     * Frees handshake-only state to reduce memory after the connection is established.
-     */
+    /** Frees handshake-only state to reduce memory after the connection is established. */
     private fun clearHandshakeState() {
         ephemeralPrivateKeyBytes = null
         ephemeralPublicKeyBytes = null
@@ -1122,10 +1016,6 @@ class RealityClient(
         mlkemEncapsulationKey = null
         mlkemPrivateKey = null
     }
-
-    // =========================================================================
-    // ML-KEM-768 (Post-Quantum Key Exchange, Android 15+ / API 35+)
-    // =========================================================================
 
     /**
      * Tries to generate an ML-KEM-768 keypair on Android 15+ (API 35).
@@ -1171,10 +1061,7 @@ class RealityClient(
         }
     }
 
-    /**
-     * Decapsulates an ML-KEM-768 ciphertext on Android 15+.
-     * Returns the 32-byte shared secret, or null if unavailable.
-     */
+    /** Returns the 32-byte shared secret, or null if unavailable. */
     private fun mlkemDecapsulate(ciphertext: ByteArray): ByteArray? {
         val privKey = mlkemPrivateKey ?: return null
         if (Build.VERSION.SDK_INT < 35) return null

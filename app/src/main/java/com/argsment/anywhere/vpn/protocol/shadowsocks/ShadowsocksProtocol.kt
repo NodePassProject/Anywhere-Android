@@ -6,14 +6,12 @@ import java.net.InetAddress
 import java.nio.ByteBuffer
 
 /**
- * Shadowsocks wire format utilities.
+ * Shadowsocks wire-format utilities.
  *
- * Address format: ATYP(1) + Address(var) + Port(2, big-endian)
+ * Address format: `ATYP(1) + Address(var) + Port(2, big-endian)`
  * - ATYP 0x01: IPv4 (4 bytes)
  * - ATYP 0x03: Domain (1-byte length + string)
  * - ATYP 0x04: IPv6 (16 bytes)
- *
- * Cross-ref: Xray-core/proxy/shadowsocks/protocol.go
  */
 object ShadowsocksProtocol {
 
@@ -21,15 +19,11 @@ object ShadowsocksProtocol {
     private const val ATYP_DOMAIN: Byte = 0x03
     private const val ATYP_IPV6: Byte = 0x04
 
-    /**
-     * Builds a Shadowsocks address header for the given host and port.
-     * Matches `WriteTCPRequest()` address encoding in Xray-core.
-     */
     fun buildAddressHeader(host: String, port: Int): ByteArray {
         val ipv4 = parseIPv4(host)
         val ipv6 = if (ipv4 == null) parseIPv6(host) else null
 
-        val buf = ByteBuffer.allocate(1 + 256 + 2) // max possible size
+        val buf = ByteBuffer.allocate(1 + 256 + 2)
         when {
             ipv4 != null -> {
                 buf.put(ATYP_IPV4)
@@ -40,7 +34,6 @@ object ShadowsocksProtocol {
                 buf.put(ipv6)
             }
             else -> {
-                // Domain
                 val domainBytes = host.toByteArray(Charsets.UTF_8)
                 buf.put(ATYP_DOMAIN)
                 buf.put(domainBytes.size.toByte())
@@ -48,7 +41,6 @@ object ShadowsocksProtocol {
             }
         }
 
-        // Port (big-endian)
         buf.put((port shr 8).toByte())
         buf.put((port and 0xFF).toByte())
 
@@ -58,19 +50,12 @@ object ShadowsocksProtocol {
         return result
     }
 
-    /**
-     * Encodes a UDP packet: address header + raw payload.
-     * Matches `EncodeUDPPacket()` in Xray-core.
-     */
+    /** Address header followed by the raw payload. */
     fun encodeUDPPacket(host: String, port: Int, payload: ByteArray): ByteArray {
         val header = buildAddressHeader(host, port)
         return header + payload
     }
 
-    /**
-     * Decodes a UDP packet: parses address header, returns (host, port, payload).
-     * Matches `DecodeUDPPacket()` in Xray-core.
-     */
     fun decodeUDPPacket(data: ByteArray): UdpPacket? {
         if (data.isEmpty()) return null
         var offset = 0
@@ -114,8 +99,6 @@ object ShadowsocksProtocol {
         return UdpPacket(host, port, payload)
     }
 
-    // -- IP Parsing --
-
     private val IPV4_REGEX = Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$""")
 
     private fun parseIPv4(address: String): ByteArray? {
@@ -133,7 +116,6 @@ object ShadowsocksProtocol {
         if (clean.startsWith("[") && clean.endsWith("]")) {
             clean = clean.substring(1, clean.length - 1)
         }
-        // Quick check: must contain colon to be IPv6
         if (!clean.contains(':')) return null
         return try {
             val addr = InetAddress.getByName(clean)

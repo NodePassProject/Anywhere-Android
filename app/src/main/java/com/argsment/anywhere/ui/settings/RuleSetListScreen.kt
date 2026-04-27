@@ -56,13 +56,11 @@ import com.argsment.anywhere.ui.components.AppIconView
 import com.argsment.anywhere.viewmodel.VpnViewModel
 
 /**
- * Ported from iOS `RuleSetListView`.
- *
  * Shows built-in service rule sets (Direct + ADBlock are excluded: Direct is
  * always-direct, ADBlock is toggled from the root Settings screen). Below the
  * built-ins, lists user-created custom rule sets and navigates into
  * [CustomRuleSetDetailScreen] on tap. Adding new custom rule sets is gated
- * behind [VpnViewModel.experimentalEnabled] to match iOS.
+ * behind [VpnViewModel.experimentalEnabled].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,7 +101,6 @@ private fun RuleSetListRoot(
     val configurations by viewModel.configRepository.configurations.collectAsState()
     val subscriptions by viewModel.subscriptionRepository.subscriptions.collectAsState()
 
-    // Built-in service rule sets shown in the top section (Direct + ADBlock excluded).
     val builtInServiceRuleSets = remember(ruleSets) {
         ruleSets.filter { !it.isCustom && it.name != "ADBlock" && it.id != "Direct" }
     }
@@ -412,7 +409,6 @@ private fun RuleSetRow(
                         }
                     )
 
-                    // Standalone configs
                     standaloneConfigs.forEach { config ->
                         DropdownMenuItem(
                             text = { Text(config.name) },
@@ -423,9 +419,7 @@ private fun RuleSetRow(
                         )
                     }
 
-                    // Subscribed configs
                     subscribedGroups.forEach { (subscription, configs) ->
-                        // Subscription header (non-clickable)
                         DropdownMenuItem(
                             text = {
                                 Text(

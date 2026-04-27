@@ -35,7 +35,6 @@ fun TrafficStatsRow(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        // Upload
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = Icons.Filled.KeyboardArrowUp,
@@ -51,7 +50,6 @@ fun TrafficStatsRow(
             )
         }
 
-        // Download
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = Icons.Filled.KeyboardArrowDown,

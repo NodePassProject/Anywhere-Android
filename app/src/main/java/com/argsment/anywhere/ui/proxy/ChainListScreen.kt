@@ -1,7 +1,9 @@
 package com.argsment.anywhere.ui.proxy
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -132,7 +134,6 @@ fun ChainListScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Add chain bottom sheet
     if (showingAddSheet) {
         ModalBottomSheet(
             onDismissRequest = { showingAddSheet = false },
@@ -151,7 +152,6 @@ fun ChainListScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Edit chain bottom sheet
     chainToEdit?.let { chain ->
         ModalBottomSheet(
             onDismissRequest = { chainToEdit = null },
@@ -170,9 +170,6 @@ fun ChainListScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Delete confirmation dialog (matching iOS intent that destructive actions
-    // require explicit confirmation — iOS's swipe actions + destructive styling
-    // serves the same purpose on that platform).
     chainToDelete?.let { chain ->
         AlertDialog(
             onDismissRequest = { chainToDelete = null },
@@ -190,7 +187,6 @@ fun ChainListScreen(viewModel: VpnViewModel) {
         )
     }
 
-    // Not enough proxies alert
     if (showingNotEnoughProxiesAlert) {
         AlertDialog(
             onDismissRequest = { showingNotEnoughProxiesAlert = false },
@@ -236,7 +232,6 @@ private fun ChainRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                // Name + checkmark
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = chain.name,
@@ -254,7 +249,6 @@ private fun ChainRow(
                     }
                 }
 
-                // Route preview or invalid message
                 if (isValid) {
                     Text(
                         text = proxies.joinToString(" \u2192 ") { it.name },
@@ -270,7 +264,6 @@ private fun ChainRow(
                     )
                 }
 
-                // Proxy count + entry/exit addresses
                 Row {
                     Text(
                         text = stringResource(R.string.n_proxies, proxies.size),
@@ -289,7 +282,16 @@ private fun ChainRow(
             }
 
             if (isValid) {
-                LatencyBadge(latency = latency)
+                // Tap latency to re-test this single chain — mirrors iOS ChainListView.
+                Box(
+                    modifier = Modifier.clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onTestLatency
+                    )
+                ) {
+                    LatencyBadge(latency = latency)
+                }
             }
         }
 

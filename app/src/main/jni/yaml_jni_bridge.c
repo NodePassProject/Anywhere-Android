@@ -1,18 +1,7 @@
-//
-//  yaml_jni_bridge.c
-//  Anywhere Android
-//
-//  JNI bridge for libyaml. Converts YAML (Clash proxy configs) to JSON.
-//
-
 #include <jni.h>
 #include "libyaml/include/yaml.h"
 #include <string.h>
 #include <stdlib.h>
-
-// ---------------------------------------------------------------------------
-// Dynamic string buffer for building JSON output
-// ---------------------------------------------------------------------------
 
 typedef struct {
     char *data;
@@ -66,10 +55,6 @@ static int strbuf_append_char(strbuf_t *sb, char c) {
     return strbuf_append(sb, &c, 1);
 }
 
-// ---------------------------------------------------------------------------
-// JSON string escaping
-// ---------------------------------------------------------------------------
-
 static int strbuf_append_json_string(strbuf_t *sb, const char *str, size_t len) {
     if (!strbuf_append_char(sb, '"')) return 0;
 
@@ -99,7 +84,6 @@ static int strbuf_append_json_string(strbuf_t *sb, const char *str, size_t len) 
                 break;
             default:
                 if (c < 0x20) {
-                    // Control characters: emit \u00XX
                     char esc[7];
                     snprintf(esc, sizeof(esc), "\\u%04x", c);
                     if (!strbuf_append_cstr(sb, esc)) return 0;
@@ -114,11 +98,6 @@ static int strbuf_append_json_string(strbuf_t *sb, const char *str, size_t len) 
     return 1;
 }
 
-// ---------------------------------------------------------------------------
-// YAML event-based parser -> JSON conversion
-// ---------------------------------------------------------------------------
-
-// State machine context for tracking container types
 #define MAX_DEPTH 128
 
 typedef enum {
@@ -130,7 +109,7 @@ typedef enum {
 
 typedef struct {
     context_type_t type;
-    int count; // number of items emitted in this container
+    int count;
 } context_frame_t;
 
 typedef struct {
@@ -159,25 +138,20 @@ static void context_pop(context_t *ctx) {
     if (ctx->depth > 0) ctx->depth--;
 }
 
-// Emit a separator (comma) before a value if needed, based on context.
-// Also handles the colon after mapping keys.
 static int emit_separator(strbuf_t *sb, context_t *ctx) {
     context_frame_t *frame = context_top(ctx);
-    if (frame == NULL) return 1; // top-level, no separator
+    if (frame == NULL) return 1;
 
     switch (frame->type) {
         case CTX_MAPPING_KEY:
-            // Before a mapping key: emit comma if not the first key
             if (frame->count > 0) {
                 if (!strbuf_append_char(sb, ',')) return 0;
             }
             break;
         case CTX_MAPPING_VALUE:
-            // Between key and value: emit colon
             if (!strbuf_append_char(sb, ':')) return 0;
             break;
         case CTX_SEQUENCE:
-            // Before a sequence element: emit comma if not first
             if (frame->count > 0) {
                 if (!strbuf_append_char(sb, ',')) return 0;
             }
@@ -188,18 +162,15 @@ static int emit_separator(strbuf_t *sb, context_t *ctx) {
     return 1;
 }
 
-// Advance the context state after emitting a value
 static void advance_context(context_t *ctx) {
     context_frame_t *frame = context_top(ctx);
     if (frame == NULL) return;
 
     switch (frame->type) {
         case CTX_MAPPING_KEY:
-            // After emitting a key, expect value next
             frame->type = CTX_MAPPING_VALUE;
             break;
         case CTX_MAPPING_VALUE:
-            // After emitting a value, expect next key
             frame->type = CTX_MAPPING_KEY;
             frame->count++;
             break;
@@ -238,7 +209,6 @@ static int yaml_to_json(const char *yaml_str, size_t yaml_len, strbuf_t *sb) {
             case YAML_STREAM_END_EVENT:
             case YAML_DOCUMENT_START_EVENT:
             case YAML_DOCUMENT_END_EVENT:
-                // No JSON output for these
                 break;
 
             case YAML_MAPPING_START_EVENT:
@@ -279,7 +249,7 @@ static int yaml_to_json(const char *yaml_str, size_t yaml_len, strbuf_t *sb) {
             }
 
             case YAML_ALIAS_EVENT:
-                // Aliases not supported; emit null
+                /* Aliases not supported; emit null. */
                 if (!emit_separator(sb, &ctx)) { error = 1; break; }
                 if (!strbuf_append_cstr(sb, "null")) { error = 1; break; }
                 advance_context(&ctx);
@@ -301,9 +271,6 @@ static int yaml_to_json(const char *yaml_str, size_t yaml_len, strbuf_t *sb) {
     return !error;
 }
 
-// ---------------------------------------------------------------------------
-// nativeParseYaml(String yamlContent) -> String (JSON)
-// ---------------------------------------------------------------------------
 JNIEXPORT jstring JNICALL
 Java_com_argsment_anywhere_vpn_NativeBridge_nativeParseYaml(
         JNIEnv *env, jclass clazz, jstring yamlContent) {

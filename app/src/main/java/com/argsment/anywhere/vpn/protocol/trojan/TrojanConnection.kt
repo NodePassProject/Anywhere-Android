@@ -1,9 +1,8 @@
 package com.argsment.anywhere.vpn.protocol.trojan
 
 import com.argsment.anywhere.data.model.TlsVersion
-import com.argsment.anywhere.vpn.protocol.Transport
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.tls.TlsRecordConnection
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 
 private val logger = AnywhereLogger("Trojan")
@@ -13,15 +12,15 @@ private val logger = AnywhereLogger("Trojan")
  *
  * The header — `hex(sha224(password)) + CRLF + cmd + addr:port + CRLF` — is
  * prepended to the first `sendRaw` payload and travels inside the same TLS
- * record, matching Xray-core's `ConnWriter.Write`. The receive path is a
- * pass-through because Trojan servers reply without any framing of their own.
+ * record. The receive path is a pass-through because Trojan servers reply
+ * without any framing of their own.
  */
 class TrojanConnection(
     private val tlsConnection: TlsRecordConnection,
     password: String,
     destinationHost: String,
     destinationPort: Int
-) : VlessConnection() {
+) : ProxyConnection() {
 
     private var pendingHeader: ByteArray? = TrojanProtocol.buildRequestHeader(
         passwordKey = TrojanProtocol.passwordKey(password),
@@ -30,11 +29,6 @@ class TrojanConnection(
         port = destinationPort
     )
     private val headerLock = Any()
-
-    init {
-        // Trojan servers reply without any framing header — no wait state.
-        responseHeaderReceived = true
-    }
 
     override val isConnected: Boolean get() = true
     override val outerTlsVersion: TlsVersion?

@@ -13,8 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
 
 /**
- * Integer-backed rule type, matching iOS [DomainRuleType] in
- * `Shared/Models/DomainRule.swift`.  Legacy string payloads
+ * Integer-backed rule type. Legacy string payloads
  * ("domain", "domainKeyword", "domainSuffix", "ipCIDR", "ipCIDR6")
  * are decoded for backward compatibility.
  */

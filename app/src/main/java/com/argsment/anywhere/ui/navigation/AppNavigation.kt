@@ -8,11 +8,13 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,7 +38,6 @@ import com.argsment.anywhere.ui.settings.SettingsScreen
 import com.argsment.anywhere.viewmodel.VpnViewModel
 import kotlinx.serialization.Serializable
 
-// Navigation routes
 @Serializable object HomeRoute
 @Serializable object ProxiesRoute
 @Serializable object ChainsRoute
@@ -148,6 +149,26 @@ fun AppNavigation(viewModel: VpnViewModel) {
                     SettingsScreen(viewModel = viewModel)
                 }
             }
+        }
+
+        // Routing Rules Updated alert — surfaces orphaned rule-set assignments that
+        // were silently re-pointed to Default after a referenced proxy was deleted.
+        // Mirrors iOS ContentView's "Routing Rules Updated" alert.
+        val orphanedNames by viewModel.orphanedRuleSetNames.collectAsState()
+        if (orphanedNames.isNotEmpty()) {
+            AlertDialog(
+                onDismissRequest = { viewModel.clearOrphanedRuleSetNames() },
+                title = { Text(stringResource(R.string.routing_rules_updated_title)) },
+                text = {
+                    Text(stringResource(R.string.routing_rules_updated_message,
+                        orphanedNames.joinToString(", ")))
+                },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.clearOrphanedRuleSetNames() }) {
+                        Text(stringResource(R.string.ok))
+                    }
+                }
+            )
         }
     }
 }

@@ -49,9 +49,7 @@ object SubscriptionFetcher {
             connection.connectTimeout = 30_000
             connection.readTimeout = 30_000
 
-            // Accept self-signed certificates only when the caller has indicated
-            // allowInsecure (mirrors iOS SubscriptionFetcher which uses InsecureSessionDelegate
-            // only when the global allowInsecure preference is set).
+            // Accept self-signed certificates only when the caller has indicated allowInsecure.
             if (connection is HttpsURLConnection && allowInsecure) {
                 val trustAllManager = object : X509TrustManager {
                     override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
@@ -76,7 +74,6 @@ object SubscriptionFetcher {
 
             val data = connection.inputStream.readBytes()
 
-            // Parse response headers
             val profileTitle = parseProfileTitle(connection)
             val userInfo = parseSubscriptionUserInfo(connection)
 
@@ -87,7 +84,6 @@ object SubscriptionFetcher {
             }.getOrNull()
             val decodedString = decoded?.let { String(it, Charsets.UTF_8) }
 
-            // Parsable URL prefixes — matches iOS ProxyConfiguration.parsableURLPrefixes.
             val parsablePrefixes = ProxyConfiguration.parsableUrlPrefixes
 
             bodyString = if (decodedString != null && parsablePrefixes.any { decodedString.contains(it) }) {
@@ -96,7 +92,6 @@ object SubscriptionFetcher {
                 String(data, Charsets.UTF_8)
             }
 
-            // Try Clash YAML format first
             if (bodyString.contains("proxies:")) {
                 val result = ClashProxyParser.parse(bodyString)
                 if (result.configurations.isEmpty()) throw FetchError.NoConfigurations()
@@ -110,7 +105,6 @@ object SubscriptionFetcher {
                 )
             }
 
-            // Parse proxy URL lines — matches iOS SubscriptionFetcher line-by-line parsing.
             val configurations = bodyString
                 .lines()
                 .map { it.trim() }

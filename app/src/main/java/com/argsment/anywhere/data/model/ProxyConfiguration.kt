@@ -4,8 +4,10 @@ import com.argsment.anywhere.vpn.util.base64UrlToByteArrayOrNull
 import com.argsment.anywhere.vpn.util.hexToByteArrayOrNull
 import com.argsment.anywhere.vpn.util.toBase64Url
 import com.argsment.anywhere.vpn.util.toHex
+import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksCipher
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
@@ -17,21 +19,14 @@ import java.util.UUID
 import org.json.JSONObject
 
 /**
- * Percent-decodes [s] matching iOS `String.removingPercentEncoding` semantics:
- * only `%XX` hex escapes are decoded; `+` stays literal (unlike
- * `URLDecoder.decode`, which treats `+` as a space per form-url-encoded rules).
- *
- * VLESS/WebSocket share links follow standard URL percent-encoding, not form
- * encoding — a path like `/?ed=2048+xray` must stay byte-identical on both
- * platforms, otherwise the HTTP upgrade request path differs between iOS and
- * Android for the same share link.
+ * Percent-decodes [s]: only `%XX` hex escapes are decoded; `+` stays literal
+ * (unlike `URLDecoder.decode`, which treats `+` as a space per form-url-encoded
+ * rules). VLESS/WebSocket share links follow standard URL percent-encoding, not
+ * form encoding — a path like `/?ed=2048+xray` must stay byte-identical,
+ * otherwise the HTTP upgrade request path differs for the same share link.
  */
 internal fun percentDecode(s: String): String =
     URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
-
-// =============================================================================
-// TLS Fingerprint
-// =============================================================================
 
 @Serializable
 enum class TlsFingerprint(val raw: String) {
@@ -70,15 +65,26 @@ enum class TlsFingerprint(val raw: String) {
         fun fromRaw(value: String): TlsFingerprint =
             entries.find { it.raw == value } ?: CHROME_133
 
+        /**
+         * Pool used when the user picks "Random". Android-only fingerprints
+         * (ANDROID_11, QQ_11, BROWSER_360) are kept in the enum for backward
+         * compatibility with previously imported share links but excluded from
+         * the random pool.
+         */
         val concreteFingerprints: List<TlsFingerprint> = entries.filter {
-            it != RANDOM && it != ANDROID_11 && it != BROWSER_360
+            it != RANDOM && it != ANDROID_11 && it != QQ_11 && it != BROWSER_360
+        }
+
+        /**
+         * Picker entries for [com.argsment.anywhere.ui.proxy.ProxyEditorScreen].
+         * Excludes Android-only fingerprints from the dropdown, but `fromRaw`
+         * still resolves them when imported from URLs.
+         */
+        val pickerFingerprints: List<TlsFingerprint> = entries.filter {
+            it != ANDROID_11 && it != QQ_11 && it != BROWSER_360
         }
     }
 }
-
-// =============================================================================
-// TLS Version
-// =============================================================================
 
 /**
  * Negotiated TLS protocol version. The numeric `value` matches the on-the-wire
@@ -95,7 +101,7 @@ enum class TlsVersion(val value: Int) {
             TLS13 -> "TLS 1.3"
         }
 
-    /** Wire-compatible version string for URL query params (e.g. "1.2", "1.3"). Matches iOS. */
+    /** Wire-compatible version string for URL query params (e.g. "1.2", "1.3"). */
     val urlValue: String
         get() = when (this) {
             TLS12 -> "1.2"
@@ -103,19 +109,15 @@ enum class TlsVersion(val value: Int) {
         }
 }
 
-// =============================================================================
-// TLS Configuration
-// =============================================================================
-
 @Serializable
 data class TlsConfiguration(
     val serverName: String,
     val alpn: List<String>? = null,
     val allowInsecure: Boolean = false,
     val fingerprint: TlsFingerprint = TlsFingerprint.CHROME_133,
-    /** Minimum acceptable TLS version (null = no minimum, accept any). Mirrors iOS `minVersion`. */
+    /** Minimum acceptable TLS version (null = no minimum, accept any). */
     val minVersion: TlsVersion? = null,
-    /** Maximum acceptable TLS version (null = no maximum, accept any). Mirrors iOS `maxVersion`. */
+    /** Maximum acceptable TLS version (null = no maximum, accept any). */
     val maxVersion: TlsVersion? = null
 ) {
     companion object {
@@ -137,7 +139,7 @@ data class TlsConfiguration(
             )
         }
 
-        /** Parses a TLS version string ("1.0"–"1.3") into a [TlsVersion]. Matches iOS TLSConfiguration.parseTLSVersion.
+        /** Parses a TLS version string ("1.0"–"1.3") into a [TlsVersion].
          *  "1.0" and "1.1" are legacy; treated as TLS 1.2 since Android does not implement deprecated versions. */
         private fun parseTlsVersion(version: String?): TlsVersion? = when (version) {
             "1.0", "1.1", "1.2" -> TlsVersion.TLS12
@@ -146,10 +148,6 @@ data class TlsConfiguration(
         }
     }
 }
-
-// =============================================================================
-// Reality Configuration
-// =============================================================================
 
 @Serializable
 data class RealityConfiguration(
@@ -197,10 +195,6 @@ data class RealityConfiguration(
     }
 }
 
-// =============================================================================
-// WebSocket Configuration
-// =============================================================================
-
 @Serializable
 data class WebSocketConfiguration(
     val host: String,
@@ -220,10 +214,6 @@ data class WebSocketConfiguration(
     }
 }
 
-// =============================================================================
-// HTTP Upgrade Configuration
-// =============================================================================
-
 @Serializable
 data class HttpUpgradeConfiguration(
     val host: String,
@@ -239,10 +229,6 @@ data class HttpUpgradeConfiguration(
         }
     }
 }
-
-// =============================================================================
-// XHTTP Mode
-// =============================================================================
 
 @Serializable
 enum class XHttpMode(val raw: String) {
@@ -264,10 +250,6 @@ enum class XHttpMode(val raw: String) {
             entries.find { it.raw == value } ?: AUTO
     }
 }
-
-// =============================================================================
-// XHTTP Placement & Padding
-// =============================================================================
 
 /** Metadata placement for session ID, sequence numbers, and padding. */
 @Serializable
@@ -297,10 +279,6 @@ enum class XHttpPaddingMethod(val raw: String) {
     }
 }
 
-// =============================================================================
-// XHTTP Configuration
-// =============================================================================
-
 @Serializable
 data class XHttpConfiguration(
     val host: String,
@@ -310,7 +288,6 @@ data class XHttpConfiguration(
     @SerialName("noGRPCHeader") val noGrpcHeader: Boolean = false,
     val scMaxEachPostBytes: Int = 1_000_000,
     val scMinPostsIntervalMs: Int = 30,
-    // X-Padding settings
     val xPaddingBytesFrom: Int = 100,
     val xPaddingBytesTo: Int = 1000,
     val xPaddingObfsMode: Boolean = false,
@@ -318,14 +295,11 @@ data class XHttpConfiguration(
     val xPaddingHeader: String = "X-Padding",
     val xPaddingPlacement: XHttpPlacement = XHttpPlacement.QUERY_IN_HEADER,
     val xPaddingMethod: XHttpPaddingMethod = XHttpPaddingMethod.REPEAT_X,
-    // Uplink settings
     val uplinkHTTPMethod: String = "POST",
-    // Session/seq placement
     val sessionPlacement: XHttpPlacement = XHttpPlacement.PATH,
     val sessionKey: String = "",
     val seqPlacement: XHttpPlacement = XHttpPlacement.PATH,
     val seqKey: String = "",
-    // Uplink data placement
     val uplinkDataPlacement: XHttpPlacement = XHttpPlacement.BODY,
     val uplinkDataKey: String = "",
     val uplinkChunkSize: Int = 0
@@ -345,7 +319,7 @@ data class XHttpConfiguration(
             return if (parts.size > 1) parts[1] else ""
         }
 
-    /** Normalized session key, auto-determined by placement if not set. Matches Xray-core. */
+    /** Normalized session key, auto-determined by placement if not set. */
     val normalizedSessionKey: String
         get() {
             if (sessionKey.isNotEmpty()) return sessionKey
@@ -356,7 +330,7 @@ data class XHttpConfiguration(
             }
         }
 
-    /** Normalized seq key, auto-determined by placement if not set. Matches Xray-core. */
+    /** Normalized seq key, auto-determined by placement if not set. */
     val normalizedSeqKey: String
         get() {
             if (seqKey.isNotEmpty()) return seqKey
@@ -367,7 +341,6 @@ data class XHttpConfiguration(
             }
         }
 
-    /** Generates padding string based on configured method and length range. */
     fun generatePadding(): String {
         val length = (xPaddingBytesFrom..xPaddingBytesTo).random()
         return when (xPaddingMethod) {
@@ -376,7 +349,6 @@ data class XHttpConfiguration(
         }
     }
 
-    /** Serializes advanced XHTTP settings to a JSON string for the Extra field. */
     fun toExtraJson(): String {
         val parts = mutableListOf<String>()
         if (noGrpcHeader) parts.add("\"noGRPCHeader\":true")
@@ -410,8 +382,6 @@ data class XHttpConfiguration(
             val path = params["path"]?.let { percentDecode(it) } ?: "/"
             val mode = XHttpMode.fromRaw(params["mode"] ?: "auto")
             val extra = params["extra"] ?: ""
-            // Delegate to fromExtraJson when an extra blob is present, mirroring iOS
-            // XHTTPConfiguration.parse(from:serverAddress:tlsServerName:realityServerName:).
             return if (extra.isNotBlank()) {
                 fromExtraJson(host, path, mode, extra)
             } else {
@@ -419,13 +389,12 @@ data class XHttpConfiguration(
             }
         }
 
-        /** Creates an XHttpConfiguration from host/path/mode and an extra JSON string. */
         fun fromExtraJson(host: String, path: String, mode: XHttpMode, extraJson: String): XHttpConfiguration {
             if (extraJson.isBlank()) return XHttpConfiguration(host = host, path = path, mode = mode)
             return try {
                 val json = org.json.JSONObject(extraJson)
 
-                // scMaxEachPostBytes: can be int or {"from":N,"to":N} (matching iOS/Xray-core)
+                // scMaxEachPostBytes: can be int or {"from":N,"to":N}
                 val scMaxEachPostBytes = json.opt("scMaxEachPostBytes").let { v ->
                     when (v) {
                         is org.json.JSONObject -> v.optInt("to", 1_000_000)
@@ -434,7 +403,7 @@ data class XHttpConfiguration(
                     }
                 }
 
-                // scMinPostsIntervalMs: can be int or {"from":N,"to":N} (matching iOS/Xray-core)
+                // scMinPostsIntervalMs: can be int or {"from":N,"to":N}
                 val scMinPostsIntervalMs = json.opt("scMinPostsIntervalMs").let { v ->
                     when (v) {
                         is org.json.JSONObject -> v.optInt("to", 30)
@@ -443,7 +412,7 @@ data class XHttpConfiguration(
                     }
                 }
 
-                // xPaddingBytes: can be int or {"from":N,"to":N} (matching iOS/Xray-core)
+                // xPaddingBytes: can be int or {"from":N,"to":N}
                 var xPaddingFrom = 100
                 var xPaddingTo = 1000
                 json.opt("xPaddingBytes")?.let { v ->
@@ -464,7 +433,6 @@ data class XHttpConfiguration(
                     xPaddingTo = json.optInt("xPaddingBytesTo", xPaddingTo)
                 }
 
-                // uplinkDataPlacement + derived defaults (matching iOS/Xray-core Build())
                 val uplinkDataPlacement = XHttpPlacement.fromRaw(json.optString("uplinkDataPlacement", "body"))
                 val defaultUplinkDataKey = when (uplinkDataPlacement) {
                     XHttpPlacement.HEADER -> "X-Data"
@@ -506,13 +474,12 @@ data class XHttpConfiguration(
             }
         }
 
-        // Base62 character set matching iOS (0-9A-Za-z)
         private val tokenishChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
         /**
          * Generates pseudo-random alphanumeric padding that looks like a token.
-         * Target Huffman byte length: ceil(length / 0.8) to match iOS which compensates
-         * for HTTP/2 Huffman compression.
+         * Target Huffman byte length: ceil(length / 0.8) to compensate for
+         * HTTP/2 Huffman compression.
          */
         fun generateTokenishPadding(length: Int): String {
             val charCount = kotlin.math.ceil(length / 0.8).toInt()
@@ -526,19 +493,11 @@ data class XHttpConfiguration(
     }
 }
 
-// =============================================================================
-// UUID Serializer
-// =============================================================================
-
 object UuidSerializer : KSerializer<UUID> {
     override val descriptor = PrimitiveSerialDescriptor("UUID", PrimitiveKind.STRING)
     override fun serialize(encoder: Encoder, value: UUID) = encoder.encodeString(value.toString())
     override fun deserialize(decoder: Decoder): UUID = UUID.fromString(decoder.decodeString())
 }
-
-// =============================================================================
-// ByteArray serializers (Base64URL and Hex)
-// =============================================================================
 
 object Base64UrlByteArraySerializer : KSerializer<ByteArray> {
     override val descriptor = PrimitiveSerialDescriptor("Base64UrlByteArray", PrimitiveKind.STRING)
@@ -554,39 +513,16 @@ object HexByteArraySerializer : KSerializer<ByteArray> {
         decoder.decodeString().hexToByteArrayOrNull() ?: byteArrayOf()
 }
 
-// =============================================================================
-// Hysteria Constants
-// =============================================================================
+@Serializable(with = OutboundProtocolSerializer::class)
+enum class OutboundProtocol(val raw: String) {
+    VLESS("vless"),
+    TROJAN("trojan"),
+    SHADOWSOCKS("shadowsocks"),
+    SOCKS5("socks5"),
+    NAIVE_HTTP11("http11"),
+    NAIVE_HTTP2("http2");
 
-/** Valid range (inclusive) for Hysteria's declared upload bandwidth. Matches
- *  iOS `HysteriaUploadMbpsRange`. */
-val HysteriaUploadMbpsRange: IntRange = 0..100
-
-/** Default upload bandwidth used when `upmbps` is missing from a share link.
- *  Matches iOS `HysteriaUploadMbpsDefault`. */
-const val HysteriaUploadMbpsDefault: Int = 20
-
-/** Clamps [raw] into [HysteriaUploadMbpsRange]. Matches iOS
- *  `clampHysteriaUploadMbps`. */
-fun clampHysteriaUploadMbps(raw: Int): Int =
-    raw.coerceIn(HysteriaUploadMbpsRange)
-
-// =============================================================================
-// Outbound Protocol
-// =============================================================================
-
-@Serializable
-enum class OutboundProtocol {
-    @SerialName("vless") VLESS,
-    @SerialName("trojan") TROJAN,
-    @SerialName("shadowsocks") SHADOWSOCKS,
-    @SerialName("socks5") SOCKS5,
-    @SerialName("naive_http11") NAIVE_HTTP11,
-    @SerialName("naive_http2") NAIVE_HTTP2,
-    @SerialName("naive_http3") NAIVE_HTTP3,
-    @SerialName("hysteria") HYSTERIA;
-
-    val isNaive: Boolean get() = this == NAIVE_HTTP11 || this == NAIVE_HTTP2 || this == NAIVE_HTTP3
+    val isNaive: Boolean get() = this == NAIVE_HTTP11 || this == NAIVE_HTTP2
     val displayName: String
         get() = when (this) {
             VLESS -> "VLESS"
@@ -595,8 +531,6 @@ enum class OutboundProtocol {
             SOCKS5 -> "SOCKS5"
             NAIVE_HTTP11 -> "HTTPS"
             NAIVE_HTTP2 -> "HTTP/2"
-            NAIVE_HTTP3 -> "QUIC"
-            HYSTERIA -> "Hysteria"
         }
 
     /**
@@ -606,14 +540,33 @@ enum class OutboundProtocol {
      * via a separate `connection.send` after connect (and ACK them back to
      * lwIP via `nativeTcpRecved`).
      *
-     * Mirrors iOS `OutboundProtocol.handshakeCarriesInitialData`. Getting
-     * this wrong silently swallows the caller's first bytes for non-VLESS
-     * protocols (e.g. Hysteria) — the bytes are sent over the wire but
-     * lwIP never ACKs them back to the local app, the app times out and
-     * sends RST.
+     * Getting this wrong silently swallows the caller's first bytes for
+     * non-VLESS protocols — the bytes are sent over the wire but lwIP never
+     * ACKs them back to the local app, the app times out and sends RST.
      */
     val handshakeCarriesInitialData: Boolean
         get() = this == VLESS
+}
+
+object OutboundProtocolSerializer : KSerializer<OutboundProtocol> {
+    override val descriptor = PrimitiveSerialDescriptor("OutboundProtocol", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: OutboundProtocol) {
+        encoder.encodeString(value.raw)
+    }
+
+    override fun deserialize(decoder: Decoder): OutboundProtocol {
+        val raw = decoder.decodeString()
+        return when (raw) {
+            "vless" -> OutboundProtocol.VLESS
+            "trojan" -> OutboundProtocol.TROJAN
+            "shadowsocks" -> OutboundProtocol.SHADOWSOCKS
+            "socks5" -> OutboundProtocol.SOCKS5
+            "http11", "naive_http11" -> OutboundProtocol.NAIVE_HTTP11
+            "http2", "naive_http2" -> OutboundProtocol.NAIVE_HTTP2
+            else -> throw SerializationException("Unknown outbound protocol: $raw")
+        }
+    }
 }
 
 @Serializable
@@ -621,10 +574,6 @@ enum class NaiveProtocol {
     @SerialName("http11") HTTP11,
     @SerialName("http2") HTTP2
 }
-
-// =============================================================================
-// Proxy Configuration
-// =============================================================================
 
 @Serializable
 data class ProxyConfiguration(
@@ -656,14 +605,8 @@ data class ProxyConfiguration(
     val naiveUsername: String? = null,
     val naivePassword: String? = null,
     val naiveProtocol: NaiveProtocol? = null,
-    /** Hysteria v2 password (sent in the Hysteria-Auth header). */
-    val hysteriaPassword: String? = null,
-    /** Client's declared upload bandwidth in Mbit/s for Brutal congestion
-     *  control. Clamped to 0…100 (matches iOS `HysteriaUploadMbpsRange`). */
-    val hysteriaUploadMbps: Int? = null,
-    /** Trojan password (matches iOS `ProxyConfiguration.trojanPassword`). */
     val trojanPassword: String? = null,
-    /** Trojan's mandatory TLS configuration (matches iOS `ProxyConfiguration.trojanTLS`). */
+    /** Trojan's mandatory TLS configuration. */
     val trojanTls: TlsConfiguration? = null,
     val chain: List<ProxyConfiguration>? = null
 ) {
@@ -699,17 +642,11 @@ data class ProxyConfiguration(
                 naiveUsername == other.naiveUsername &&
                 naivePassword == other.naivePassword &&
                 naiveProtocol == other.naiveProtocol &&
-                hysteriaPassword == other.hysteriaPassword &&
-                hysteriaUploadMbps == other.hysteriaUploadMbps &&
                 trojanPassword == other.trojanPassword &&
                 trojanTls == other.trojanTls &&
                 chain == other.chain
 
     fun withChain(chain: List<ProxyConfiguration>?): ProxyConfiguration = copy(chain = chain)
-
-    // =========================================================================
-    // URL Export
-    // =========================================================================
 
     fun toUrl(): String = when (outboundProtocol) {
         OutboundProtocol.VLESS -> toVlessUrl()
@@ -717,14 +654,12 @@ data class ProxyConfiguration(
         OutboundProtocol.SHADOWSOCKS -> toShadowsocksUrl()
         OutboundProtocol.SOCKS5 -> toSocks5Url()
         OutboundProtocol.NAIVE_HTTP11, OutboundProtocol.NAIVE_HTTP2 -> toNaiveUrl()
-        OutboundProtocol.NAIVE_HTTP3 -> toQuicUrl()
-        OutboundProtocol.HYSTERIA -> toHysteriaUrl()
     }
 
     private fun toTrojanUrl(): String {
-        // Matches iOS `ProxyConfiguration+URLExport.swift`: password in userinfo
-        // (whole chunk, no user:pass split), TLS sni/alpn/fp optional in query.
-        val password = java.net.URLEncoder.encode(trojanPassword ?: "", "UTF-8")
+        // Password in userinfo (whole chunk, no user:pass split), TLS
+        // sni/alpn/fp optional in query.
+        val password = urlEncode(trojanPassword ?: "")
         val params = mutableListOf<String>()
         trojanTls?.let { tls ->
             if (tls.serverName != serverAddress) params.add("sni=${tls.serverName}")
@@ -740,16 +675,6 @@ data class ProxyConfiguration(
         return "trojan://$password@$bracketedServerAddress:$serverPort$query#$fragment"
     }
 
-    private fun toHysteriaUrl(): String {
-        val params = mutableListOf<String>()
-        tls?.serverName?.takeIf { it.isNotBlank() }?.let { params.add("sni=$it") }
-        hysteriaUploadMbps?.let { params.add("upmbps=$it") }
-        val query = if (params.isNotEmpty()) "?${params.joinToString("&")}" else ""
-        val pwd = (hysteriaPassword ?: "").let { java.net.URLEncoder.encode(it, "UTF-8") }
-        val frag = "#${java.net.URLEncoder.encode(name, "UTF-8")}"
-        return "hy2://$pwd@$bracketedServerAddress:$serverPort$query$frag"
-    }
-
     private fun toVlessUrl(): String {
         val params = mutableListOf<String>()
         if (encryption != "none") params.add("encryption=$encryption")
@@ -757,12 +682,10 @@ data class ProxyConfiguration(
         params.add("security=$security")
         if (transport != "tcp") params.add("type=$transport")
 
-        // TLS parameters
         if (security == "tls" && tls != null) {
             appendTlsParams(params, tls)
         }
 
-        // Reality parameters
         if (security == "reality" && reality != null) {
             params.add("sni=${reality.serverName}")
             params.add("pbk=${reality.publicKey.toBase64Url()}")
@@ -773,9 +696,8 @@ data class ProxyConfiguration(
         appendTransportParams(params)
         if (!muxEnabled) params.add("mux=false")
         if (!xudpEnabled) params.add("xudp=false")
-        if (testseed != listOf(900u, 500u, 900u, 256u)) {
-            params.add("testseed=${testseed.joinToString(",")}")
-        }
+        // testseed is Android-only and not exported — iOS share-links never carry it,
+        // and round-trip parity matters more than expressing the local override.
 
         val query = if (params.isEmpty()) "" else "?${params.joinToString("&")}"
         val fragment = urlEncode(name)
@@ -783,23 +705,19 @@ data class ProxyConfiguration(
     }
 
     private fun toShadowsocksUrl(): String {
-        // Matches iOS: plain `ss://base64(method:password)@host:port#name` — no
-        // transport/security params. Shadowsocks runs over bare TCP in iOS.
+        // Plain `ss://base64(method:password)@host:port/#name` — no
+        // transport/security params. Shadowsocks runs over bare TCP.
         val method = ssMethod ?: return "ss://invalid"
         val password = ssPassword ?: return "ss://invalid"
         val userInfo = "$method:$password"
         val encoded = java.util.Base64.getEncoder().encodeToString(userInfo.toByteArray())
             .trimEnd('=')
         val fragment = urlEncode(name)
-        return "ss://$encoded@$bracketedServerAddress:$serverPort#$fragment"
+        return "ss://$encoded@$bracketedServerAddress:$serverPort/#$fragment"
     }
 
     /**
      * Emits TLS query params (sni, alpn, fp, allowInsecure, minVersion, maxVersion).
-     * `allowInsecure` and `min/maxVersion` are Android extensions — iOS does not parse
-     * `allowInsecure` at the URL level, but does parse `min/maxVersion`. Keeping the
-     * extra parameters preserves user settings across Android→Android sharing without
-     * breaking iOS consumers (unknown params are ignored by iOS URL parsing).
      */
     private fun appendTlsParams(params: MutableList<String>, tls: TlsConfiguration) {
         if (tls.serverName != serverAddress) params.add("sni=${tls.serverName}")
@@ -831,13 +749,6 @@ data class ProxyConfiguration(
         return "socks5://$userInfo$bracketedServerAddress:$serverPort#$fragment"
     }
 
-    private fun toQuicUrl(): String {
-        val user = urlEncode(naiveUsername ?: "")
-        val pass = urlEncode(naivePassword ?: "")
-        val fragment = urlEncode(name)
-        return "quic://$user:$pass@$bracketedServerAddress:$serverPort#$fragment"
-    }
-
     private fun appendTransportParams(params: MutableList<String>) {
         if (transport == "ws" && websocket != null) {
             if (websocket.host != serverAddress) params.add("host=${websocket.host}")
@@ -860,16 +771,11 @@ data class ProxyConfiguration(
         }
     }
 
-    // =========================================================================
-    // URL Parsing
-    // =========================================================================
-
     companion object {
-        /** URL scheme prefixes [fromUrl] recognises — matches iOS
-         *  `ProxyConfiguration.parsableURLPrefixes`. */
+        /** URL scheme prefixes [fromUrl] recognises. */
         val parsableUrlPrefixes = listOf(
-            "vless://", "hysteria2://", "hy2://", "trojan://", "ss://",
-            "socks5://", "socks://", "https://", "quic://"
+            "vless://", "trojan://", "ss://",
+            "socks5://", "socks://", "https://"
         )
 
         /** Whether [fromUrl] can parse [url]. */
@@ -880,19 +786,15 @@ data class ProxyConfiguration(
             url.startsWith("ss://") -> fromShadowsocksUrl(url)
             url.startsWith("socks5://") || url.startsWith("socks://") -> fromSocks5Url(url)
             url.startsWith("https://") -> fromNaiveUrl(url, naiveProtocol)
-            url.startsWith("quic://") -> fromQuicUrl(url)
             url.startsWith("vless://") -> fromVlessUrl(url)
             url.startsWith("trojan://") -> fromTrojanUrl(url)
-            url.startsWith("hy2://") || url.startsWith("hysteria2://") ->
-                fromHysteriaUrl(url)
-            else -> throw ProxyError.InvalidUrl("URL must start with vless://, trojan://, ss://, socks5://, https://, quic://, or hy2://")
+            else -> throw ProxyError.InvalidUrl("URL must start with vless://, trojan://, ss://, socks5://, or https://")
         }
 
         /**
          * Parses a Trojan URL. Format:
          * `trojan://password@host:port?sni=...&alpn=h2%2Chttp%2F1.1&fp=chrome_133#name`
          * TLS is mandatory — there is no plaintext Trojan variant on the wire.
-         * Mirrors iOS `ProxyConfiguration.parseTrojan(url:)`.
          */
         private fun fromTrojanUrl(url: String): ProxyConfiguration {
             var remaining = url.removePrefix("trojan://")
@@ -953,69 +855,9 @@ data class ProxyConfiguration(
             )
         }
 
-        private fun fromHysteriaUrl(url: String): ProxyConfiguration {
-            var remaining = when {
-                url.startsWith("hy2://") -> url.removePrefix("hy2://")
-                else -> url.removePrefix("hysteria2://")
-            }
-
-            var fragmentName: String? = null
-            val hashIndex = remaining.lastIndexOf('#')
-            if (hashIndex >= 0) {
-                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
-                remaining = remaining.substring(0, hashIndex)
-            }
-
-            val atIndex = remaining.indexOf('@')
-            if (atIndex < 0) throw ProxyError.InvalidUrl("Hysteria URL missing @ separator")
-            val password = percentDecode(remaining.substring(0, atIndex))
-            val serverPart = remaining.substring(atIndex + 1)
-
-            val hostPort: String
-            var queryString: String? = null
-            val q = serverPart.indexOf('?')
-            if (q >= 0) {
-                val before = serverPart.substring(0, q)
-                hostPort = if (before.endsWith("/")) before.dropLast(1) else before
-                queryString = serverPart.substring(q + 1)
-            } else {
-                val s = serverPart.indexOf('/')
-                hostPort = if (s >= 0) serverPart.substring(0, s) else serverPart
-            }
-
-            val (host, port) = parseHostPort(hostPort)
-            val params = parseQueryParams(queryString)
-
-            val sni = params["sni"] ?: params["peer"] ?: host
-            val insecure = params["insecure"] == "1" || params["insecure"]?.lowercase() == "true"
-            val tlsCfg = TlsConfiguration(
-                serverName = sni,
-                allowInsecure = insecure,
-                minVersion = TlsVersion.TLS13,
-                maxVersion = TlsVersion.TLS13
-            )
-
-            return ProxyConfiguration(
-                name = fragmentName ?: "Untitled",
-                serverAddress = host,
-                serverPort = port,
-                uuid = UUID.randomUUID(),
-                encryption = "none",
-                transport = "tcp",
-                security = "tls",
-                tls = tlsCfg,
-                outboundProtocol = OutboundProtocol.HYSTERIA,
-                hysteriaPassword = password,
-                hysteriaUploadMbps = clampHysteriaUploadMbps(
-                    params["upmbps"]?.toIntOrNull() ?: HysteriaUploadMbpsDefault
-                )
-            )
-        }
-
         private fun fromVlessUrl(url: String): ProxyConfiguration {
             var remaining = url.removePrefix("vless://")
 
-            // Extract fragment (#name)
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
@@ -1023,8 +865,7 @@ data class ProxyConfiguration(
                 remaining = remaining.substring(0, hashIndex)
             }
 
-            // Split by @ to get UUID and server info
-            val atIndex = remaining.indexOf('@')
+            val atIndex = remaining.lastIndexOf('@')
             if (atIndex < 0) throw ProxyError.InvalidUrl("Missing @ separator")
 
             val uuidString = remaining.substring(0, atIndex)
@@ -1033,7 +874,6 @@ data class ProxyConfiguration(
             val uuid = runCatching { UUID.fromString(uuidString) }.getOrNull()
                 ?: throw ProxyError.InvalidUrl("Invalid UUID: $uuidString")
 
-            // Separate host:port from query string
             val hostPort: String
             var queryString: String? = null
             val questionIndex = serverPart.indexOf('?')
@@ -1046,10 +886,7 @@ data class ProxyConfiguration(
                 hostPort = if (slashIndex >= 0) serverPart.substring(0, slashIndex) else serverPart
             }
 
-            // Parse host:port (handles IPv6 bracket notation: [::1]:443)
             val (host, port) = parseHostPort(hostPort)
-
-            // Parse query parameters
             val params = parseQueryParams(queryString)
 
             val encryption = params["encryption"] ?: "none"
@@ -1057,20 +894,18 @@ data class ProxyConfiguration(
             val security = params["security"] ?: "none"
             val transport = params["type"] ?: "tcp"
 
-            // Parse testseed
             var testseed: List<UInt>? = null
             params["testseed"]?.let { str ->
                 val values = str.split(",").mapNotNull { it.toUIntOrNull() }
                 if (values.size >= 4) testseed = values.take(4)
             }
 
-            // Parse sub-configs
             val realityConfig = if (security == "reality") RealityConfiguration.parse(params) else null
             val tlsConfig = if (security == "tls") TlsConfiguration.parse(params, host) else null
             val wsConfig = if (transport == "ws") WebSocketConfiguration.parse(params, host) else null
             val httpUpgradeConfig = if (transport == "httpupgrade") HttpUpgradeConfiguration.parse(params, host) else null
             val xhttpConfig = if (transport == "xhttp") {
-                // Fall back to TLS/Reality SNI for XHTTP host (matching iOS)
+                // Fall back to TLS/Reality SNI for XHTTP host
                 val xhttpHost = params["host"]
                     ?: tlsConfig?.serverName ?: realityConfig?.serverName ?: host
                 XHttpConfiguration.parse(params + ("host" to xhttpHost), host)
@@ -1106,7 +941,6 @@ data class ProxyConfiguration(
         private fun fromShadowsocksUrl(url: String): ProxyConfiguration {
             var remaining = url.removePrefix("ss://")
 
-            // Extract fragment (#name)
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
@@ -1118,47 +952,34 @@ data class ProxyConfiguration(
             val password: String
             val host: String
             val port: UShort
-            var queryString: String? = null
 
             val atIndex = remaining.indexOf('@')
             if (atIndex >= 0) {
-                // Standard format: base64(method:password)@host:port/?params
+                // SIP002 format: userinfo@host:port. The userinfo may be
+                // either literal method:password or base64(method:password).
                 val userInfo = remaining.substring(0, atIndex)
                 var serverPart = remaining.substring(atIndex + 1)
 
-                // Extract query string
                 val questionIndex = serverPart.indexOf('?')
                 if (questionIndex >= 0) {
-                    queryString = serverPart.substring(questionIndex + 1)
                     serverPart = serverPart.substring(0, questionIndex)
                 }
-                // Strip trailing path
                 val slashIndex = serverPart.indexOf('/')
                 if (slashIndex >= 0) {
                     serverPart = serverPart.substring(0, slashIndex)
                 }
 
-                // Decode base64 user info
-                val decoded = try {
-                    String(java.util.Base64.getDecoder().decode(padBase64(userInfo)))
-                } catch (_: Exception) {
-                    throw ProxyError.InvalidUrl("Invalid SS user info encoding")
-                }
-                val colonIndex = decoded.indexOf(':')
-                if (colonIndex < 0) throw ProxyError.InvalidUrl("Invalid SS user info format")
-                method = decoded.substring(0, colonIndex)
-                password = decoded.substring(colonIndex + 1)
+                val parsed = decodeShadowsocksUserInfo(userInfo)
+                method = parsed.first
+                password = parsed.second
 
                 val (h, p) = parseHostPort(serverPart)
                 host = h
                 port = p
             } else {
-                // SIP002 format: base64(method:password@host:port)
-                val decoded = try {
-                    String(java.util.Base64.getDecoder().decode(padBase64(remaining)))
-                } catch (_: Exception) {
-                    throw ProxyError.InvalidUrl("Invalid SS URL encoding")
-                }
+                // Legacy format: base64(method:password@host:port).
+                val decoded = decodeBase64Text(remaining)
+                    ?: throw ProxyError.InvalidUrl("Invalid SS URL encoding")
                 val colonIndex = decoded.indexOf(':')
                 if (colonIndex < 0) throw ProxyError.InvalidUrl("Missing method:password separator")
                 method = decoded.substring(0, colonIndex)
@@ -1172,18 +993,9 @@ data class ProxyConfiguration(
                 port = p
             }
 
-            val params = parseQueryParams(queryString)
-            val transport = params["type"] ?: "tcp"
-            val security = params["security"] ?: "none"
-
-            var tlsConfig: TlsConfiguration? = null
-            if (security == "tls") {
-                tlsConfig = TlsConfiguration.parse(params, host)
+            if (ShadowsocksCipher.fromMethod(method) == null) {
+                throw ProxyError.InvalidUrl("Unsupported SS method: $method")
             }
-
-            val wsConfig = if (transport == "ws") WebSocketConfiguration.parse(params, host) else null
-            val httpUpgradeConfig = if (transport == "httpupgrade") HttpUpgradeConfiguration.parse(params, host) else null
-            val xhttpConfig = if (transport == "xhttp") XHttpConfiguration.parse(params, host) else null
 
             return ProxyConfiguration(
                 name = fragmentName ?: "Untitled",
@@ -1191,12 +1003,8 @@ data class ProxyConfiguration(
                 serverPort = port,
                 uuid = UUID.randomUUID(), // placeholder, not used for SS
                 encryption = "none",
-                transport = transport,
-                security = security,
-                tls = tlsConfig,
-                websocket = wsConfig,
-                httpUpgrade = httpUpgradeConfig,
-                xhttp = xhttpConfig,
+                transport = "tcp",
+                security = "none",
                 outboundProtocol = OutboundProtocol.SHADOWSOCKS,
                 ssPassword = password,
                 ssMethod = method
@@ -1209,7 +1017,6 @@ data class ProxyConfiguration(
                 else -> throw ProxyError.InvalidUrl("Naive URL must start with https://")
             }
 
-            // Extract fragment (#name)
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
@@ -1217,26 +1024,22 @@ data class ProxyConfiguration(
                 remaining = remaining.substring(0, hashIndex)
             }
 
-            // Split user:pass@host:port
             val atIndex = remaining.lastIndexOf('@')
             if (atIndex < 0) throw ProxyError.InvalidUrl("Missing @ separator in naive URL")
 
             val userInfo = remaining.substring(0, atIndex)
             var serverPart = remaining.substring(atIndex + 1)
 
-            // Strip trailing path/query
             val slashIndex = serverPart.indexOf('/')
             if (slashIndex >= 0) {
                 serverPart = serverPart.substring(0, slashIndex)
             }
 
-            // Parse user:pass
             val colonIndex = userInfo.indexOf(':')
             if (colonIndex < 0) throw ProxyError.InvalidUrl("Missing password in naive URL (expected user:pass)")
             val username = percentDecode(userInfo.substring(0, colonIndex))
             val password = percentDecode(userInfo.substring(colonIndex + 1))
 
-            // Parse host:port
             val (host, port) = parseHostPort(serverPart)
 
             val proto = protocolOverride ?: OutboundProtocol.NAIVE_HTTP2
@@ -1264,7 +1067,6 @@ data class ProxyConfiguration(
                 else -> throw ProxyError.InvalidUrl("SOCKS5 URL must start with socks5:// or socks://")
             }
 
-            // Extract fragment (#name)
             var fragmentName: String? = null
             val hashIndex = remaining.lastIndexOf('#')
             if (hashIndex >= 0) {
@@ -1272,7 +1074,6 @@ data class ProxyConfiguration(
                 remaining = remaining.substring(0, hashIndex)
             }
 
-            // Optional user:pass@ prefix
             var username: String? = null
             var password: String? = null
             val serverPart: String
@@ -1308,56 +1109,6 @@ data class ProxyConfiguration(
                 socks5Password = password
             )
         }
-
-        private fun fromQuicUrl(url: String): ProxyConfiguration {
-            var remaining = url.removePrefix("quic://")
-
-            // Extract fragment (#name)
-            var fragmentName: String? = null
-            val hashIndex = remaining.lastIndexOf('#')
-            if (hashIndex >= 0) {
-                fragmentName = percentDecode(remaining.substring(hashIndex + 1))
-                remaining = remaining.substring(0, hashIndex)
-            }
-
-            // Split user:pass@host:port
-            val atIndex = remaining.lastIndexOf('@')
-            if (atIndex < 0) throw ProxyError.InvalidUrl("Missing @ separator in quic URL")
-
-            val userInfo = remaining.substring(0, atIndex)
-            var serverPart = remaining.substring(atIndex + 1)
-
-            // Strip trailing path/query
-            val slashIndex = serverPart.indexOf('/')
-            if (slashIndex >= 0) {
-                serverPart = serverPart.substring(0, slashIndex)
-            }
-
-            // Parse user:pass
-            val colonIndex = userInfo.indexOf(':')
-            if (colonIndex < 0) throw ProxyError.InvalidUrl("Missing password in quic URL (expected user:pass)")
-            val username = percentDecode(userInfo.substring(0, colonIndex))
-            val password = percentDecode(userInfo.substring(colonIndex + 1))
-
-            // Parse host:port
-            val (host, port) = parseHostPort(serverPart)
-
-            return ProxyConfiguration(
-                name = fragmentName ?: "Untitled",
-                serverAddress = host,
-                serverPort = port,
-                uuid = UUID.randomUUID(), // placeholder, not used for QUIC
-                encryption = "none",
-                outboundProtocol = OutboundProtocol.NAIVE_HTTP3,
-                naiveUsername = username,
-                naivePassword = password,
-                naiveProtocol = NaiveProtocol.HTTP2 // placeholder
-            )
-        }
-
-        // =====================================================================
-        // Parsing Helpers
-        // =====================================================================
 
         private fun parseQueryParams(queryString: String?): Map<String, String> {
             if (queryString == null) return emptyMap()
@@ -1398,14 +1149,33 @@ data class ProxyConfiguration(
             return str + "=".repeat(4 - remainder)
         }
 
+        private fun decodeShadowsocksUserInfo(userInfo: String): Pair<String, String> {
+            val colonIndex = userInfo.indexOf(':')
+            if (colonIndex >= 0) {
+                return Pair(userInfo.substring(0, colonIndex), percentDecode(userInfo.substring(colonIndex + 1)))
+            }
+
+            val decoded = decodeBase64Text(userInfo)
+                ?: throw ProxyError.InvalidUrl("Invalid SS user info encoding")
+            val decodedColonIndex = decoded.indexOf(':')
+            if (decodedColonIndex < 0) throw ProxyError.InvalidUrl("Invalid SS user info format")
+            return Pair(decoded.substring(0, decodedColonIndex), decoded.substring(decodedColonIndex + 1))
+        }
+
+        private fun decodeBase64Text(value: String): String? {
+            val padded = padBase64(value)
+            val bytes = runCatching {
+                java.util.Base64.getUrlDecoder().decode(padded)
+            }.getOrElse {
+                runCatching { java.util.Base64.getDecoder().decode(padded) }.getOrNull()
+            } ?: return null
+            return String(bytes, Charsets.UTF_8)
+        }
+
         private fun urlEncode(value: String): String =
-            URLEncoder.encode(value, "UTF-8")
+            URLEncoder.encode(value, "UTF-8").replace("+", "%20")
     }
 }
-
-// =============================================================================
-// Proxy Errors
-// =============================================================================
 
 sealed class ProxyError(message: String) : Exception(message) {
     class InvalidUrl(message: String) : ProxyError("Invalid URL: $message")

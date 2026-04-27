@@ -2,21 +2,24 @@ package com.argsment.anywhere.vpn
 
 import com.argsment.anywhere.data.model.OutboundProtocol
 import com.argsment.anywhere.vpn.util.AnywhereLogger
+import com.argsment.anywhere.vpn.util.DnsCache
 import com.argsment.anywhere.vpn.util.TransportErrorLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
+import com.argsment.anywhere.data.model.ProxyError
 import com.argsment.anywhere.vpn.protocol.direct.DirectUdpRelay
 import com.argsment.anywhere.vpn.protocol.mux.MuxNetwork
 import com.argsment.anywhere.vpn.protocol.mux.MuxSession
 import com.argsment.anywhere.vpn.protocol.mux.Xudp
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
-import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksClient
-import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksUdpRelay
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
+import com.argsment.anywhere.vpn.protocol.shadowsocks.ShadowsocksUdpSession
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ScheduledExecutorService
 
 /**
@@ -49,22 +52,23 @@ class LwipUdpFlow(
     private var directRelay: DirectUdpRelay? = null
 
     // Non-mux path
-    private var vlessConnection: VlessConnection? = null
+    private var proxyConnection: ProxyConnection? = null
 
     // Mux path
     private var muxSession: MuxSession? = null
 
-    // Shadowsocks UDP relay
-    private var ssUdpRelay: ShadowsocksUdpRelay? = null
+    // Shadowsocks: shared session per ProxyConfiguration owned by LwipStack;
+    // we hold an opaque token for our flow's responses.
+    private var ssSession: ShadowsocksUdpSession? = null
+    private var ssSessionToken: Long? = null
 
-    private var vlessConnecting = false
+    private var proxyConnecting = false
     private var pendingData = mutableListOf<ByteArray>()  // always raw payloads
     private var pendingBufferSize = 0
     /**
      * One-shot gate so a runaway send path doesn't flood the log with
      * "pending buffer overflow" lines — one warning per flow is enough
-     * for the user to see that datagrams are being dropped. Mirrors iOS
-     * `LWIPUDPFlow.didWarnPendingOverflow`.
+     * for the user to see that datagrams are being dropped.
      */
     private var didWarnPendingOverflow = false
     var closed = false
@@ -75,7 +79,6 @@ class LwipUdpFlow(
      * recently noted a tunnel-level interruption (network path drop,
      * sleep, memory pressure, …) we downgrade the message — those
      * failures are expected and don't indicate a server problem.
-     * Mirrors iOS `LWIPUDPFlow.logTransportFailure`.
      */
     private fun logTransportFailure(
         operation: String,
@@ -92,8 +95,6 @@ class LwipUdpFlow(
         )
     }
 
-    // -- Data Handling (called on lwIP thread) --
-
     fun handleReceivedData(data: ByteArray, payloadLength: Int) {
         if (closed) return
         lastActivity = System.nanoTime() / 1_000_000_000.0
@@ -101,7 +102,7 @@ class LwipUdpFlow(
         val payload = if (payloadLength < data.size) data.copyOf(payloadLength) else data
 
         // Buffer data while the outbound connection is being established
-        if (vlessConnecting) {
+        if (proxyConnecting) {
             bufferPayload(payload)
             return
         }
@@ -119,28 +120,33 @@ class LwipUdpFlow(
             return
         }
 
-        // Shadowsocks UDP relay: raw payload, per-packet encryption handled by relay
-        if (ssUdpRelay != null) {
-            ssUdpRelay!!.send(payload)
+        // Shadowsocks UDP relay: raw payload, per-packet encryption handled by
+        // the shared session (one socket / sessionID per ProxyConfiguration).
+        val session = ssSession
+        val token = ssSessionToken
+        if (session != null && token != null) {
+            session.send(token, dstHost, dstPort, payload)
             return
         }
 
-        // Non-mux path: send length-framed payload through VLESS connection
-        if (vlessConnection != null) {
-            sendUdpThroughVless(payload)
+        // Non-mux path: hand the raw payload to the proxy connection. Each
+        // protocol's UDP connection applies its own per-packet wire framing
+        // (VLESS adds the 2-byte length prefix via VlessUdpConnection, Trojan
+        // emits its addr+length+CRLF header, SOCKS5 adds its UDP header, …).
+        if (proxyConnection != null) {
+            sendUdpThroughProxy(payload)
             return
         }
 
         // No connection yet — buffer and start connecting
         bufferPayload(payload)
-        connectVless()
+        connectProxy()
     }
 
     private fun bufferPayload(payload: ByteArray) {
         // Drop datagram if buffer limit would be exceeded (DiscardOverflow).
         // Warn once per flow so users can tell they're losing packets, but
-        // avoid flooding the log — matches iOS
-        // LWIPUDPFlow.didWarnPendingOverflow gate.
+        // avoid flooding the log.
         if (pendingBufferSize + payload.size > TunnelConstants.udpMaxBufferSize) {
             if (!didWarnPendingOverflow) {
                 didWarnPendingOverflow = true
@@ -155,31 +161,27 @@ class LwipUdpFlow(
         pendingBufferSize += payload.size
     }
 
-    private fun sendUdpThroughVless(payload: ByteArray) {
-        val connection = vlessConnection ?: return
-        // Frame with 2-byte big-endian length prefix via JNI
-        val framed = com.argsment.anywhere.vpn.util.PacketUtil.frameUdpPayload(payload)
+    private fun sendUdpThroughProxy(payload: ByteArray) {
+        val connection = proxyConnection ?: return
         scope.launch {
             try {
-                connection.sendRaw(framed)
+                connection.send(payload)
             } catch (_: CancellationException) {
             } catch (e: Exception) {
-                if (!closed) logger.debug("[UDP] VLESS send error for $flowKey: ${e.message}")
+                if (!closed) logger.debug("[UDP] proxy send error for $flowKey: ${e.message}")
             }
         }
     }
 
-    // -- Connection Setup --
-
-    private fun connectVless() {
-        if (vlessConnecting || vlessConnection != null || muxSession != null || directRelay != null || ssUdpRelay != null || closed) return
+    private fun connectProxy() {
+        if (proxyConnecting || proxyConnection != null || muxSession != null || directRelay != null || ssSession != null || closed) return
 
         if (forceBypass || LwipStack.instance?.shouldBypass(dstHost) == true) {
             connectDirectUdp()
             return
         }
 
-        // Route Shadowsocks to its own UDP relay, even with a chain (matching iOS).
+        // Route Shadowsocks to its own UDP relay, even with a chain.
         // SS per-packet AEAD is designed for UDP datagrams, not TCP streams,
         // and the SS protocol has no UDP command byte for TCP tunneling.
         if (configuration.outboundProtocol == OutboundProtocol.SHADOWSOCKS) {
@@ -193,7 +195,7 @@ class LwipUdpFlow(
             return
         }
 
-        // Vision flow silently drops UDP/443 (QUIC) — matching VlessClient.connectWithCommand()
+        // Vision flow silently drops UDP/443.
         val flow = configuration.flow
         val isVision = flow == "xtls-rprx-vision" || flow == "xtls-rprx-vision-udp443"
         val allowUdp443 = flow == "xtls-rprx-vision-udp443"
@@ -203,16 +205,18 @@ class LwipUdpFlow(
             return
         }
 
-        vlessConnecting = true
+        proxyConnecting = true
 
-        // Check if we should use mux (only for default configuration)
+        // Check if we should use mux (only for default VLESS configuration)
         val stack = LwipStack.instance
         val isDefaultConfig = stack?.configuration?.id == configuration.id
-        if (isDefaultConfig && stack?.muxManager != null) {
+        if (isDefaultConfig &&
+            configuration.outboundProtocol == OutboundProtocol.VLESS &&
+            stack?.muxManager != null
+        ) {
             val muxManager = stack.muxManager!!
             // Cone NAT: GlobalID = blake3_keyed(BaseKey, "udp:srcHost:srcPort")[0:8]
-            // Uses keyed BLAKE3 with per-process BaseKey and 8-byte output,
-            // matching Xray-core xudp.go and iOS XUDP.swift.
+            // Uses keyed BLAKE3 with per-process BaseKey and 8-byte output.
             val globalId = if (configuration.xudpEnabled) {
                 Xudp.generateGlobalID("udp:$srcHost:$srcPort")
             } else null
@@ -227,7 +231,7 @@ class LwipUdpFlow(
                     )
 
                     lwipExecutor.execute {
-                        vlessConnecting = false
+                        proxyConnecting = false
                         if (closed) {
                             session.close()
                             return@execute
@@ -236,8 +240,7 @@ class LwipUdpFlow(
                         // Set up handlers BEFORE checking closed state to
                         // prevent a race where close fires between the
                         // check and handler registration, which would leak
-                        // the flow. Mirrors iOS `LWIPUDPFlow.connectViaMux`
-                        // handler registration order.
+                        // the flow.
                         session.dataHandler = { data ->
                             handleRemoteData(data)
                         }
@@ -272,7 +275,7 @@ class LwipUdpFlow(
                 } catch (_: CancellationException) {
                 } catch (e: Exception) {
                     lwipExecutor.execute {
-                        vlessConnecting = false
+                        proxyConnecting = false
                         if (closed) return@execute
                         logTransportFailure("Mux dispatch", e, LwipStack.LogLevel.ERROR)
                         releaseProtocol()
@@ -281,17 +284,17 @@ class LwipUdpFlow(
                 }
             }
         } else {
-            connectVlessNonMux()
+            connectProxyNonMux()
         }
     }
 
     private fun connectUdpChain(chain: List<ProxyConfiguration>) {
         if (closed) return
-        vlessConnecting = true
+        proxyConnecting = true
 
         scope.launch {
             try {
-                var previousConnection: VlessConnection? = null
+                var previousConnection: ProxyConnection? = null
 
                 for (i in chain.indices) {
                     val hopConfig = chain[i]
@@ -312,18 +315,17 @@ class LwipUdpFlow(
                 )
 
                 lwipExecutor.execute {
-                    vlessConnecting = false
+                    proxyConnecting = false
                     if (closed) {
                         connection.cancel()
                         return@execute
                     }
 
-                    vlessConnection = connection
+                    proxyConnection = connection
 
                     if (pendingData.isNotEmpty()) {
                         // Drain buffered payloads via per-packet `send` calls so
-                        // each protocol's UDP connection applies its own wire
-                        // framing (matches iOS LWIPUDPFlow drain loop).
+                        // each protocol's UDP connection applies its own wire framing.
                         val buffered = pendingData.toList()
                         pendingData.clear()
                         pendingBufferSize = 0
@@ -341,14 +343,16 @@ class LwipUdpFlow(
                         }
                     }
 
-                    startVlessReceiving(connection)
+                    startProxyReceiving(connection)
                 }
             } catch (_: CancellationException) {
             } catch (e: Exception) {
                 lwipExecutor.execute {
-                    vlessConnecting = false
+                    proxyConnecting = false
                     if (closed) return@execute
-                    logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
+                    if (e !is ProxyError.Dropped) {
+                        logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
+                    }
                     releaseProtocol()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -356,28 +360,27 @@ class LwipUdpFlow(
         }
     }
 
-    private fun connectVlessNonMux() {
+    private fun connectProxyNonMux() {
         if (closed) return
-        vlessConnecting = true
+        proxyConnecting = true
 
         scope.launch {
             try {
                 val connection = ProxyClientFactory.connectUDP(configuration, dstHost, dstPort)
 
                 lwipExecutor.execute {
-                    vlessConnecting = false
+                    proxyConnecting = false
                     if (closed) {
                         connection.cancel()
                         return@execute
                     }
 
-                    vlessConnection = connection
+                    proxyConnection = connection
 
                     // Drain buffered payloads via per-packet `send` calls so each
-                    // protocol's UDP connection applies its own wire framing
-                    // (matches iOS LWIPUDPFlow.connectProxy drain loop). A bulk
+                    // protocol's UDP connection applies its own wire framing. A bulk
                     // sendRaw with pre-inlined VLESS length prefixes would break
-                    // Trojan/Hysteria, whose UDP framings are not length-prefixed.
+                    // Trojan, whose UDP framing is not length-prefixed.
                     if (pendingData.isNotEmpty()) {
                         val buffered = pendingData.toList()
                         pendingData.clear()
@@ -397,14 +400,16 @@ class LwipUdpFlow(
                     }
 
                     // Start receiving proxy responses
-                    startVlessReceiving(connection)
+                    startProxyReceiving(connection)
                 }
             } catch (_: CancellationException) {
             } catch (e: Exception) {
                 lwipExecutor.execute {
-                    vlessConnecting = false
+                    proxyConnecting = false
                     if (closed) return@execute
-                    logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
+                    if (e !is ProxyError.Dropped) {
+                        logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
+                    }
                     releaseProtocol()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
@@ -414,54 +419,90 @@ class LwipUdpFlow(
 
     private fun connectShadowsocksUdp() {
         if (closed) return
-        vlessConnecting = true
 
-        val ssClient = ShadowsocksClient(configuration)
-        val relay = ssClient.createUdpRelay(dstHost, dstPort)
-        ssUdpRelay = relay
+        // The shared per-config session connects lazily on its first send;
+        // there's no async TCP/TLS handshake to wait for, so flows bind
+        // synchronously on the lwipExecutor and start sending immediately.
+        val stack = LwipStack.instance
+        if (stack == null) {
+            close()
+            return
+        }
+        val session = stack.shadowsocksUDPSession(configuration)
+        if (session == null) {
+            logTransportFailure(
+                "SS UDP session",
+                IllegalStateException("Shadowsocks credentials missing or malformed"),
+                LwipStack.LogLevel.ERROR
+            )
+            close()
+            stack.udpFlows.remove(flowKey)
+            return
+        }
 
-        scope.launch {
-            try {
-                relay.connect(configuration.serverAddress, configuration.serverPort.toInt())
+        // Seed response-address hints with whatever's already in the DNS
+        // cache. Fresh resolutions aren't forced here because the cache
+        // lookup is synchronous and lwipExecutor is performance-critical;
+        // the async prewarm below handles cache misses.
+        val cachedHints = DnsCache.cachedIPs(dstHost) ?: emptyList()
 
+        val token = session.register(
+            dstHost = dstHost,
+            dstPort = dstPort,
+            responseHostHints = cachedHints,
+            handler = { data -> handleRemoteData(data) },
+            errorHandler = { error ->
                 lwipExecutor.execute {
-                    vlessConnecting = false
-                    if (closed) {
-                        relay.cancel()
-                        return@execute
-                    }
-
-                    // Send buffered payloads
-                    for (payload in pendingData) {
-                        relay.send(payload)
-                    }
-                    pendingData.clear()
-                    pendingBufferSize = 0
-
-                    // Start receiving responses
-                    scope.launch {
-                        while (!closed) {
-                            val data = relay.receive() ?: break
-                            handleRemoteData(data)
-                        }
-                    }
-                }
-            } catch (_: CancellationException) {
-            } catch (e: Exception) {
-                lwipExecutor.execute {
-                    vlessConnecting = false
                     if (closed) return@execute
-                    logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
+                    logTransportFailure("SS UDP session", error, LwipStack.LogLevel.WARNING)
                     close()
                     LwipStack.instance?.udpFlows?.remove(flowKey)
                 }
+            }
+        )
+        ssSession = session
+        ssSessionToken = token
+
+        // Drain anything buffered while we waited to bind a session.
+        if (pendingData.isNotEmpty()) {
+            val buffered = pendingData.toList()
+            pendingData.clear()
+            pendingBufferSize = 0
+            for (payload in buffered) {
+                session.send(token, dstHost, dstPort, payload)
+            }
+        }
+
+        // If the destination is a domain that's not yet in the DNS cache,
+        // kick off an async resolve so subsequent replies can route by
+        // exact IP match instead of relying on the port-only fallback
+        // (which misroutes when multiple flows share a destination port —
+        // e.g. concurrent QUIC connections on 443). For IP literals
+        // DnsCache short-circuits and addResponseHints becomes a no-op
+        // (dstHost is already pinned).
+        if (cachedHints.isEmpty() && !DnsCache.isIpAddress(dstHost)) {
+            scope.launch {
+                val ips = try {
+                    withContext(Dispatchers.IO) { DnsCache.resolveAll(dstHost) }
+                } catch (_: CancellationException) {
+                    return@launch
+                } catch (_: Exception) {
+                    return@launch
+                }
+                if (ips.isEmpty()) return@launch
+                // Resumed on lwipExecutor (scope dispatcher) after the IO hop.
+                // Re-check our binding to the same session+token in case the
+                // flow was torn down while we were resolving.
+                if (closed) return@launch
+                if (ssSession !== session || ssSessionToken != token) return@launch
+                session.addResponseHints(token, ips)
             }
         }
     }
 
     private fun connectDirectUdp() {
         if (directRelay != null || closed) return
-        vlessConnecting = true  // reuse flag to prevent re-entry
+        proxyConnecting = true  // reuse flag to prevent re-entry
 
         val relay = DirectUdpRelay()
         directRelay = relay
@@ -471,7 +512,7 @@ class LwipUdpFlow(
                 relay.connect(dstHost, dstPort)
 
                 lwipExecutor.execute {
-                    vlessConnecting = false
+                    proxyConnecting = false
                     if (closed) return@execute
 
                     // Send buffered payloads
@@ -489,7 +530,7 @@ class LwipUdpFlow(
             } catch (_: CancellationException) {
             } catch (e: Exception) {
                 lwipExecutor.execute {
-                    vlessConnecting = false
+                    proxyConnecting = false
                     if (closed) return@execute
                     logTransportFailure("Connect", e, LwipStack.LogLevel.ERROR)
                     close()
@@ -499,7 +540,7 @@ class LwipUdpFlow(
         }
     }
 
-    private fun startVlessReceiving(connection: VlessConnection) {
+    private fun startProxyReceiving(connection: ProxyConnection) {
         scope.launch {
             connection.startReceiving(
                 handler = { data ->
@@ -527,7 +568,6 @@ class LwipUdpFlow(
             if (closed) return@execute
             lastActivity = System.nanoTime() / 1_000_000_000.0
 
-            // Send UDP response via lwIP (swap src/dst for response)
             NativeBridge.nativeUdpSendto(
                 dstIpBytes, dstPort,     // response source = original destination
                 srcIpBytes, srcPort,     // response destination = original source
@@ -536,8 +576,6 @@ class LwipUdpFlow(
             )
         }
     }
-
-    // -- Close --
 
     fun close() {
         if (closed) return
@@ -549,21 +587,27 @@ class LwipUdpFlow(
         scopeJob.cancel()
 
         val relay = directRelay
-        val connection = vlessConnection
+        val connection = proxyConnection
         val session = muxSession
-        val ssRelay = ssUdpRelay
+        val ssSess = ssSession
+        val ssTok = ssSessionToken
         directRelay = null
-        vlessConnection = null
+        proxyConnection = null
         muxSession = null
-        ssUdpRelay = null
-        vlessConnecting = false
+        ssSession = null
+        ssSessionToken = null
+        proxyConnecting = false
         pendingData.clear()
         pendingBufferSize = 0
         didWarnPendingOverflow = false
         relay?.cancel()
         connection?.cancel()
         session?.close()
-        ssRelay?.cancel()
+        // Unregister our flow from the shared SS UDP session — the session
+        // itself is owned by LwipStack and stays alive for other flows.
+        if (ssSess != null && ssTok != null) {
+            ssSess.unregister(ssTok)
+        }
     }
 
     companion object {

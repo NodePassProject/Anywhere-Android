@@ -3,8 +3,8 @@ package com.argsment.anywhere.vpn.protocol.mux
 import com.argsment.anywhere.vpn.util.AnywhereLogger
 import com.argsment.anywhere.data.model.ProxyConfiguration
 import com.argsment.anywhere.data.model.ProxyError
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.vless.VlessClient
-import com.argsment.anywhere.vpn.protocol.vless.VlessConnection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -16,9 +16,9 @@ import kotlin.coroutines.CoroutineContext
 private val logger = AnywhereLogger("MuxClient")
 
 /**
- * Single mux connection over VLESS with session management.
- * Write serialization, receive loop with frame parsing, 16s idle timeout.
- * XUDP support.
+ * Single mux connection over VLESS with session management. Serialises writes,
+ * runs a receive loop with frame parsing, applies a 16s idle timeout, and
+ * supports XUDP.
  */
 class MuxClient(
     val configuration: ProxyConfiguration,
@@ -27,7 +27,7 @@ class MuxClient(
     private val scope = CoroutineScope(coroutineContext)
 
     private var vlessClient: VlessClient? = null
-    private var vlessConnection: VlessConnection? = null
+    private var vlessConnection: ProxyConnection? = null
     private val sessions = mutableMapOf<Int, MuxSession>()
     private var nextSessionID: Int = 1
     private var connecting = false
@@ -37,13 +37,11 @@ class MuxClient(
     var closed: Boolean = false
         private set
 
-    // Write serialization (frames must not interleave)
+    // Frames must not interleave on the wire.
     private val writeMutex = Mutex()
 
-    // Receive loop + frame parser
     private val frameParser = MuxFrameParser()
 
-    // 16s idle timer (matching Xray-core)
     private var idleTimerJob: Job? = null
 
     private var isXUDP = false
@@ -51,7 +49,6 @@ class MuxClient(
     val sessionCount: Int get() = sessions.size
     val isFull: Boolean get() = closed || isXUDP
 
-    // Pending connect continuations (queued while connecting)
     private val connectMutex = Mutex()
     private val pendingConnections = mutableListOf<kotlinx.coroutines.CompletableDeferred<Unit>>()
 
@@ -59,14 +56,7 @@ class MuxClient(
         private const val IDLE_TIMEOUT_MS = 16_000L
     }
 
-    // =========================================================================
-    // Session Management
-    // =========================================================================
-
-    /**
-     * Creates a new mux session for the given target.
-     * Lazily connects the underlying VLESS connection on first use.
-     */
+    /** Lazily connects the underlying VLESS connection on first use. */
     suspend fun createSession(
         network: MuxNetwork,
         host: String,
@@ -77,13 +67,13 @@ class MuxClient(
 
         val sessionID: Int
         if (globalID != null) {
-            // XUDP: one flow per mux connection, always session ID 0
+            // XUDP: one flow per mux connection, always session ID 0.
             sessionID = 0
             isXUDP = true
         } else {
             sessionID = nextSessionID
             nextSessionID = (nextSessionID + 1) and 0xFFFF
-            // Skip 0 (reserved)
+            // Session ID 0 is reserved.
             if (nextSessionID == 0) nextSessionID = 1
         }
 
@@ -97,20 +87,17 @@ class MuxClient(
         )
         sessions[sessionID] = session
 
-        // Reset idle timer when a new session is added
         resetIdleTimer()
 
         try {
-            // Ensure underlying VLESS connection is established
             if (!connected) {
                 connectMux()
             }
 
-            // For XUDP (globalID != null), defer the New frame until first data
-            // so the first UDP payload is embedded in the New frame.
-            // This matches iOS behavior and is needed for server-side GlobalID parsing.
+            // For XUDP, defer the New frame until first data so the first UDP
+            // payload is embedded in the New frame (required for server-side
+            // GlobalID parsing).
             if (globalID == null) {
-                // Send New frame with target address
                 val metadata = MuxFrameMetadata(
                     sessionID = sessionID,
                     status = MuxSessionStatus.NEW,
@@ -132,9 +119,6 @@ class MuxClient(
         }
     }
 
-    /**
-     * Removes a session from the map (called by MuxSession on close).
-     */
     fun removeSession(sessionID: Int) {
         sessions.remove(sessionID)
         if (sessions.isEmpty()) {
@@ -142,9 +126,6 @@ class MuxClient(
         }
     }
 
-    /**
-     * Closes all sessions and the underlying VLESS connection.
-     */
     fun closeAll() {
         if (closed) return
         closed = true
@@ -166,7 +147,6 @@ class MuxClient(
 
         frameParser.reset()
 
-        // Complete any pending connections with error
         val pending = pendingConnections.toList()
         pendingConnections.clear()
         connecting = false
@@ -175,15 +155,10 @@ class MuxClient(
         }
     }
 
-    // =========================================================================
-    // VLESS Mux Connection
-    // =========================================================================
-
     private suspend fun connectMux() {
         if (connected) return
         if (closed) throw ProxyError.ConnectionFailed("Mux client closed")
 
-        // If already connecting, wait for the result
         if (connecting) {
             val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
             pendingConnections.add(deferred)
@@ -201,11 +176,9 @@ class MuxClient(
             this.vlessConnection = connection
             this.connected = true
 
-            // Start receive loop
             startReceiveLoop(connection)
             resetIdleTimer()
 
-            // Complete all pending connections
             connecting = false
             val pending = pendingConnections.toList()
             pendingConnections.clear()
@@ -220,13 +193,6 @@ class MuxClient(
         }
     }
 
-    // =========================================================================
-    // Write Serialization
-    // =========================================================================
-
-    /**
-     * Writes a frame with serialization (suspend, waits for completion).
-     */
     suspend fun writeFrame(data: ByteArray) {
         if (closed) throw ProxyError.ConnectionFailed("Mux client closed")
 
@@ -243,25 +209,18 @@ class MuxClient(
         }
     }
 
-    /**
-     * Writes a frame asynchronously (fire-and-forget, used for End frames).
-     */
+    /** Fire-and-forget write, used for End frames. */
     fun writeFrameAsync(data: ByteArray) {
         if (closed) return
         scope.launch {
             try {
                 writeFrame(data)
             } catch (e: Exception) {
-                // Already handled in writeFrame
             }
         }
     }
 
-    // =========================================================================
-    // Receive Loop
-    // =========================================================================
-
-    private fun startReceiveLoop(connection: VlessConnection) {
+    private fun startReceiveLoop(connection: ProxyConnection) {
         scope.launch {
             try {
                 connection.startReceiving(
@@ -288,7 +247,7 @@ class MuxClient(
         for ((metadata, payload) in frames) {
             when (metadata.status) {
                 MuxSessionStatus.NEW -> {
-                    // Server-initiated sessions -- not expected for outbound mux, ignore
+                    // Server-initiated sessions are not expected for outbound mux.
                 }
 
                 MuxSessionStatus.KEEP -> {
@@ -307,15 +266,10 @@ class MuxClient(
                 }
 
                 MuxSessionStatus.KEEP_ALIVE -> {
-                    // Ping from server -- no action needed
                 }
             }
         }
     }
-
-    // =========================================================================
-    // Idle Timer
-    // =========================================================================
 
     private fun resetIdleTimer() {
         idleTimerJob?.cancel()

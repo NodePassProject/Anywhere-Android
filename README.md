@@ -32,14 +32,13 @@ Most Android proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhe
 ### Protocols & Security
 
 - **VLESS** with full Vision (XTLS-RPRX-Vision) flow control and adaptive padding
-- **Hysteria2** over QUIC with Brutal congestion control
 - **Trojan** over TLS with UDP-over-TCP relay
 - **Shadowsocks** (AEAD and Shadowsocks 2022)
 - **SOCKS5** with optional authentication
-- **Naive Proxy** (HTTP/1.1, HTTP/2, HTTP/3) with padding negotiation
+- **Naive Proxy** (HTTP/1.1, HTTP/2) with padding negotiation
 - **Reality** with X25519 key exchange and TLS 1.3 fingerprint spoofing
 - **TLS** with SNI, ALPN, custom trusted certificates, and optional insecure mode
-- **Transports:** TCP, WebSocket (with early data), HTTP Upgrade, XHTTP (stream-one, stream-up, and packet-up over HTTP/1.1 and HTTP/2)
+- **Transports:** TCP, WebSocket (with early data), HTTP Upgrade, gRPC, XHTTP (stream-one, stream-up, and packet-up over HTTP/1.1 and HTTP/2)
 - **Mux** multiplexing with **XUDP** (GlobalID-based, BLAKE3 keyed hashing)
 - **Fingerprints:** Chrome, Firefox, Safari, iOS, Edge
 

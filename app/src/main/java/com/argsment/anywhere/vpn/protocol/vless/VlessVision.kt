@@ -5,11 +5,6 @@ import java.security.SecureRandom
 import kotlin.math.max
 import kotlin.math.min
 
-// =============================================================================
-// Vision Constants
-// =============================================================================
-
-/** Vision padding commands. */
 enum class VisionCommand(val value: Byte) {
     PADDING_CONTINUE(0x00),
     PADDING_END(0x01),
@@ -20,7 +15,6 @@ enum class VisionCommand(val value: Byte) {
     }
 }
 
-/** TLS detection constants. */
 private val TLS_CLIENT_HANDSHAKE_START = byteArrayOf(0x16, 0x03)
 private val TLS_SERVER_HANDSHAKE_START = byteArrayOf(0x16, 0x03, 0x03)
 private val TLS_APPLICATION_DATA_START = byteArrayOf(0x17, 0x03, 0x03)
@@ -28,30 +22,20 @@ private val TLS13_SUPPORTED_VERSIONS = byteArrayOf(0x00, 0x2b, 0x00, 0x02, 0x03,
 private const val TLS_HANDSHAKE_TYPE_CLIENT_HELLO: Byte = 0x01
 private const val TLS_HANDSHAKE_TYPE_SERVER_HELLO: Byte = 0x02
 
-/** TLS 1.3 cipher suites that support XTLS direct copy. */
+/** TLS 1.3 cipher suites that support XTLS direct copy. 0x1305 is intentionally excluded. */
 private val TLS13_CIPHER_SUITES = setOf<Int>(
     0x1301,  // TLS_AES_128_GCM_SHA256
     0x1302,  // TLS_AES_256_GCM_SHA384
     0x1303,  // TLS_CHACHA20_POLY1305_SHA256
     0x1304,  // TLS_AES_128_CCM_SHA256
-    // 0x1305 (TLS_AES_128_CCM_8_SHA256) is excluded
 )
 
-// =============================================================================
-// Traffic State
-// =============================================================================
-
-/**
- * Tracks TLS detection and padding state for Vision.
- */
 class VisionTrafficState(
     val userUUID: ByteArray,
     testseed: IntArray = intArrayOf(900, 500, 900, 256)
 ) {
-    // Gracefully handle invalid testseed by falling back to defaults (matching iOS)
     val testseed: IntArray = if (testseed.size >= 4) testseed else intArrayOf(900, 500, 900, 256)
 
-    // TLS detection state
     var numberOfPacketsToFilter: Int = 8
     var enableXtls: Boolean = false
     var isTLS12orAbove: Boolean = false
@@ -59,11 +43,9 @@ class VisionTrafficState(
     var cipher: Int = 0
     var remainingServerHello: Int = -1
 
-    // Writer state (for outgoing data)
     var writerIsPadding: Boolean = true
     var writerDirectCopy: Boolean = false
 
-    // Reader state (for incoming data)
     var readerWithinPaddingBuffers: Boolean = true
     var readerDirectCopy: Boolean = false
     var remainingCommand: Int = -1
@@ -71,32 +53,23 @@ class VisionTrafficState(
     var remainingPadding: Int = -1
     var currentCommand: Int = 0
 
-    // First packet flag for UUID
+    /** UUID prepended on the first packet only; cleared after first emit. */
     var writeOnceUserUUID: ByteArray? = userUUID.copyOf()
 }
 
-// =============================================================================
-// Buffer Reshaping
-// =============================================================================
-
-/** Maximum buffer size matching Xray-core's buf.Size */
 private const val VISION_BUF_SIZE = 8192
 
-/** Reshape threshold: buffers >= this need splitting to leave room for the 21-byte padding header */
+/** Buffers >= this need splitting to leave room for the 21-byte padding header. */
 private const val RESHAPE_THRESHOLD = 8192 - 21  // 8171
 
 /**
- * Recursively split data that is too large for a single Vision-padded frame.
- * Tries to split at the last TLS application data boundary; falls back to midpoint.
- * Matches Xray-core's ReshapeMultiBuffer.
- *
- * Unlike the Xray-core reference which does a single split, we recurse to guarantee
- * every returned chunk fits within RESHAPE_THRESHOLD (matching iOS implementation).
+ * Recursively splits oversized data into chunks that each fit within
+ * [RESHAPE_THRESHOLD]. Splits at the last TLS application data boundary when
+ * possible; otherwise splits at the midpoint.
  */
 private fun reshapeData(data: ByteArray): List<ByteArray> {
     if (data.size < RESHAPE_THRESHOLD) return listOf(data)
 
-    // Find last occurrence of TLS application data header (0x17 0x03 0x03)
     var splitIndex = data.size / 2
     for (i in (data.size - 3) downTo 0) {
         if (data[i] == 0x17.toByte() && data[i + 1] == 0x03.toByte() && data[i + 2] == 0x03.toByte()) {
@@ -112,21 +85,17 @@ private fun reshapeData(data: ByteArray): List<ByteArray> {
     return reshapeData(first) + reshapeData(second)
 }
 
-// =============================================================================
-// Padding Functions
-// =============================================================================
-
 private val secureRandom = SecureRandom()
 
 /**
- * Add Vision padding to data.
- * Format: [UUID (16 bytes, first packet only)] [command (1)] [contentLen (2)] [paddingLen (2)] [content] [padding]
+ * Adds Vision padding. Frame format:
+ * `[UUID 16 (first packet only)] [command 1] [contentLen 2] [paddingLen 2] [content] [padding]`
  */
 fun visionPadding(data: ByteArray?, command: VisionCommand, state: VisionTrafficState, longPadding: Boolean): ByteArray {
     val contentLen = data?.size ?: 0
     var paddingLen: Int
 
-    // Calculate padding length using testseed: [contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]
+    // testseed = [contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]
     val seed = state.testseed
     if (contentLen < seed[0] && longPadding) {
         paddingLen = secureRandom.nextInt(seed[1]) + seed[2] - contentLen
@@ -134,7 +103,6 @@ fun visionPadding(data: ByteArray?, command: VisionCommand, state: VisionTraffic
         paddingLen = secureRandom.nextInt(seed[3])
     }
 
-    // Ensure padding doesn't exceed buffer limits (matches Xray-core buf.Size = 8192)
     val maxPadding = 8192 - 21 - contentLen
     paddingLen = min(paddingLen, maxPadding)
     paddingLen = max(paddingLen, 0)
@@ -148,26 +116,22 @@ fun visionPadding(data: ByteArray?, command: VisionCommand, state: VisionTraffic
     val result = ByteArray(uuidLen + 5 + contentLen + paddingLen)
     var offset = 0
 
-    // Add UUID on first packet
     if (uuidPart != null) {
         System.arraycopy(uuidPart, 0, result, offset, uuidPart.size)
         offset += uuidPart.size
     }
 
-    // Add command header: [command (1)] [contentLen (2)] [paddingLen (2)]
     result[offset++] = command.value
     result[offset++] = (contentLen shr 8).toByte()
     result[offset++] = (contentLen and 0xFF).toByte()
     result[offset++] = (paddingLen shr 8).toByte()
     result[offset++] = (paddingLen and 0xFF).toByte()
 
-    // Add content
     if (data != null) {
         System.arraycopy(data, 0, result, offset, data.size)
         offset += data.size
     }
 
-    // Add random padding
     if (paddingLen > 0) {
         val padding = ByteArray(paddingLen)
         secureRandom.nextBytes(padding)
@@ -177,15 +141,8 @@ fun visionPadding(data: ByteArray?, command: VisionCommand, state: VisionTraffic
     return result
 }
 
-/**
- * Remove Vision padding from data and extract content.
- * Returns the extracted content data.
- *
- * Note: [data] is consumed in-place and its contents may be modified.
- * Returns a new ByteArray with the extracted content.
- */
+/** Removes Vision padding from [data] and returns the extracted content. */
 fun visionUnpadding(data: DataCursor, state: VisionTrafficState): ByteArray {
-    // Initial state check - look for UUID prefix
     if (state.remainingCommand == -1 && state.remainingContent == -1 && state.remainingPadding == -1) {
         if (data.remaining >= 21 && data.startsWith(state.userUUID)) {
             data.advance(16)
@@ -199,7 +156,6 @@ fun visionUnpadding(data: DataCursor, state: VisionTrafficState): ByteArray {
 
     while (data.remaining > 0) {
         if (state.remainingCommand > 0) {
-            // Reading command header
             val byte = data.readByte()
             when (state.remainingCommand) {
                 5 -> state.currentCommand = byte.toInt() and 0xFF
@@ -219,7 +175,6 @@ fun visionUnpadding(data: DataCursor, state: VisionTrafficState): ByteArray {
             state.remainingPadding -= toSkip
         }
 
-        // Check if current block is done
         if (state.remainingCommand <= 0 && state.remainingContent <= 0 && state.remainingPadding <= 0) {
             if (state.currentCommand == 0) {
                 state.remainingCommand = 5
@@ -238,7 +193,6 @@ fun visionUnpadding(data: DataCursor, state: VisionTrafficState): ByteArray {
     return result.toByteArray()
 }
 
-/** Mutable cursor over a ByteArray for in-place consumption. */
 class DataCursor(private val data: ByteArray, private var offset: Int = 0) {
     val remaining: Int get() = data.size - offset
 
@@ -269,13 +223,7 @@ class DataCursor(private val data: ByteArray, private var offset: Int = 0) {
     }
 }
 
-// =============================================================================
-// TLS Filtering
-// =============================================================================
-
-/**
- * Filter and detect TLS 1.3 in traffic (for incoming server responses).
- */
+/** Detects TLS 1.3 server responses and decides whether to enable XTLS direct copy. */
 fun visionFilterTLS(data: ByteArray, state: VisionTrafficState) {
     if (state.numberOfPacketsToFilter <= 0) return
     state.numberOfPacketsToFilter--
@@ -287,7 +235,6 @@ fun visionFilterTLS(data: ByteArray, state: VisionTrafficState) {
     val byte2 = data[2]
     val byte5 = data[5]
 
-    // Check for Server Hello: 0x16 0x03 0x03 ... 0x02
     if (byte0 == 0x16.toByte() && byte1 == 0x03.toByte() && byte2 == 0x03.toByte() &&
         byte5 == TLS_HANDSHAKE_TYPE_SERVER_HELLO) {
         val byte3 = data[3]
@@ -296,7 +243,6 @@ fun visionFilterTLS(data: ByteArray, state: VisionTrafficState) {
         state.isTLS12orAbove = true
         state.isTLS = true
 
-        // Try to extract cipher suite
         if (data.size >= 79 && state.remainingServerHello >= 79) {
             val sessionIdLen = data[43].toInt() and 0xFF
             val cipherOffset = 43 + sessionIdLen + 1
@@ -310,12 +256,10 @@ fun visionFilterTLS(data: ByteArray, state: VisionTrafficState) {
         state.isTLS = true
     }
 
-    // Check for TLS 1.3 supported versions extension
     if (state.remainingServerHello > 0) {
         val end = min(state.remainingServerHello, data.size)
         state.remainingServerHello -= data.size
 
-        // Search for TLS 1.3 supported versions extension
         if (containsSubarray(data, 0, end, TLS13_SUPPORTED_VERSIONS)) {
             if (state.cipher in TLS13_CIPHER_SUITES) {
                 state.enableXtls = true
@@ -329,9 +273,7 @@ fun visionFilterTLS(data: ByteArray, state: VisionTrafficState) {
     }
 }
 
-/**
- * Detect TLS Client Hello in outgoing data (doesn't decrement counter).
- */
+/** Detects a Client Hello in outgoing data without decrementing the filter counter. */
 fun visionDetectClientHello(data: ByteArray, state: VisionTrafficState) {
     if (data.size < 6) return
 
@@ -341,9 +283,6 @@ fun visionDetectClientHello(data: ByteArray, state: VisionTrafficState) {
     }
 }
 
-/**
- * Check if data contains only complete TLS application data records.
- */
 fun isCompleteTlsRecord(data: ByteArray): Boolean {
     if (data.size < 5) return false
     if (data[0] != 0x17.toByte() || data[1] != 0x03.toByte() || data[2] != 0x03.toByte()) return false
@@ -375,12 +314,8 @@ private fun containsSubarray(data: ByteArray, fromIndex: Int, toIndex: Int, sub:
     return false
 }
 
-// =============================================================================
-// Vision Connection Wrapper
-// =============================================================================
-
 /**
- * VLESS connection with Vision flow control.
+ * VLESS connection wrapper with Vision flow control.
  */
 class VlessVisionConnection(
     private val innerConnection: VlessConnection,
@@ -392,15 +327,10 @@ class VlessVisionConnection(
     private val lock = Any()
 
     /**
-     * Send an empty padding frame to camouflage the VLESS header.
-     * Called when no initial data is available, so the header isn't sent alone.
-     * Matches Xray-core outbound.go lines 331-337.
-     *
-     * Uses synchronous send to ensure the padding frame (containing the UUID)
-     * is fully written before control returns to the caller. The iOS version
-     * also sends synchronously — using sendAsync here would create a race
-     * condition where subsequent VLESS data could arrive at the server before
-     * the Vision padding frame.
+     * Sends an empty padding frame to camouflage the VLESS header when no initial
+     * data is available. MUST be synchronous — using sendAsync would race with the
+     * caller's subsequent VLESS data, which could arrive at the server before the
+     * Vision padding frame containing the UUID.
      */
     suspend fun sendEmptyPadding() {
         val padded: ByteArray
@@ -443,24 +373,18 @@ class VlessVisionConnection(
     }
 
     private fun processSendData(data: ByteArray): ByteArray {
-        // Detect Client Hello to enable long padding (don't decrement counter)
         if (!trafficState.isTLS) {
             visionDetectClientHello(data, trafficState)
         }
 
-        // If direct copy mode, send without padding
         if (trafficState.writerDirectCopy) return data
-
-        // If not in padding mode, send directly
         if (!trafficState.writerIsPadding) return data
 
         val longPadding = trafficState.isTLS
         val isComplete = isCompleteTlsRecord(data)
 
-        // Reshape oversized buffers to ensure room for the 21-byte Vision padding header
         val chunks = reshapeData(data)
 
-        // Check if this is TLS application data and we should end padding
         if (trafficState.isTLS && data.size >= 6 &&
             data[0] == 0x17.toByte() && data[1] == 0x03.toByte() && data[2] == 0x03.toByte() &&
             isComplete) {
@@ -484,7 +408,7 @@ class VlessVisionConnection(
             return result
         }
 
-        // For compatibility with earlier vision receiver, finish padding 1 packet early
+        // Compatibility: end padding one packet early for pre-TLS1.2 receivers.
         if (!trafficState.isTLS12orAbove && trafficState.numberOfPacketsToFilter <= 1) {
             trafficState.writerIsPadding = false
             var result = byteArrayOf()
@@ -495,7 +419,6 @@ class VlessVisionConnection(
             return result
         }
 
-        // Continue with padding
         var result = byteArrayOf()
         for (chunk in chunks) {
             result += visionPadding(chunk, VisionCommand.PADDING_CONTINUE, trafficState, longPadding)
@@ -520,9 +443,9 @@ class VlessVisionConnection(
             try {
                 data = innerConnection.receive()
             } catch (e: RealityError.DecryptionFailed) {
-                // Reality decryption failed — the server has transitioned to direct copy mode
-                // (sending raw inner TLS data without Reality encryption).
-                // Switch reader to direct copy and return the raw data.
+                // Reality decrypt failure signals the server has transitioned to direct
+                // copy mode (sending raw inner TLS without Reality encryption). Switch
+                // the reader to direct copy and surface the raw data.
                 synchronized(lock) {
                     trafficState.readerDirectCopy = true
                     trafficState.readerWithinPaddingBuffers = false
@@ -541,8 +464,8 @@ class VlessVisionConnection(
                 processedData = processReceiveData(data)
             }
 
-            // If processed data is empty (e.g., only padding was received),
-            // continue receiving instead of returning nil (which would close the connection)
+            // Empty after processing means only padding was received; recurse rather
+            // than returning null (which would close the connection).
             return if (processedData.isEmpty()) {
                 receiveRawInternal()
             } else {
@@ -551,24 +474,20 @@ class VlessVisionConnection(
         }
     }
 
-    // Override receive to skip response header processing (inner connection handles it)
+    // Skip response-header processing here — the inner connection handles it.
     override suspend fun receive(): ByteArray? = receiveRaw()
 
     private fun processReceiveData(data: ByteArray): ByteArray {
-        // Filter TLS from server responses
         if (trafficState.numberOfPacketsToFilter > 0) {
             visionFilterTLS(data, trafficState)
         }
 
-        // If direct copy mode, return without unpadding
         if (trafficState.readerDirectCopy) return data
 
-        // If within padding buffers or still filtering, unpad
         if (trafficState.readerWithinPaddingBuffers || trafficState.numberOfPacketsToFilter > 0) {
             val cursor = DataCursor(data)
             val unpadded = visionUnpadding(cursor, trafficState)
 
-            // Update state based on current command
             if (trafficState.remainingContent > 0 || trafficState.remainingPadding > 0 || trafficState.currentCommand == 0) {
                 trafficState.readerWithinPaddingBuffers = true
             } else if (trafficState.currentCommand == 1) {

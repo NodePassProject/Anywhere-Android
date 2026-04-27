@@ -16,8 +16,6 @@ import javax.crypto.spec.SecretKeySpec
 
 private val logger = AnywhereLogger("TLS")
 
-// -- TLS Errors --
-
 sealed class TlsError(message: String) : IOException(message) {
     class ConnectionFailed(msg: String) : TlsError("TLS connection failed: $msg")
     class HandshakeFailed(msg: String) : TlsError("TLS handshake failed: $msg")
@@ -25,25 +23,15 @@ sealed class TlsError(message: String) : IOException(message) {
 }
 
 /**
- * Client for establishing standard TLS 1.3 connections.
- *
- * Performs a TLS 1.3 handshake with X.509 certificate validation:
- * - Builds a standard ClientHello with random SessionId.
- * - Optionally validates the server certificate chain.
- * - Derives application-layer encryption keys from the TLS 1.3 handshake.
- *
- * After a successful handshake, returns a [TlsRecordConnection] that wraps
- * the underlying [NioSocket] with TLS record encryption/decryption.
- *
- * Uses suspend functions (coroutine-based) instead of callbacks.
+ * Client for establishing TLS 1.2 / 1.3 connections. Builds a fingerprinted
+ * ClientHello, optionally validates the server certificate chain, derives
+ * application-layer encryption keys, and returns a [TlsRecordConnection]
+ * wrapping the underlying transport.
  */
 class TlsClient(private val configuration: TlsConfiguration) {
 
     companion object {
-        /**
-         * Legacy pass-through to [CertificatePolicy.trustedFingerprints]. Kept for
-         * source compatibility with earlier code paths that set the list directly.
-         */
+        /** Pass-through to [CertificatePolicy.trustedFingerprints] for source compatibility. */
         var trustedFingerprints: List<String>
             get() = CertificatePolicy.trustedFingerprints
             set(value) = CertificatePolicy.setTrustedFingerprints(value)
@@ -57,7 +45,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
     private var storedClientHello: ByteArray? = null
     private var clientRandom: ByteArray? = null
 
-    // TLS 1.3 session state (cleared after handshake)
     private var keyDerivation: Tls13KeyDerivation? = null
     private var handshakeSecret: ByteArray? = null
     private var handshakeKeys: TlsHandshakeKeys? = null
@@ -65,36 +52,22 @@ class TlsClient(private val configuration: TlsConfiguration) {
     private var handshakeTranscript: ByteArray? = null
     private var serverHandshakeSeqNum: Long = 0
 
-    // TLS 1.2 session state (cleared after handshake)
     private var serverRandom: ByteArray? = null
     private var tls12CipherSuite: Int = 0
     private var negotiatedVersion: Int = 0x0303
     private var useExtendedMasterSecret: Boolean = false
     private var tls12Transcript: ByteArray? = null
 
-    // Certificate validation state
     private val serverCertificates = mutableListOf<X509Certificate>()
 
-    // -- Public API --
-
-    /**
-     * Connects to a server and performs the TLS 1.3 handshake.
-     *
-     * @param host The server hostname or IP address.
-     * @param port The server port number.
-     * @return The established [TlsRecordConnection].
-     */
     suspend fun connect(host: String, port: Int): TlsRecordConnection {
-        // Generate ephemeral X25519 key pair via native bridge (works on all Android versions)
         val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
         ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
         ephemeralPublicKeyBytes = keyPair.copyOfRange(32, 64)
 
-        // Build the ClientHello up front so it can ride along with the TCP
-        // handshake — mirroring iOS, where `NWTransport.connect(initialData:)`
-        // queues the ClientHello as the TFO payload. The kernel will flush it
-        // the instant the SYN-ACK arrives, saving one scheduling hop compared
-        // to a separate `send` after `finishConnect`.
+        // Build the ClientHello up front so it can ride along with the TCP handshake
+        // as the TFO payload — the kernel flushes it the instant the SYN-ACK arrives,
+        // saving one scheduling hop compared to a separate `send` after `finishConnect`.
         val clientHello = buildTLSClientHello(
             ephemeralPublicKeyBytes ?: throw TlsError.HandshakeFailed("No ephemeral key")
         )
@@ -113,10 +86,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return receiveServerResponse()
     }
 
-    /**
-     * Performs the TLS 1.3 handshake over an existing transport (for proxy chaining).
-     * The transport is already connected to the server — no TCP connect needed.
-     */
+    /** Performs the handshake over an already-connected transport (for proxy chaining). */
     suspend fun connect(transport: Transport): TlsRecordConnection {
         val keyPair = NativeBridge.nativeX25519GenerateKeyPair()
         ephemeralPrivateKeyBytes = keyPair.copyOfRange(0, 32)
@@ -126,19 +96,12 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return performTLSHandshake()
     }
 
-    /** Cancels the connection and releases all resources. */
     fun cancel() {
         clearHandshakeState()
         connection?.forceCancel()
         connection = null
     }
 
-    // -- Handshake --
-
-    /**
-     * Performs the TLS 1.3 handshake: sends ClientHello, processes ServerHello,
-     * derives encryption keys, validates certificates, and sends Client Finished.
-     */
     private suspend fun performTLSHandshake(): TlsRecordConnection {
         val pubKeyBytes = ephemeralPublicKeyBytes
             ?: throw TlsError.HandshakeFailed("No ephemeral key")
@@ -154,17 +117,11 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return receiveServerResponse()
     }
 
-    // -- ClientHello --
-
-    /**
-     * Builds a standard TLS 1.3 ClientHello with random SessionId.
-     */
     private fun buildTLSClientHello(publicKey: ByteArray): ByteArray {
         val random = ByteArray(32)
         java.security.SecureRandom().nextBytes(random)
         clientRandom = random
 
-        // Standard TLS: random 32-byte session ID (no Reality metadata)
         val sessionId = ByteArray(32)
         java.security.SecureRandom().nextBytes(sessionId)
 
@@ -175,25 +132,20 @@ class TlsClient(private val configuration: TlsConfiguration) {
             serverName = configuration.serverName,
             publicKey = publicKey,
             alpn = configuration.alpn ?: listOf("h2", "http/1.1"),
-            omitPQKeyShares = true  // Omit PQ key shares for standard TLS to reduce ClientHello size (matching iOS)
+            omitPQKeyShares = true  // Omit PQ key shares for standard TLS to reduce ClientHello size.
         )
 
         return TlsClientHelloBuilder.wrapInTLSRecord(rawClientHello)
     }
 
-    // -- Server Response Processing --
-
     /**
-     * Receives and processes the server's TLS response.
-     *
      * Buffers partial reads until at least one complete TLS record header (5 bytes)
      * is available. The server may deliver data in small chunks, especially when
-     * the connection is tunneled through a proxy chain (matching iOS).
+     * the connection is tunneled through a proxy chain.
      */
     private suspend fun receiveServerResponse(
         existingBuffer: ByteArray = ByteArray(0)
     ): TlsRecordConnection {
-        // Already have enough data to inspect the record header
         if (existingBuffer.size >= 5) {
             val contentType = existingBuffer[0].toInt() and 0xFF
             return when (contentType) {
@@ -219,19 +171,14 @@ class TlsClient(private val configuration: TlsConfiguration) {
             throw TlsError.HandshakeFailed("No server response")
         }
 
-        // Buffer partial data and recurse until we have at least 5 bytes
         return receiveServerResponse(existingBuffer + data)
     }
 
-    /**
-     * Continues receiving handshake messages until ServerHello is complete.
-     */
     private suspend fun continueReceivingHandshake(
         buffer: ByteArray
     ): TlsRecordConnection {
         var buf = buffer
 
-        // Keep reading until we have a complete TLS record containing ServerHello
         while (!bufferContainsCompleteServerHello(buf)) {
             val conn = connection ?: throw TlsError.ConnectionFailed("Connection cancelled")
             val moreData = conn.receive()
@@ -243,7 +190,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         val parsed = com.argsment.anywhere.vpn.util.PacketUtil.parseServerHello(buf)
 
         if (parsed != null && parsed.size >= 34) {
-            // TLS 1.3 path
             negotiatedVersion = 0x0304
             enforceVersionConstraints()
 
@@ -272,11 +218,9 @@ class TlsClient(private val configuration: TlsConfiguration) {
             return consumeRemainingHandshake(buf)
         }
 
-        // TLS 1.2 fallback: no key_share means server chose TLS 1.2
+        // No key_share means server chose TLS 1.2
         return handleTls12Handshake(buf)
     }
-
-    // -- ServerHello Parsing --
 
     /** HelloRetryRequest special random value (RFC 8446 §4.1.3). */
     private val HELLO_RETRY_REQUEST_RANDOM = byteArrayOf(
@@ -290,7 +234,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         0xC8.toByte(), 0xA8.toByte(), 0x33.toByte(), 0x9C.toByte()
     )
 
-    /** Checks whether the buffer contains at least one complete TLS record with a ServerHello. */
     private fun bufferContainsCompleteServerHello(buffer: ByteArray): Boolean {
         var offset = 0
         while (offset + 5 <= buffer.size) {
@@ -299,7 +242,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
                     (buffer[offset + 4].toInt() and 0xFF)
             if (offset + 5 + recordLen > buffer.size) return false
             if (contentType == 0x16) {
-                // Check if this record contains a ServerHello
                 val hsStart = offset + 5
                 if (hsStart < buffer.size && (buffer[hsStart].toInt() and 0xFF) == 0x02) {
                     return true
@@ -310,7 +252,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return false
     }
 
-    /** Detects HelloRetryRequest by checking the server random. */
     private fun checkHelloRetryRequest(serverHello: ByteArray) {
         // ServerHello: type(1) + length(3) + version(2) + random(32)
         if (serverHello.size >= 38) {
@@ -332,7 +273,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
             if (offset + 5 + recordLen > buffer.size) break
 
             if (contentType == 0x16) {
-                // Parse individual handshake messages within this record
                 val recordStart = offset + 5
                 val recordEnd = recordStart + recordLen
                 var hsOffset = recordStart
@@ -354,12 +294,9 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return ByteArray(0)
     }
 
-    // -- Encrypted Handshake Processing --
-
     /**
-     * Consumes remaining TLS handshake records (encrypted), looking for Server Finished.
-     *
-     * For standard TLS, also parses Certificate and CertificateVerify messages.
+     * Consumes remaining encrypted TLS handshake records, looking for Server Finished
+     * and parsing Certificate and CertificateVerify along the way.
      */
     private suspend fun consumeRemainingHandshake(
         buffer: ByteArray,
@@ -445,14 +382,13 @@ class TlsClient(private val configuration: TlsConfiguration) {
                                 }
                             }
                             0x14 -> { // Finished
-                                // Verify Server Finished verify data (matching iOS)
                                 val transcriptBeforeFinished = fullTranscript
                                 fullTranscript = fullTranscript + hsMessage
                                 val expectedVerifyData = kd.computeFinishedVerifyData(
                                     keys.serverTrafficSecret, transcriptBeforeFinished
                                 )
                                 // Constant-time comparison to prevent timing side-channel
-                                // attacks on the server Finished verify_data (matches iOS).
+                                // attacks on the server Finished verify_data.
                                 if (!constantTimeEqual(hsBody, expectedVerifyData)) {
                                     throw TlsError.HandshakeFailed("Server Finished verify data mismatch")
                                 }
@@ -472,8 +408,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
             offset += 5 + recordLen
 
-            // Stop processing once Server Finished is found — any subsequent
-            // records (e.g. NewSessionTicket) are encrypted with application keys
+            // Subsequent records (e.g. NewSessionTicket) are encrypted with application keys
             // and must be handled by TlsRecordConnection, not the handshake loop.
             if (foundServerFinished) break
         }
@@ -502,14 +437,13 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
             val tlsConn = finishHandshake(fullTranscript)
             // Pass any remaining buffer data (e.g., NewSessionTicket) to the
-            // TlsRecordConnection so it isn't lost (matching iOS prependToReceiveBuffer)
+            // TlsRecordConnection so it isn't lost.
             if (processedOffset < buf.size) {
                 val remaining = buf.copyOfRange(processedOffset, buf.size)
                 tlsConn.prependToReceiveBuffer(remaining)
             }
             return tlsConn
         } else {
-            // Need more handshake data
             val conn = connection ?: throw TlsError.ConnectionFailed("Connection cancelled")
             val moreData = conn.receive()
             var newBuffer = buf
@@ -520,12 +454,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    // -- Handshake Record Decryption --
-
-    /**
-     * Decrypts a TLS handshake record using AES-GCM.
-     * Returns the decrypted inner plaintext with content type stripped.
-     */
+    /** Decrypts a TLS handshake record. Returns the inner plaintext with content type stripped. */
     private fun decryptHandshakeRecord(
         ciphertext: ByteArray,
         key: ByteArray,
@@ -567,20 +496,12 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return decrypted.copyOfRange(0, contentEnd)
     }
 
-    // -- Certificate Parsing --
-
     /**
-     * Parses the Certificate handshake message to extract DER-encoded X.509 certificates.
-     *
-     * TLS 1.3 Certificate message format:
-     * - 1 byte: certificate request context length (usually 0)
+     * Parses the TLS 1.3 Certificate handshake message:
+     * - 1 byte: certificate request context length
      * - N bytes: certificate request context
      * - 3 bytes: certificate list length
-     * - For each certificate:
-     *   - 3 bytes: certificate data length
-     *   - N bytes: DER-encoded certificate
-     *   - 2 bytes: extensions length
-     *   - N bytes: extensions
+     * - For each certificate: 3-byte length + DER cert + 2-byte extensions length + extensions.
      */
     private fun parseCertificateMessage(body: ByteArray) {
         serverCertificates.clear()
@@ -635,13 +556,9 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    // -- CompressedCertificate (RFC 8879) --
-
     /**
-     * Decompresses a CompressedCertificate message body.
-     *
-     * RFC 8879 layout: algorithm (2) + uncompressed_length (3) + compressed_length (3) + data
-     * Supports zlib (0x0001) and brotli (0x0002, if available).
+     * Decompresses a CompressedCertificate body (RFC 8879).
+     * Layout: algorithm (2) + uncompressed_length (3) + compressed_length (3) + data.
      */
     private fun decompressCertificate(body: ByteArray): ByteArray? {
         if (body.size < 8) return null
@@ -695,28 +612,19 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    // -- Certificate Validation --
-
     /**
-     * Validates the server certificate.
-     *
-     * First tries standard system trust evaluation. If that fails, checks
-     * whether the leaf certificate's SHA-256 fingerprint is in the user's
-     * trusted certificate list. Chain trust validation is best-effort
-     * (logged, not fatal) because the CertificateVerify signature already
-     * proves the server holds the private key for the leaf certificate.
+     * Tries system chain-trust + hostname evaluation first; on failure, falls back
+     * to the user's trusted-fingerprint list. Mirrors iOS's `SecPolicyCreateSSL(true,
+     * serverName)` which folds hostname enforcement into the chain trust step.
      */
     private fun validateCertificate() {
         if (serverCertificates.isEmpty()) {
             throw TlsError.CertificateValidationFailed("No server certificates")
         }
 
-        // Check leaf certificate validity (not expired)
         val leafCert = serverCertificates.first()
         leafCert.checkValidity()
 
-        // Best-effort chain trust validation via Android TrustManagerFactory.
-        // Non-fatal: CertificateVerify provides the key-ownership proof.
         try {
             val tmf = javax.net.ssl.TrustManagerFactory.getInstance(
                 javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm()
@@ -734,9 +642,10 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 }
                 x509tm.checkServerTrusted(serverCertificates.toTypedArray(), authType)
             }
+
+            verifyHostname(leafCert, configuration.serverName)
         } catch (e: Exception) {
-            logger.warning("Chain trust validation failed: ${e.message}")
-            // System trust failed — check user-trusted certificate fingerprints (matching iOS)
+            logger.warning("Chain/hostname validation failed: ${e.message}")
             if (!isUserTrusted(leafCert)) {
                 throw TlsError.CertificateValidationFailed(
                     "Certificate not trusted by system or user: ${e.message}"
@@ -746,11 +655,61 @@ class TlsClient(private val configuration: TlsConfiguration) {
     }
 
     /**
+     * Verifies the leaf certificate's SubjectAlternativeName extension contains an
+     * entry matching [serverName]. Wildcards per RFC 6125 §6.4.3 — only as the
+     * leftmost label, only matches a single label.
+     */
+    private fun verifyHostname(certificate: X509Certificate, serverName: String) {
+        if (serverName.isEmpty()) return
+
+        val isIpLiteral = serverName.matches(Regex("^[0-9.]+$")) ||
+                serverName.contains(":")
+        val sans = certificate.subjectAlternativeNames ?: emptyList<List<*>>()
+
+        var sawCompatibleType = false
+        for (entry in sans) {
+            if (entry == null || entry.size < 2) continue
+            val type = (entry[0] as? Int) ?: continue
+            val value = entry[1]
+            when {
+                !isIpLiteral && type == 2 -> {
+                    sawCompatibleType = true
+                    val dnsName = (value as? String) ?: continue
+                    if (matchesDnsName(serverName, dnsName)) return
+                }
+                isIpLiteral && type == 7 -> {
+                    sawCompatibleType = true
+                    val ipString = (value as? String) ?: continue
+                    try {
+                        if (java.net.InetAddress.getByName(ipString) ==
+                            java.net.InetAddress.getByName(serverName)) return
+                    } catch (_: Exception) { /* fall through */ }
+                }
+            }
+        }
+
+        throw TlsError.CertificateValidationFailed(
+            "Certificate SAN does not match server name '$serverName'" +
+                if (!sawCompatibleType) " (no compatible SAN entries)" else ""
+        )
+    }
+
+    private fun matchesDnsName(host: String, pattern: String): Boolean {
+        val h = host.lowercase().trimEnd('.')
+        val p = pattern.lowercase().trimEnd('.')
+        if (p == h) return true
+        if (!p.startsWith("*.")) return false
+        val patternRest = p.substring(2)
+        if (patternRest.isEmpty() || !patternRest.contains('.')) return false
+        val firstDot = h.indexOf('.')
+        if (firstDot < 0) return false
+        return h.substring(firstDot + 1) == patternRest
+    }
+
+    /**
      * Checks whether the certificate's SHA-256 fingerprint is in the user's trusted list.
-     *
-     * Uses [constantTimeEqual] for the per-entry comparison to avoid leaking information
-     * about how many leading bytes of a candidate fingerprint match. This matches iOS's
-     * `constantTimeEqual()` helper in `TLSClient.swift`.
+     * Uses [constantTimeEqual] for the per-entry comparison to avoid leaking how many
+     * leading bytes of a candidate fingerprint matched.
      */
     private fun isUserTrusted(certificate: X509Certificate): Boolean {
         val trusted = trustedFingerprints
@@ -772,11 +731,8 @@ class TlsClient(private val configuration: TlsConfiguration) {
     }
 
     /**
-     * Constant-time byte-array comparison. Returns true iff [a] and [b] have the same
-     * length and identical contents. The comparison time depends only on the length of
-     * the longer input, not on where (or whether) the inputs first differ.
-     *
-     * Mirrors iOS `constantTimeEqual` in `TLSClient.swift`.
+     * Constant-time byte-array comparison. Comparison time depends only on the length
+     * of the longer input, not on where the inputs first differ.
      */
     private fun constantTimeEqual(a: ByteArray, b: ByteArray): Boolean {
         if (a.size != b.size) return false
@@ -790,9 +746,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
     /**
      * Validates the negotiated TLS version against the [TlsConfiguration.minVersion] and
      * [TlsConfiguration.maxVersion] constraints. A null bound means "no constraint".
-     *
-     * Throws [TlsError.HandshakeFailed] if the negotiated version is outside the allowed
-     * range. Mirrors iOS version-pinning behavior.
      */
     private fun enforceVersionConstraints() {
         val negotiated = when (negotiatedVersion) {
@@ -825,11 +778,8 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    // -- CertificateVerify --
-
     /**
      * Verifies the CertificateVerify signature against the handshake transcript.
-     *
      * The signature is computed over:
      * `64 spaces + "TLS 1.3, server CertificateVerify\0" + transcript_hash`
      */
@@ -845,8 +795,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
         val serverPublicKey = serverCert.publicKey
 
-        // Build the content to verify:
-        // 64 spaces + "TLS 1.3, server CertificateVerify" + 0x00 + transcript_hash
         val transcriptHash = kd.transcriptHash(transcript)
 
         val spaces = ByteArray(64) { 0x20 }
@@ -854,27 +802,24 @@ class TlsClient(private val configuration: TlsConfiguration) {
         val content = spaces + label + byteArrayOf(0x00) + transcriptHash
 
         try {
-            // Android's Conscrypt uses "SHA256withRSA/PSS" naming convention
-            // (not the generic "RSASSA-PSS" which requires explicit PSSParameterSpec)
+            // Conscrypt uses "SHA256withRSA/PSS" naming (not generic "RSASSA-PSS"
+            // which requires explicit PSSParameterSpec).
             val sig = java.security.Signature.getInstance(javaSignatureAlgorithm(algorithm))
             sig.initVerify(serverPublicKey)
             sig.update(content)
             val isValid = sig.verify(signature)
             if (!isValid) {
-                if (configuration.allowInsecure || CertificatePolicy.allowInsecure) return
                 throw TlsError.CertificateValidationFailed("CertificateVerify signature verification failed")
             }
         } catch (e: TlsError) {
             throw e
         } catch (e: Exception) {
-            if (configuration.allowInsecure || CertificatePolicy.allowInsecure) return
             throw TlsError.CertificateValidationFailed("CertificateVerify failed: ${e.message}")
         }
     }
 
-    /** Maps TLS signature algorithm identifier to Java Signature algorithm name.
-     *  Uses Android Conscrypt naming: "SHA256withRSA/PSS" (not generic "RSASSA-PSS").
-     *  Mirrors iOS `secKeyAlgorithm()`. */
+    /** Maps TLS signature algorithm identifier to Conscrypt Signature algorithm name
+     *  ("SHA256withRSA/PSS" rather than generic "RSASSA-PSS"). */
     private fun javaSignatureAlgorithm(tlsAlgorithm: Int): String {
         return when (tlsAlgorithm) {
             // ECDSA
@@ -895,8 +840,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
             else -> "SHA256withRSA"
         }
     }
-
-    // -- Finish Handshake --
 
     /** Derives application keys and sends Client Finished to complete the handshake. */
     private suspend fun finishHandshake(fullTranscript: ByteArray): TlsRecordConnection {
@@ -923,18 +866,13 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return tlsConnection
     }
 
-    // -- Client Finished --
-
-    /** Sends the ChangeCipherSpec and encrypted Client Finished messages. */
     private suspend fun sendClientFinished() {
         val keys = handshakeKeys ?: throw TlsError.HandshakeFailed("Missing handshake keys")
         val transcript = handshakeTranscript ?: throw TlsError.HandshakeFailed("Missing handshake keys")
         val kd = keyDerivation ?: throw TlsError.HandshakeFailed("Missing handshake keys")
 
-        // ChangeCipherSpec record
         val ccsRecord = byteArrayOf(0x14, 0x03, 0x03, 0x00, 0x01, 0x01)
 
-        // Build and encrypt Client Finished
         val verifyData = kd.computeFinishedVerifyData(keys.clientTrafficSecret, transcript)
 
         val finishedMsg = ByteArray(4 + verifyData.size)
@@ -954,10 +892,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
         conn.send(combined)
     }
 
-    /**
-     * Encrypts a TLS 1.3 handshake record using AES-GCM.
-     * Returns a complete TLS record (header + ciphertext + tag).
-     */
+    /** Encrypts a TLS 1.3 handshake record. Returns a complete TLS record (header + ciphertext + tag). */
     private fun encryptHandshakeRecord(
         plaintext: ByteArray,
         key: ByteArray,
@@ -1000,32 +935,26 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return record
     }
 
-    // ========= TLS 1.2 Handshake =========
-
     /**
-     * Handles the TLS 1.2 handshake. Server has responded with TLS 1.2 ServerHello.
-     * Collects plaintext Certificate, ServerKeyExchange, ServerHelloDone, then
-     * sends ClientKeyExchange + ChangeCipherSpec + Finished.
+     * Handles the TLS 1.2 handshake. Collects plaintext Certificate,
+     * ServerKeyExchange, ServerHelloDone, then sends
+     * ClientKeyExchange + ChangeCipherSpec + Finished.
      */
     private suspend fun handleTls12Handshake(buffer: ByteArray): TlsRecordConnection {
         val clientHello = storedClientHello
             ?: throw TlsError.HandshakeFailed("Missing stored ClientHello")
 
-        // Parse ServerHello to extract cipher suite, server random, EMS
         val serverHello = extractServerHelloMessage(buffer)
         if (serverHello.isEmpty()) {
             throw TlsError.HandshakeFailed("Failed to extract TLS 1.2 ServerHello")
         }
         parseTls12ServerHello(serverHello)
 
-        // Enforce version constraints now that the negotiated version is known
-        // (parseTls12ServerHello may upgrade to 0x0304 via the supported_versions extension).
+        // parseTls12ServerHello may upgrade to 0x0304 via the supported_versions extension.
         enforceVersionConstraints()
 
-        // Start transcript
         tls12Transcript = clientHello + serverHello
 
-        // Collect remaining plaintext handshake messages
         var buf = buffer
         var offset = 0
         var serverKeyExchangeBody: ByteArray? = null
@@ -1039,7 +968,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 if (offset + 5 + recordLen > buf.size) break
 
                 if (contentType == 0x16) {
-                    // Plaintext handshake record — may contain multiple messages
                     val recordData = buf.copyOfRange(offset + 5, offset + 5 + recordLen)
                     var hsOffset = 0
                     while (hsOffset + 4 <= recordData.size) {
@@ -1085,17 +1013,14 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
         val skipValidation = configuration.allowInsecure || CertificatePolicy.allowInsecure
 
-        // Validate certificate
         if (!skipValidation && serverCertificates.isNotEmpty()) {
             validateCertificate()
         }
 
-        // Verify ServerKeyExchange signature
         if (!skipValidation && serverKeyExchangeBody != null) {
             verifyTls12ServerKeyExchange(serverKeyExchangeBody)
         }
 
-        // Perform key exchange: ECDHE if ServerKeyExchange present, RSA otherwise
         val (preMasterSecret, ckeBody) = if (serverKeyExchangeBody != null) {
             processECDHEServerKeyExchange(serverKeyExchangeBody)
         } else if (!TlsCipherSuite.isECDHE(tls12CipherSuite)) {
@@ -1104,7 +1029,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
             throw TlsError.HandshakeFailed("Missing ServerKeyExchange for ECDHE cipher suite")
         }
 
-        // Build ClientKeyExchange handshake message
         val ckeMessage = ByteArray(4 + ckeBody.size)
         ckeMessage[0] = 0x10 // ClientKeyExchange
         ckeMessage[1] = ((ckeBody.size shr 16) and 0xFF).toByte()
@@ -1113,7 +1037,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         System.arraycopy(ckeBody, 0, ckeMessage, 4, ckeBody.size)
         tls12Transcript = tls12Transcript!! + ckeMessage
 
-        // Derive master secret
         val cRandom = clientRandom ?: throw TlsError.HandshakeFailed("Missing client random")
         val sRandom = serverRandom ?: throw TlsError.HandshakeFailed("Missing server random")
         val useSHA384 = TlsCipherSuite.usesSHA384(tls12CipherSuite)
@@ -1125,45 +1048,36 @@ class TlsClient(private val configuration: TlsConfiguration) {
             Tls12KeyDerivation.masterSecret(preMasterSecret, cRandom, sRandom, useSHA384)
         }
 
-        // Expand keys
         val keys = Tls12KeyDerivation.keysFromMasterSecret(masterSecret, cRandom, sRandom, tls12CipherSuite)
 
-        // Send ClientKeyExchange + ChangeCipherSpec + Finished
         return sendTls12ClientKeyExchangeAndFinished(buf, offset, ckeMessage, keys, masterSecret)
     }
 
-    /** Parses TLS 1.2 ServerHello to extract cipher suite, random, and EMS. */
     private fun parseTls12ServerHello(serverHelloMsg: ByteArray) {
         // ServerHello message: type(1) + length(3) + version(2) + random(32) + ...
         if (serverHelloMsg.size < 39) {
             throw TlsError.HandshakeFailed("ServerHello too short")
         }
-        var offset = 4 // Skip type(1) + length(3)
+        var offset = 4
 
-        // Version
         negotiatedVersion = ((serverHelloMsg[offset].toInt() and 0xFF) shl 8) or
                 (serverHelloMsg[offset + 1].toInt() and 0xFF)
         offset += 2
 
-        // Server random
         serverRandom = serverHelloMsg.copyOfRange(offset, offset + 32)
         offset += 32
 
-        // Session ID
         val sessionIdLen = serverHelloMsg[offset].toInt() and 0xFF
         offset += 1 + sessionIdLen
 
         if (offset + 3 > serverHelloMsg.size) return
 
-        // Cipher suite
         tls12CipherSuite = ((serverHelloMsg[offset].toInt() and 0xFF) shl 8) or
                 (serverHelloMsg[offset + 1].toInt() and 0xFF)
         offset += 2
 
-        // Compression method
-        offset += 1
+        offset += 1 // compression method
 
-        // Extensions
         if (offset + 2 <= serverHelloMsg.size) {
             val extLen = ((serverHelloMsg[offset].toInt() and 0xFF) shl 8) or
                     (serverHelloMsg[offset + 1].toInt() and 0xFF)
@@ -1178,7 +1092,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 offset += 4
 
                 when (extType) {
-                    0x0017 -> useExtendedMasterSecret = true  // Extended Master Secret
+                    0x0017 -> useExtendedMasterSecret = true
                     0x002B -> { // supported_versions: if server responds 0x0304, it's TLS 1.3
                         if (extDataLen >= 2) {
                             val ver = ((serverHelloMsg[offset].toInt() and 0xFF) shl 8) or
@@ -1193,7 +1107,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
 
     }
 
-    /** Parses TLS 1.2 Certificate message (plaintext, without context length). */
     private fun parseTls12CertificateMessage(body: ByteArray) {
         serverCertificates.clear()
         if (body.size < 3) return
@@ -1224,7 +1137,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    /** Processes ServerKeyExchange for ECDHE: extracts curve, public key, computes shared secret. */
     private fun processECDHEServerKeyExchange(body: ByteArray): Pair<ByteArray, ByteArray> {
         if (body.size < 4) throw TlsError.HandshakeFailed("ServerKeyExchange too short")
 
@@ -1254,7 +1166,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 val ecPub = kp.public as java.security.interfaces.ECPublicKey
                 val ecPriv = kp.private
 
-                // Derive shared secret via ECDH
                 val ka = javax.crypto.KeyAgreement.getInstance("ECDH")
                 ka.init(ecPriv)
                 val serverKeyFactory = java.security.KeyFactory.getInstance("EC")
@@ -1266,7 +1177,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 ka.doPhase(serverKeyFactory.generatePublic(pubKeySpec), true)
                 val sharedSecret = ka.generateSecret()
 
-                // Build ClientKeyExchange: length(1) + uncompressed point (65 bytes)
+                // ClientKeyExchange: length(1) + uncompressed point (65 bytes)
                 val w = ecPub.w
                 val x = w.affineX.toByteArray().let { b ->
                     when { b.size == 32 -> b; b.size > 32 -> b.copyOfRange(b.size - 32, b.size)
@@ -1282,7 +1193,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 System.arraycopy(clientPubKey, 0, cke, 1, clientPubKey.size)
                 Pair(sharedSecret, cke)
             }
-            0x0018 -> { // P-384 (secp384r1) — matching iOS
+            0x0018 -> { // P-384 (secp384r1)
                 val kpg = java.security.KeyPairGenerator.getInstance("EC")
                 kpg.initialize(java.security.spec.ECGenParameterSpec("secp384r1"))
                 val kp = kpg.generateKeyPair()
@@ -1300,7 +1211,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 ka.doPhase(serverKeyFactory.generatePublic(pubKeySpec), true)
                 val sharedSecret = ka.generateSecret()
 
-                // Build ClientKeyExchange: length(1) + uncompressed point (97 bytes for P-384)
+                // ClientKeyExchange: length(1) + uncompressed point (97 bytes for P-384)
                 val w = ecPub.w
                 val x = w.affineX.toByteArray().let { b ->
                     when { b.size == 48 -> b; b.size > 48 -> b.copyOfRange(b.size - 48, b.size)
@@ -1320,18 +1231,17 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    /** Processes RSA ServerKeyExchange (static RSA key exchange, no ServerKeyExchange). */
+    /** Static RSA key exchange path (no ServerKeyExchange). */
     private fun processRSAKeyExchange(): Pair<ByteArray, ByteArray> {
         val serverCert = serverCertificates.firstOrNull()
             ?: throw TlsError.HandshakeFailed("No server certificate for RSA key exchange")
 
-        // Generate 48-byte pre-master secret: version(2) + random(46)
+        // 48-byte pre-master secret: version(2) + random(46)
         val preMasterSecret = ByteArray(48)
         java.security.SecureRandom().nextBytes(preMasterSecret)
         preMasterSecret[0] = 0x03
         preMasterSecret[1] = 0x03
 
-        // Encrypt with server's RSA public key (PKCS#1 v1.5)
         val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
         cipher.init(Cipher.ENCRYPT_MODE, serverCert.publicKey)
         val encrypted = cipher.doFinal(preMasterSecret)
@@ -1345,7 +1255,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return Pair(preMasterSecret, cke)
     }
 
-    /** Verifies ServerKeyExchange signature using server certificate. */
     private fun verifyTls12ServerKeyExchange(body: ByteArray) {
         val serverCert = serverCertificates.firstOrNull() ?: return
         if (body.size < 4) return
@@ -1396,51 +1305,43 @@ class TlsClient(private val configuration: TlsConfiguration) {
         val versionHi = ((negotiatedVersion shr 8) and 0xFF).toByte()
         val versionLo = (negotiatedVersion and 0xFF).toByte()
 
-        // Build ClientKeyExchange TLS record
         val ckeRecord = ByteArray(5 + ckeMessage.size)
         ckeRecord[0] = 0x16; ckeRecord[1] = versionHi; ckeRecord[2] = versionLo
         ckeRecord[3] = ((ckeMessage.size shr 8) and 0xFF).toByte()
         ckeRecord[4] = (ckeMessage.size and 0xFF).toByte()
         System.arraycopy(ckeMessage, 0, ckeRecord, 5, ckeMessage.size)
 
-        // ChangeCipherSpec record
         val ccsRecord = byteArrayOf(0x14, versionHi, versionLo, 0x00, 0x01, 0x01)
 
-        // Compute client Finished verify data
         val transcriptHash = Tls12KeyDerivation.transcriptHash(tls12Transcript!!, useSHA384)
         val clientVerifyData = Tls12KeyDerivation.computeFinishedVerifyData(
             masterSecret, "client finished", transcriptHash, useSHA384
         )
 
-        // Build Finished handshake message
         val finishedMsg = ByteArray(4 + clientVerifyData.size)
-        finishedMsg[0] = 0x14 // Finished
+        finishedMsg[0] = 0x14
         finishedMsg[1] = 0x00; finishedMsg[2] = 0x00
         finishedMsg[3] = clientVerifyData.size.toByte()
         System.arraycopy(clientVerifyData, 0, finishedMsg, 4, clientVerifyData.size)
 
-        // Encrypt Finished with client write keys (seqNum = 0 — first record after CCS)
+        // Encrypt Finished with seqNum = 0 (first record after CCS).
         val encryptedFinished = encryptTls12HandshakeRecord(
             finishedMsg, 0x16, 0, keys, negotiatedVersion
         )
 
-        // Send all three: CKE + CCS + encrypted Finished
         conn.send(ckeRecord + ccsRecord + encryptedFinished)
 
-        // Receive server's ChangeCipherSpec + encrypted Finished
         var buf = if (processedOffset < buffer.size) {
             buffer.copyOfRange(processedOffset, buffer.size)
         } else {
             ByteArray(0)
         }
 
-        // Wait for server CCS + Finished
         while (buf.size < 12) {
             val moreData = conn.receive() ?: throw TlsError.HandshakeFailed("Connection closed waiting for server Finished")
             buf = buf + moreData
         }
 
-        // Skip server ChangeCipherSpec and find encrypted Finished
         var off = 0
         var foundCCS = false
         while (off + 5 <= buf.size) {
@@ -1457,7 +1358,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 continue
             }
             if (ct == 0x16 && !foundCCS) {
-                // Plaintext handshake record BEFORE CCS (e.g. NewSessionTicket).
+                // Plaintext handshake before CCS (e.g. NewSessionTicket).
                 // Must be added to the transcript — the server includes it when
                 // computing its Finished verify_data.
                 val recordBody = buf.copyOfRange(off + 5, off + 5 + rl)
@@ -1471,7 +1372,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 val decrypted = decryptTls12HandshakeRecord(
                     encFinished, header[0], 0, keys, negotiatedVersion
                 )
-                // Verify server Finished
                 tls12Transcript = tls12Transcript!! + finishedMsg
                 val serverTranscriptHash = Tls12KeyDerivation.transcriptHash(tls12Transcript!!, useSHA384)
                 val expectedServerVerify = Tls12KeyDerivation.computeFinishedVerifyData(
@@ -1480,7 +1380,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
                 if (decrypted.size >= 4) {
                     val serverVerify = decrypted.copyOfRange(4, decrypted.size)
                     // Constant-time comparison to prevent timing side-channel attacks
-                    // on the server Finished verify_data (matches iOS).
+                    // on the server Finished verify_data.
                     if (!constantTimeEqual(serverVerify, expectedServerVerify)) {
                         throw TlsError.HandshakeFailed("TLS 1.2 Server Finished verify data mismatch")
                     }
@@ -1491,7 +1391,7 @@ class TlsClient(private val configuration: TlsConfiguration) {
             off += 5 + rl
         }
 
-        // Build TLS 1.2 record connection (seqNums start at 1 after Finished)
+        // Sequence numbers start at 1 after Finished.
         val tlsConnection = TlsRecordConnection(
             tls12ClientKey = keys.clientKey,
             clientIV = keys.clientIV,
@@ -1507,7 +1407,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         tlsConnection.connection = connection
         connection = null
 
-        // Pass remaining buffer data
         if (off < buf.size) {
             tlsConnection.prependToReceiveBuffer(buf.copyOfRange(off, buf.size))
         }
@@ -1565,7 +1464,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
             System.arraycopy(encrypted, 0, record, 5 + explicitNonce.size, encrypted.size)
             return record
         } else {
-            // CBC mode
             val useSHA384 = TlsCipherSuite.usesSHA384(tls12CipherSuite)
             val useSHA256 = TlsCipherSuite.cbcUsesSHA256(tls12CipherSuite)
             val mac = Tls12KeyDerivation.tls10MAC(
@@ -1596,7 +1494,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    /** Decrypts a TLS 1.2 encrypted handshake record (server Finished). */
     private fun decryptTls12HandshakeRecord(
         ciphertext: ByteArray, contentType: Byte, seqNum: Long,
         keys: Tls12Keys, version: Int
@@ -1637,7 +1534,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
             cipher.updateAAD(aad)
             return cipher.doFinal(payload)
         } else {
-            // CBC decryption with MAC verification (matching iOS)
             val blockSize = 16
             if (ciphertext.size < blockSize * 2) throw TlsError.HandshakeFailed("Ciphertext too short for CBC")
 
@@ -1684,7 +1580,6 @@ class TlsClient(private val configuration: TlsConfiguration) {
         }
     }
 
-    /** XOR sequence number into the last 8 bytes of an IV. */
     private fun xorNonce(iv: ByteArray, seqNum: Long): ByteArray {
         val nonce = iv.copyOf()
         val base = nonce.size - 8
@@ -1694,14 +1589,11 @@ class TlsClient(private val configuration: TlsConfiguration) {
         return nonce
     }
 
-    /** Convert sequence number to 8-byte big-endian array. */
     private fun seqToBytes(seqNum: Long): ByteArray {
         val bytes = ByteArray(8)
         for (i in 0 until 8) { bytes[i] = ((seqNum shr ((7 - i) * 8)) and 0xFF).toByte() }
         return bytes
     }
-
-    // -- Helpers --
 
     /** Frees handshake-only state to reduce memory after the connection is established. */
     private fun clearHandshakeState() {

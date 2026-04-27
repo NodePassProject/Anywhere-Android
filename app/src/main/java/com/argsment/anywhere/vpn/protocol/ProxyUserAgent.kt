@@ -5,12 +5,9 @@ import java.util.TimeZone
 import kotlin.math.max
 
 /**
- * Shared Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
- *
- * Uses a fixed base version (Chrome 144, released 2026-01-13) and advances by one
- * version every ~35 days (midpoint of Xray-core's 25-45 day range). Mirrors
- * `ProxyUserAgent.swift` on iOS so both platforms produce the same UA on the
- * same wall-clock day.
+ * Shared Chrome User-Agent string. Uses a fixed base version (Chrome 144,
+ * released 2026-01-13) and advances by one version every ~35 days so the UA
+ * tracks current Chrome stable releases.
  */
 object ProxyUserAgent {
     val chrome: String by lazy { computeChromeUA() }

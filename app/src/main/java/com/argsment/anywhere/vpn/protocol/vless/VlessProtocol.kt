@@ -2,9 +2,6 @@ package com.argsment.anywhere.vpn.protocol.vless
 
 import java.util.UUID
 
-/**
- * VLESS command types.
- */
 enum class VlessCommand(val value: Byte) {
     TCP(0x01),
     UDP(0x02),
@@ -15,9 +12,6 @@ enum class VlessCommand(val value: Byte) {
     }
 }
 
-/**
- * VLESS address types.
- */
 enum class VlessAddressType(val value: Byte) {
     IPV4(0x01),
     DOMAIN(0x02),
@@ -28,43 +22,33 @@ enum class VlessAddressType(val value: Byte) {
     }
 }
 
-/**
- * VLESS protocol encoder/decoder.
- */
 object VlessProtocol {
 
-    /** VLESS protocol version (always 0). */
     const val VERSION: Byte = 0x00
 
-    /**
-     * Encode VLESS addons (protobuf format).
-     * Addons message: { string Flow = 1; bytes Seed = 2; }
-     */
+    /** Protobuf-encoded addons message: `{ string Flow = 1; bytes Seed = 2; }`. */
     private fun encodeAddons(flow: String?): ByteArray {
         if (flow.isNullOrEmpty()) return byteArrayOf()
 
         val flowBytes = flow.toByteArray(Charsets.UTF_8)
         val data = ByteArray(2 + flowBytes.size)
-        // Field 1 (Flow): wire type 2 (length-delimited), tag = 0x0A
-        data[0] = 0x0A
-        // Length of string (varint)
+        data[0] = 0x0A // Field 1, wire type 2 (length-delimited)
         data[1] = flowBytes.size.toByte()
-        // String bytes
         System.arraycopy(flowBytes, 0, data, 2, flowBytes.size)
         return data
     }
 
     /**
-     * Encode a VLESS request header.
+     * Encodes a VLESS request header:
+     * - 1 byte version (0x00)
+     * - 16 bytes UUID
+     * - 1 byte addons length (0 for no addons)
+     * - 1 byte command
+     * - 2 bytes port (big-endian)
+     * - 1 byte address type
+     * - Variable address data
      *
-     * Format:
-     * - 1 byte: Version (0x00)
-     * - 16 bytes: UUID
-     * - 1 byte: Addons length (0 for no addons)
-     * - 1 byte: Command (TCP=0x01, UDP=0x02)
-     * - 2 bytes: Port (big-endian)
-     * - 1 byte: Address type
-     * - Variable: Address data
+     * MUX command omits the address/port section.
      */
     fun encodeRequestHeader(
         uuid: UUID,
@@ -83,29 +67,21 @@ object VlessProtocol {
     ): ByteArray {
         val result = mutableListOf<Byte>()
 
-        // Version (1 byte)
         result.add(VERSION)
-
-        // UUID (16 bytes)
         result.addAll(uuidToBytes(uuid).toList())
 
-        // Addons (protobuf encoded)
         val addons = encodeAddons(flow)
         result.add(addons.size.toByte())
         if (addons.isNotEmpty()) {
             result.addAll(addons.toList())
         }
 
-        // Command (1 byte)
         result.add(command.value)
 
-        // Mux command omits address/port (matching Xray-core encoding.go:50-54)
         if (command != VlessCommand.MUX) {
-            // Port (2 bytes, big-endian)
             result.add((destinationPort shr 8).toByte())
             result.add((destinationPort and 0xFF).toByte())
 
-            // Address
             val ipv4 = parseIPv4(destinationAddress)
             val ipv6 = parseIPv6(destinationAddress)
             when {
@@ -118,7 +94,6 @@ object VlessProtocol {
                     result.addAll(ipv6.toList())
                 }
                 else -> {
-                    // Domain name
                     val domainBytes = destinationAddress.toByteArray(Charsets.UTF_8)
                     result.add(VlessAddressType.DOMAIN.value)
                     result.add(domainBytes.size.toByte())
@@ -130,16 +105,12 @@ object VlessProtocol {
         return result.toByteArray()
     }
 
-    /**
-     * Decode a VLESS response header.
-     * Returns the number of bytes consumed, or 0 if no response header present.
-     */
+    /** Returns bytes consumed for the response header, or 0 if absent or incomplete. */
     fun decodeResponseHeader(data: ByteArray, offset: Int = 0): Int {
         val available = data.size - offset
         if (available < 2) return 0
 
         val version = data[offset]
-        // If version is not 0, there's no VLESS response header
         if (version != VERSION) return 0
 
         val addonsLength = data[offset + 1].toInt() and 0xFF
@@ -150,7 +121,6 @@ object VlessProtocol {
         return totalLength
     }
 
-    /** Convert UUID to 16-byte array. */
     fun uuidToBytes(uuid: UUID): ByteArray {
         val bytes = ByteArray(16)
         val msb = uuid.mostSignificantBits
@@ -164,7 +134,6 @@ object VlessProtocol {
         return bytes
     }
 
-    /** Parse an IPv4 address string into bytes. */
     private fun parseIPv4(address: String): ByteArray? {
         val parts = address.split(".")
         if (parts.size != 4) return null
@@ -178,17 +147,14 @@ object VlessProtocol {
         return bytes
     }
 
-    /** Parse an IPv6 address string into bytes. */
     private fun parseIPv6(address: String): ByteArray? {
         var addr = address
         if (addr.startsWith("[") && addr.endsWith("]")) {
             addr = addr.substring(1, addr.length - 1)
         }
 
-        // Simple IPv6 parsing - expand :: and parse
         var parts = addr.split(":").toMutableList()
 
-        // Handle :: expansion
         val emptyIndex = parts.indexOf("")
         if (emptyIndex >= 0) {
             val before = parts.subList(0, emptyIndex)

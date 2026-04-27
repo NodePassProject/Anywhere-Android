@@ -79,7 +79,7 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
     var showingManualAddSheet by remember { mutableStateOf(false) }
     var deepLinkPrefill by remember { mutableStateOf<String?>(null) }
 
-    // Auto-open the Add sheet when a deep link arrives (vless://, ss://, socks5://, quic://, or anywhere://add-proxy?link=…).
+    // Auto-open the Add sheet when a deep link arrives (vless://, ss://, socks5://, or anywhere://add-proxy?link=…).
     val pendingDeepLink by viewModel.pendingDeepLinkUrl.collectAsState()
     androidx.compose.runtime.LaunchedEffect(pendingDeepLink) {
         val url = pendingDeepLink ?: return@LaunchedEffect
@@ -115,11 +115,8 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                 title = { Text(stringResource(R.string.proxies)) },
                 actions = {
                     IconButton(onClick = {
-                        // Mirrors iOS: only test what's currently visible
-                        // — standalone proxies plus configurations from
-                        // expanded (non-collapsed) subscriptions. Skipping
-                        // collapsed subscriptions keeps the test run focused
-                        // on what the user is actually looking at.
+                        // Only test what's currently visible — standalone proxies
+                        // plus configurations from expanded subscriptions.
                         val visible = standaloneConfigs + subscribedGroups
                             .filter { it.first.id !in collapsedSubscriptions }
                             .flatMap { it.second }
@@ -141,7 +138,6 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
         }
     ) { innerPadding ->
         if (configurations.isEmpty()) {
-            // Empty state
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -167,7 +163,6 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
-                // Standalone configurations
                 if (standaloneConfigs.isNotEmpty()) {
                     items(standaloneConfigs, key = { it.id }) { config ->
                         ConfigurationRow(
@@ -182,12 +177,11 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
                     }
                 }
 
-                // Subscription groups
                 subscribedGroups.forEach { (subscription, configs) ->
                     val isCollapsed = collapsedSubscriptions.contains(subscription.id)
                     // Locked subscriptions (managed panels) hide the edit/delete
                     // menu entries — users should re-subscribe rather than edit
-                    // individual proxies. Mirrors iOS `SubscriptionDomainHelper`.
+                    // individual proxies.
                     val editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(subscription.url)
                     item(key = "header_${subscription.id}") {
                         SubscriptionHeader(
@@ -240,7 +234,6 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Add proxy bottom sheet
     if (showingAddSheet) {
         ModalBottomSheet(
             onDismissRequest = {
@@ -275,7 +268,6 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Manual add sheet
     if (showingManualAddSheet) {
         ModalBottomSheet(
             onDismissRequest = { showingManualAddSheet = false },
@@ -292,7 +284,6 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Edit sheet
     configurationToEdit?.let { config ->
         ModalBottomSheet(
             onDismissRequest = { configurationToEdit = null },
@@ -309,7 +300,6 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
         }
     }
 
-    // Subscription rename dialog
     subscriptionToRename?.let { sub ->
         var newName by remember(sub.id) { mutableStateOf(sub.name) }
         AlertDialog(
@@ -342,7 +332,6 @@ fun ProxyListScreen(viewModel: VpnViewModel) {
         )
     }
 
-    // Subscription error dialog
     if (showSubscriptionError) {
         AlertDialog(
             onDismissRequest = { showSubscriptionError = false },
@@ -499,16 +488,19 @@ private fun ConfigurationRow(
                     onTestLatency()
                 }
             )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.copy_link)) },
-                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
-                onClick = {
-                    showMenu = false
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("proxy_url", configuration.toUrl()))
-                }
-            )
             if (!editingDisabled) {
+                // Locked-subscription proxies hide Copy Link / Edit / Delete to match
+                // iOS ProxyListView's context-menu protections (the link contains
+                // credentials the user shouldn't be able to extract from a managed sub).
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.copy_link)) },
+                    leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                    onClick = {
+                        showMenu = false
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("proxy_url", configuration.toUrl()))
+                    }
+                )
                 DropdownMenuItem(
                     text = { Text(stringResource(R.string.edit)) },
                     onClick = {

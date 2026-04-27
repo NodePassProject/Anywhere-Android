@@ -32,6 +32,9 @@ static inline void _os_log_impl(os_log_t log, const char *fmt, ...) {
 /* os_log_error maps to Android ERROR level */
 #define os_log_error(log, fmt, ...) _os_log_impl(log, fmt, ##__VA_ARGS__)
 
+#define os_log_debug(log, fmt, ...) \
+    __android_log_print(ANDROID_LOG_DEBUG, log ? log : "os_log", fmt, ##__VA_ARGS__)
+
 /* os_log maps to Android DEBUG level (unused in bridge, but defined for completeness) */
 #define os_log(log, fmt, ...) do { \
     va_list _args; \

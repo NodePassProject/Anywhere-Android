@@ -4,10 +4,8 @@ import com.argsment.anywhere.vpn.protocol.Transport
 
 /**
  * Adapts a [TlsRecordConnection] to the [Transport] interface so that protocol
- * handshakes (e.g. SOCKS5, WebSocket) can run over a TLS-encrypted channel without
- * subclassing the VLESS connection hierarchy.
- *
- * Mirrors iOS `TLSRecordTransport` in `SOCKS5Connection.swift`.
+ * handshakes (e.g. SOCKS5, WebSocket) can run over a TLS-encrypted channel
+ * without subclassing the VLESS connection hierarchy.
  */
 class TlsRecordTransport(private val tlsConnection: TlsRecordConnection) : Transport {
 

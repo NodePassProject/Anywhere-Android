@@ -53,9 +53,8 @@ class ChainRepository(context: Context) {
     }
 
     private fun saveToDisk() {
-        runCatching {
-            file.writeText(json.encodeToString(_chains.value))
-        }.onFailure {
+        val payload = json.encodeToString(_chains.value)
+        file.writeTextAsync(payload) {
             println("Failed to save chains: $it")
         }
     }

@@ -44,7 +44,6 @@ class CertificateRepository(context: Context) {
         return true
     }
 
-    /** Removes a fingerprint by value. */
     fun remove(fingerprint: String) {
         val normalized = normalize(fingerprint)
         val updated = _fingerprints.value.filter { it != normalized }
@@ -52,14 +51,12 @@ class CertificateRepository(context: Context) {
         save(updated)
     }
 
-    /** Removes fingerprints at the given indices. */
     fun removeAt(indices: Set<Int>) {
         val updated = _fingerprints.value.filterIndexed { index, _ -> index !in indices }
         _fingerprints.value = updated
         save(updated)
     }
 
-    /** Checks whether a fingerprint is in the trusted list. */
     fun contains(fingerprint: String): Boolean =
         _fingerprints.value.contains(normalize(fingerprint))
 
@@ -67,7 +64,13 @@ class CertificateRepository(context: Context) {
         fp.replace(":", "").replace(" ", "").lowercase()
 
     private fun save(list: List<String>) {
-        prefs.edit().putStringSet(KEY, list.toSet()).apply()
+        prefs.edit()
+            .putStringSet(KEY, list.toSet())
+            // Bumping this counter triggers the VPN service's prefs listener
+            // (LwipStack.prefsListener) which throttles → CertificatePolicy.reload.
+            // Mirrors iOS AWCore.notifyCertificatePolicyChanged().
+            .putLong("certificatePolicyChanged", System.currentTimeMillis())
+            .apply()
     }
 
     private fun load() {

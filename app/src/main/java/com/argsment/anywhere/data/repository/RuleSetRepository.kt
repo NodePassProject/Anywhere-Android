@@ -20,7 +20,7 @@ import java.io.File
 import java.util.UUID
 
 /**
- * Routing rule-set state + persistence, port of iOS [RuleSetStore.swift].
+ * Routing rule-set state + persistence.
  *
  * Built-in rule sets: `Direct` + [ServiceCatalog.supportedServices] + `ADBlock`.
  * User-created [CustomRuleSet]s live between the built-ins and ADBlock so
@@ -69,8 +69,6 @@ class RuleSetRepository(private val context: Context) {
         rebuildRuleSets()
     }
 
-    // -- Rule set composition --
-
     private fun builtInNames(): List<String> =
         listOf("Direct") + serviceCatalog.supportedServices + listOf("ADBlock")
 
@@ -101,8 +99,6 @@ class RuleSetRepository(private val context: Context) {
         _ruleSets.value = result
     }
 
-    // -- Assignment --
-
     fun updateAssignment(ruleSet: RuleSet, configurationId: String?) {
         _ruleSets.value = _ruleSets.value.map {
             if (it.id == ruleSet.id) it.copy(assignedConfigurationId = configurationId) else it
@@ -110,9 +106,15 @@ class RuleSetRepository(private val context: Context) {
         saveAssignments()
     }
 
+    /**
+     * Clears assignments for built-in service rule sets and custom rule sets.
+     * Preserves Direct (always implicit) and ADBlock (which carries its REJECT
+     * assignment by default). Mirrors iOS RuleSetStore.swift:99-109.
+     */
     fun resetAssignments() {
         _ruleSets.value = _ruleSets.value.map { rs ->
-            if (rs.id == "Direct") rs else rs.copy(assignedConfigurationId = null)
+            if (rs.id == "Direct" || rs.id == "ADBlock") rs
+            else rs.copy(assignedConfigurationId = null)
         }
         saveAssignments()
     }
@@ -131,8 +133,6 @@ class RuleSetRepository(private val context: Context) {
         if (affected.isNotEmpty()) saveAssignments()
         return affected
     }
-
-    // -- Custom rule-set CRUD --
 
     fun addCustomRuleSet(name: String): CustomRuleSet {
         val rs = CustomRuleSet.newNamed(name)
@@ -199,8 +199,6 @@ class RuleSetRepository(private val context: Context) {
     fun customRuleSet(id: String): CustomRuleSet? =
         _customRuleSets.value.firstOrNull { it.id == id }
 
-    // -- Rule loading --
-
     /** Returns rules for a built-in or custom rule set. */
     fun loadRules(ruleSet: RuleSet): List<DomainRule> {
         if (ruleSet.isCustom) {
@@ -209,11 +207,9 @@ class RuleSetRepository(private val context: Context) {
         return rulesDatabase.loadRules(ruleSet.name)
     }
 
-    // -- routing.json sync --
-
     /**
      * Writes the compiled routing descriptor consumed by [DomainRouter.loadRoutingConfiguration].
-     * Output format matches iOS `RuleSetStore.syncToAppGroup`:
+     * Output format:
      *   { rules: [{domainRules, ipRules?, action, configId?}], configs: {uuid: config}, bypassRules?: [...] }
      */
     fun syncRoutingFile(
@@ -289,10 +285,17 @@ class RuleSetRepository(private val context: Context) {
         }
 
         runCatching {
-            routingFile.writeText(routing.toString())
+            routingFile.writeTextAtomic(routing.toString())
         }.onFailure {
             logger.error("Failed to write routing.json: $it")
         }
+
+        // Bump the cross-component counter so the running VPN service's prefs
+        // listener (LwipStack.prefsListener) reloads the routing config in-flight.
+        // Mirrors iOS AWCore.notifyRoutingChanged().
+        prefs.edit()
+            .putLong("routingChanged", System.currentTimeMillis())
+            .apply()
     }
 
     private fun resolveConfigurationAddresses(
@@ -303,8 +306,6 @@ class RuleSetRepository(private val context: Context) {
         val resolvedIp = config.resolvedIP ?: resolveAddress(config.serverAddress)
         return config.copy(resolvedIP = resolvedIp, chain = resolvedChain)
     }
-
-    // -- Persistence --
 
     private fun loadAssignments(): Map<String, String> {
         val result = mutableMapOf<String, String>()

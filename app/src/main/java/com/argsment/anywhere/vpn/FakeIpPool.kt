@@ -15,10 +15,9 @@ private val logger = AnywhereLogger("FakeIPPool")
  * IPv6 range: fc00:: + offset (same offset range)
  *
  * Thread safety: every mutator/reader takes the intrinsic monitor on
- * [stateLock]. Mirrors iOS `FakeIPPool`'s `UnfairLock` so that calls from
- * outside the lwIP executor (debug / stats / IPC) cannot tear the LRU
- * structure even if they momentarily race the DNS / accept callbacks
- * that normally drive allocation.
+ * [stateLock] so that calls from outside the lwIP executor (debug / stats)
+ * cannot tear the LRU structure even if they momentarily race the DNS /
+ * accept callbacks that normally drive allocation.
  */
 class FakeIpPool {
 
@@ -26,7 +25,6 @@ class FakeIpPool {
         val domain: String
     )
 
-    // IPv4: 198.18.0.0/15 → offsets 1..POOL_SIZE
     private val domainToOffset = HashMap<String, Int>()
     private val offsetToEntry = HashMap<Int, Entry>()
 
@@ -45,8 +43,6 @@ class FakeIpPool {
     /** Single-purpose monitor for all mutable pool state. */
     private val stateLock = Any()
 
-    // -- Pool Operations --
-
     /**
      * Allocate (or reuse) an offset for the given domain.
      * Use [ipv4Bytes] or [ipv6Bytes] to get the actual address bytes.
@@ -56,19 +52,16 @@ class FakeIpPool {
      * routing rule changes take effect immediately without rebuilding the pool.
      */
     fun allocate(domain: String): Int = synchronized(stateLock) {
-        // Already allocated? Touch LRU and return existing offset
         domainToOffset[domain]?.let { offset ->
             touchLru(offset)
             return@synchronized offset
         }
 
-        // Need a new offset
         val offset: Int
         if (nextOffset <= POOL_SIZE) {
             offset = nextOffset
             nextOffset++
         } else {
-            // Pool full — evict LRU
             offset = evictLru()
         }
 
@@ -79,7 +72,6 @@ class FakeIpPool {
         offset
     }
 
-    /** Look up an entry by its fake IP string (IPv4 or IPv6). */
     fun lookup(ip: String): Entry? {
         val offset = ipToOffset(ip) ?: return null
         return synchronized(stateLock) {
@@ -89,7 +81,6 @@ class FakeIpPool {
         }
     }
 
-    /** Clear all mappings (called on full stop). */
     fun reset() = synchronized(stateLock) {
         domainToOffset.clear()
         offsetToEntry.clear()
@@ -99,11 +90,9 @@ class FakeIpPool {
         nextOffset = 1
     }
 
-    /** Returns the number of active entries. Mirrors iOS `FakeIPPool.count`. */
+    /** Returns the number of active entries. */
     val count: Int
         get() = synchronized(stateLock) { domainToOffset.size }
-
-    // -- IP ↔ Offset Conversion --
 
     private fun ipToOffset(ip: String): Int? {
         return if (ip.contains(':')) ipv6ToOffset(ip) else ipv4ToOffset(ip)
@@ -156,7 +145,6 @@ class FakeIpPool {
                 result[pos++] = (value shr 8).toByte()
                 result[pos++] = (value and 0xFF).toByte()
             }
-            // Fill zeros for :: expansion
             pos = 16 - right.size * 2
             for (group in right) {
                 val value = group.toIntOrNull(16) ?: return null
@@ -176,8 +164,6 @@ class FakeIpPool {
         return result
     }
 
-    // -- LRU Doubly-Linked List (O(1) operations) --
-
     private fun touchLru(offset: Int) {
         val node = offsetToNode[offset] ?: return
         removeNode(node)
@@ -192,8 +178,7 @@ class FakeIpPool {
 
     private fun evictLru(): Int {
         // Should never happen — pool is full so the LRU list cannot be
-        // empty. Fall back to offset 1 rather than crashing. Mirrors iOS
-        // `FakeIPPool.evictLRU`.
+        // empty. Fall back to offset 1 rather than crashing.
         val tail = lruTail ?: run {
             logger.debug("[FakeIPPool] evictLru called on empty list, falling back to offset 1")
             return 1
@@ -228,7 +213,7 @@ class FakeIpPool {
         private val BASE_IPV4: Long = TunnelConstants.fakeIPPoolBaseIPv4
         val POOL_SIZE: Int = TunnelConstants.fakeIPPoolSize
 
-        /** Fast check: is this IP in the fake IPv4 (198.18.0.0/15) or IPv6 (fc00::/18) range? */
+        /** Fast check: is this IP in the fake IPv4 (198.18.0.0/15) or IPv6 (fc00:: + offset) range? */
         fun isFakeIp(ip: String): Boolean =
             ip.startsWith("198.18.") || ip.startsWith("198.19.") || ip.startsWith("fc00::")
 

@@ -11,6 +11,7 @@ import com.argsment.anywhere.data.model.WebSocketConfiguration
 import com.argsment.anywhere.data.model.XHttpConfiguration
 import com.argsment.anywhere.data.model.XHttpMode
 import com.argsment.anywhere.vpn.protocol.ProxyClientFactory
+import com.argsment.anywhere.vpn.protocol.ProxyConnection
 import com.argsment.anywhere.vpn.protocol.Transport
 import com.argsment.anywhere.vpn.protocol.TunneledTransport
 import com.argsment.anywhere.vpn.protocol.grpc.GrpcClient
@@ -31,16 +32,13 @@ import java.util.UUID
 private val logger = AnywhereLogger("VlessClient")
 
 /**
- * Client for establishing VLESS proxy connections over TCP or UDP.
- *
- * Supports transport selection (TCP / WebSocket / HTTP Upgrade / XHTTP),
- * security selection (None / TLS / Reality), and flow control (None / Vision).
- *
- * Retry logic: 5 attempts with linear backoff 0/200/400/600/800ms (matching Xray-core).
+ * Client for establishing VLESS proxy connections over TCP or UDP. Supports
+ * TCP / WebSocket / HTTP Upgrade / XHTTP transports, None / TLS / Reality
+ * security, and None / Vision flow.
  */
 class VlessClient(
     private val configuration: ProxyConfiguration,
-    private val tunnel: VlessConnection? = null
+    private val tunnel: ProxyConnection? = null
 ) {
 
     private var connection: NioSocket? = null
@@ -55,40 +53,26 @@ class VlessClient(
     private var grpcConnection: GrpcConnection? = null
 
     companion object {
-        /** Retry configuration matching Xray-core: ExponentialBackoff(5, 200) */
-        /** Delays: 0, 200, 400, 600, 800 ms (linear backoff) */
+        /** Linear backoff: 0, 200, 400, 600, 800 ms across 5 attempts. */
         private const val MAX_RETRY_ATTEMPTS = 5
         private const val RETRY_BASE_DELAY_MS = 200L
 
-        /** The base Vision flow string sent on the wire (suffix stripped). */
+        /** Base Vision flow string sent on the wire (suffix stripped). */
         private const val VISION_FLOW = "xtls-rprx-vision"
     }
 
-    /** Whether the configured flow is a Vision variant. */
     private val isVisionFlow: Boolean
         get() = configuration.flow == VISION_FLOW || configuration.flow == "$VISION_FLOW-udp443"
 
-    /** Whether UDP port 443 is allowed (only with the `-udp443` suffix). */
+    /** Whether UDP port 443 is allowed (only with the `-udp443` flow suffix). */
     private val allowUDP443: Boolean
         get() = configuration.flow == "$VISION_FLOW-udp443"
 
-    // =========================================================================
-    // Public API
-    // =========================================================================
-
-    /**
-     * Connects to a destination through the VLESS server using TCP.
-     *
-     * @param destinationHost The destination hostname or IP address.
-     * @param destinationPort The destination port number.
-     * @param initialData Optional initial data to send with the VLESS request header.
-     * @return The established [VlessConnection].
-     */
     suspend fun connect(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray? = null
-    ): VlessConnection {
+    ): ProxyConnection {
         return connectWithCommand(
             command = VlessCommand.TCP,
             destinationHost = destinationHost,
@@ -97,17 +81,10 @@ class VlessClient(
         )
     }
 
-    /**
-     * Connects to a destination through the VLESS server using UDP.
-     *
-     * @param destinationHost The destination hostname or IP address.
-     * @param destinationPort The destination port number.
-     * @return The established [VlessConnection].
-     */
     suspend fun connectUDP(
         destinationHost: String,
         destinationPort: Int
-    ): VlessConnection {
+    ): ProxyConnection {
         return connectWithCommand(
             command = VlessCommand.UDP,
             destinationHost = destinationHost,
@@ -117,14 +94,10 @@ class VlessClient(
     }
 
     /**
-     * Connects a mux control channel through the VLESS server.
-     *
-     * Uses command=MUX with destination "v1.mux.cool:666" (matching Xray-core).
+     * Connects a mux control channel: command=MUX with destination "v1.mux.cool:666".
      * When Vision flow is active, the mux connection is wrapped with Vision.
-     *
-     * @return The established [VlessConnection].
      */
-    suspend fun connectMux(): VlessConnection {
+    suspend fun connectMux(): ProxyConnection {
         return connectWithCommand(
             command = VlessCommand.MUX,
             destinationHost = "v1.mux.cool",
@@ -133,7 +106,6 @@ class VlessClient(
         )
     }
 
-    /** Cleans up resources from a failed retry attempt before the next one. */
     private fun cleanupRetryResources() {
         grpcConnection?.cancel()
         grpcConnection = null
@@ -156,9 +128,6 @@ class VlessClient(
         tlsClient = null
     }
 
-    /**
-     * Cancels the connection and releases all resources.
-     */
     fun cancel() {
         grpcConnection?.cancel()
         grpcConnection = null
@@ -186,13 +155,13 @@ class VlessClient(
         return tunnelTransport ?: TunneledTransport(activeTunnel).also { tunnelTransport = it }
     }
 
-    private suspend fun buildUploadTunnel(): VlessConnection {
+    private suspend fun buildUploadTunnel(): ProxyConnection {
         val chain = configuration.chain
         if (chain.isNullOrEmpty()) {
             return tunnel ?: throw ProxyError.ConnectionFailed("Missing upload tunnel")
         }
 
-        var previousConnection: VlessConnection? = null
+        var previousConnection: ProxyConnection? = null
         for (i in chain.indices) {
             val hopConfig = chain[i]
             val nextConfig = if (i + 1 < chain.size) chain[i + 1] else configuration
@@ -208,28 +177,19 @@ class VlessClient(
             ?: throw ProxyError.ConnectionFailed("Failed to build upload tunnel")
     }
 
-    // =========================================================================
-    // Connection Routing
-    // =========================================================================
-
-    /**
-     * Routes the connection through the appropriate transport and security layers
-     * based on configuration.
-     */
     private suspend fun connectWithCommand(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
-        // Vision silently drops UDP/443 (QUIC) unless the -udp443 flow variant is used
+    ): ProxyConnection {
+        // Vision silently drops UDP/443 unless the -udp443 flow variant is configured.
         if (command == VlessCommand.UDP && destinationPort == 443 && isVisionFlow && !allowUDP443) {
             throw ProxyError.Dropped()
         }
 
         return when (configuration.transport) {
             "ws" -> {
-                // Vision over WebSocket is not supported
                 if (isVisionFlow) {
                     throw ProxyError.ProtocolError("Vision flow is not supported over WebSocket transport")
                 }
@@ -237,7 +197,6 @@ class VlessClient(
             }
 
             "httpupgrade" -> {
-                // Vision over HTTP upgrade is not supported
                 if (isVisionFlow) {
                     throw ProxyError.ProtocolError("Vision flow is not supported over HTTP upgrade transport")
                 }
@@ -245,7 +204,6 @@ class VlessClient(
             }
 
             "xhttp" -> {
-                // Vision over XHTTP is not supported
                 if (isVisionFlow) {
                     throw ProxyError.ProtocolError("Vision flow is not supported over XHTTP transport")
                 }
@@ -253,7 +211,6 @@ class VlessClient(
             }
 
             "grpc" -> {
-                // Vision over gRPC is not supported
                 if (isVisionFlow) {
                     throw ProxyError.ProtocolError("Vision flow is not supported over gRPC transport")
                 }
@@ -261,7 +218,6 @@ class VlessClient(
             }
 
             else -> {
-                // TCP transport -- route based on security
                 when {
                     configuration.tls != null -> connectWithTls(
                         configuration.tls, command, destinationHost, destinationPort, initialData
@@ -277,20 +233,12 @@ class VlessClient(
         }
     }
 
-    // =========================================================================
-    // WebSocket Connection
-    // =========================================================================
-
-    /**
-     * Connects to the VLESS server using WebSocket transport.
-     * Routes to WSS (TLS + WebSocket) or plain WS based on TLS configuration.
-     */
     private suspend fun connectWithWebSocket(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         val wsConfig = configuration.websocket
             ?: throw ProxyError.ConnectionFailed("WebSocket transport specified but no WebSocket configuration")
 
@@ -301,15 +249,13 @@ class VlessClient(
         }
     }
 
-    // -- Plain WS (TCP -> WebSocket -> VLESS) --
-
     private suspend fun connectWsWithRetry(
         wsConfig: WebSocketConfiguration,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -345,15 +291,13 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- WSS (TCP -> TLS -> WebSocket -> VLESS) --
-
     private suspend fun connectWssWithRetry(
         wsConfig: WebSocketConfiguration,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -367,9 +311,8 @@ class VlessClient(
                 val baseTlsConfig = configuration.tls
                     ?: throw ProxyError.ConnectionFailed("WSS requires TLS configuration")
 
-                // Force ALPN to http/1.1 for WebSocket -- matches Xray-core's
-                // tls.WithNextProto("http/1.1") in websocket/dialer.go.
-                // HTTP/2 negotiation would break the WebSocket upgrade handshake.
+                // Force ALPN to http/1.1; HTTP/2 negotiation would break the
+                // WebSocket upgrade handshake.
                 val wsTlsConfig = TlsConfiguration(
                     serverName = baseTlsConfig.serverName,
                     alpn = listOf("http/1.1"),
@@ -404,24 +347,19 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- WebSocket VLESS Handshake --
-
-    /**
-     * Performs the VLESS handshake over an established WebSocket connection.
-     */
     private suspend fun performWebSocketHandshake(
         wsConnection: WebSocketConnection,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var requestData = VlessProtocol.encodeRequestHeader(
             uuid = configuration.uuid,
             command = command,
             destinationAddress = destinationHost,
             destinationPort = destinationPort,
-            flow = null  // Vision is rejected before reaching here
+            flow = null
         )
 
         if (initialData != null) {
@@ -430,27 +368,20 @@ class VlessClient(
 
         wsConnection.send(requestData)
 
+        val baseConn = VlessWebSocketConnection(wsConnection)
         return if (command == VlessCommand.UDP) {
-            VlessWebSocketUdpConnection(wsConnection)
+            VlessUdpConnection(baseConn)
         } else {
-            VlessWebSocketConnection(wsConnection)
+            baseConn
         }
     }
 
-    // =========================================================================
-    // HTTP Upgrade Connection
-    // =========================================================================
-
-    /**
-     * Connects to the VLESS server using HTTP upgrade transport.
-     * Routes to HTTPS upgrade (TLS + HTTP upgrade) or plain HTTP upgrade based on TLS configuration.
-     */
     private suspend fun connectWithHttpUpgrade(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         val huConfig = configuration.httpUpgrade
             ?: throw ProxyError.ConnectionFailed("HTTP upgrade transport specified but no configuration")
 
@@ -461,15 +392,13 @@ class VlessClient(
         }
     }
 
-    // -- Plain HTTP Upgrade (TCP -> HTTP Upgrade -> raw TCP -> VLESS) --
-
     private suspend fun connectHttpUpgradeWithRetry(
         huConfig: HttpUpgradeConfiguration,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -505,15 +434,13 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- HTTPS Upgrade (TCP -> TLS -> HTTP Upgrade -> raw TCP over TLS -> VLESS) --
-
     private suspend fun connectHttpsUpgradeWithRetry(
         huConfig: HttpUpgradeConfiguration,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -554,24 +481,19 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- HTTP Upgrade VLESS Handshake --
-
-    /**
-     * Performs the VLESS handshake over an established HTTP upgrade connection.
-     */
     private suspend fun performHttpUpgradeHandshake(
         huConnection: HttpUpgradeConnection,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var requestData = VlessProtocol.encodeRequestHeader(
             uuid = configuration.uuid,
             command = command,
             destinationAddress = destinationHost,
             destinationPort = destinationPort,
-            flow = null  // Vision is rejected before reaching here
+            flow = null
         )
 
         if (initialData != null) {
@@ -580,34 +502,20 @@ class VlessClient(
 
         huConnection.send(requestData)
 
+        val baseConn = VlessHttpUpgradeConnection(huConnection)
         return if (command == VlessCommand.UDP) {
-            VlessHttpUpgradeUdpConnection(huConnection)
+            VlessUdpConnection(baseConn)
         } else {
-            VlessHttpUpgradeConnection(huConnection)
+            baseConn
         }
     }
 
-    // =========================================================================
-    // XHTTP Connection
-    // =========================================================================
-
     /**
-     * Connects to the VLESS server using XHTTP transport.
-     * Routes to plain HTTP or HTTPS based on security configuration.
-     *
-     * Reality is not supported: Xray-core forces HTTP/2 for Reality (dialer.go:80-82),
-     * and we only implement HTTP/1.1 over raw sockets.
-     *
-     * Mode auto-resolution (matching Xray-core dialer.go:280-289):
-     * - Reality -> stream-one with HTTP/2 (Xray-core forces h2 for Reality)
-     * - TLS/none -> packet-up (CDN-safe, GET + POST over HTTP/1.1)
-     */
-    /**
-     * Decides the HTTP version for XHTTP, matching Xray-core's decideHTTPVersion.
+     * HTTP version selection for XHTTP:
      * - Reality always uses HTTP/2.
      * - No TLS means plain HTTP/1.1.
      * - TLS with a single "http/1.1" ALPN stays on HTTP/1.1.
-     * - TLS with a single "h3" ALPN expects QUIC/HTTP/3 (not implemented).
+     * - TLS with a single "h3" ALPN requires QUIC/HTTP/3 and is rejected.
      * - Everything else uses HTTP/2.
      */
     private enum class XHttpHttpVersion { HTTP11, HTTP2, HTTP3 }
@@ -625,9 +533,8 @@ class VlessClient(
     }
 
     /**
-     * Sanitizes TLS ALPN for XHTTP-over-TCP handshakes.
-     * Strips protocols like h3 that require QUIC, ensuring only TCP-compatible
-     * ALPN values are advertised (matching iOS sanitizedXHTTPTLSConfiguration).
+     * Sanitizes TLS ALPN for XHTTP-over-TCP handshakes so only TCP-compatible
+     * ALPN values are advertised.
      */
     private fun sanitizedXHttpTlsConfig(
         base: TlsConfiguration,
@@ -635,6 +542,7 @@ class VlessClient(
     ): TlsConfiguration {
         val sanitizedAlpn: List<String>? = when (httpVersion) {
             XHttpHttpVersion.HTTP11 -> listOf("http/1.1")
+            XHttpHttpVersion.HTTP3 -> listOf("h3")
             XHttpHttpVersion.HTTP2 -> {
                 val configured = base.alpn
                 if (configured != null) {
@@ -650,7 +558,6 @@ class VlessClient(
                     null
                 }
             }
-            XHttpHttpVersion.HTTP3 -> listOf("h3")
         }
         return TlsConfiguration(
             serverName = base.serverName,
@@ -665,29 +572,25 @@ class VlessClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         val xhttpConfig = configuration.xhttp
             ?: throw ProxyError.ConnectionFailed("XHTTP transport specified but no XHTTP configuration")
 
         val httpVersion = decideXHttpHttpVersion()
         if (httpVersion == XHttpHttpVersion.HTTP3) {
-            throw ProxyError.ProtocolError(
-                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented yet"
+            throw ProxyError.ConnectionFailed(
+                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented"
             )
         }
-
         val useHTTP2 = httpVersion == XHttpHttpVersion.HTTP2
 
-        // Resolve mode: auto -> actual mode based on security
         val resolvedMode: XHttpMode = if (xhttpConfig.mode == XHttpMode.AUTO) {
-            // Reality -> stream-one (direct connection, HTTP/2)
-            // TLS/none -> packet-up (CDN-safe, HTTP/1.1)
+            // Reality -> stream-one (direct, HTTP/2); TLS/none -> packet-up (CDN-safe).
             if (configuration.reality != null) XHttpMode.STREAM_ONE else XHttpMode.PACKET_UP
         } else {
             xhttpConfig.mode
         }
 
-        // Generate session ID for packet-up and stream-up modes (matching iOS)
         val sessionId = if (resolvedMode == XHttpMode.PACKET_UP || resolvedMode == XHttpMode.STREAM_UP) {
             UUID.randomUUID().toString()
         } else {
@@ -712,8 +615,6 @@ class VlessClient(
         }
     }
 
-    // -- Plain XHTTP (TCP -> XHTTP -> VLESS) --
-
     private suspend fun connectXHttpWithRetry(
         xhttpConfig: XHttpConfiguration,
         mode: XHttpMode,
@@ -722,7 +623,7 @@ class VlessClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -733,7 +634,6 @@ class VlessClient(
             }
 
             try {
-                // Upload connection factory for packet-up and stream-up modes (matching iOS)
                 val needsUpload = mode == XHttpMode.PACKET_UP || mode == XHttpMode.STREAM_UP
                 val uploadFactory: (suspend () -> TransportClosures)? =
                     if (needsUpload) {
@@ -791,8 +691,6 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- XHTTPS (TCP -> TLS -> XHTTP -> VLESS) --
-
     private suspend fun connectXHttpsWithRetry(
         xhttpConfig: XHttpConfiguration,
         mode: XHttpMode,
@@ -802,7 +700,7 @@ class VlessClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -816,7 +714,6 @@ class VlessClient(
                 val baseTlsConfig = configuration.tls
                     ?: throw ProxyError.ConnectionFailed("XHTTPS requires TLS configuration")
 
-                // Sanitize ALPN: strip h3 (requires QUIC), ensure h2 present for HTTP/2
                 val httpVersion = if (useHTTP2) XHttpHttpVersion.HTTP2 else XHttpHttpVersion.HTTP11
                 val tlsConfig = sanitizedXHttpTlsConfig(baseTlsConfig, httpVersion)
 
@@ -829,7 +726,6 @@ class VlessClient(
                 this.tlsClient = tlsClient
                 this.tlsConnection = tlsConn
 
-                // Upload connection factory for packet-up and stream-up modes (matching iOS)
                 val needsUpload = !useHTTP2 && (mode == XHttpMode.PACKET_UP || mode == XHttpMode.STREAM_UP)
                 val uploadFactory: (suspend () -> TransportClosures)? =
                     if (needsUpload) {
@@ -878,8 +774,6 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- XHTTP Reality (TCP -> Reality TLS -> HTTP/2 -> XHTTP -> VLESS) --
-
     private suspend fun connectXHttpRealityWithRetry(
         realityConfig: RealityConfiguration,
         xhttpConfig: XHttpConfiguration,
@@ -889,7 +783,7 @@ class VlessClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -911,7 +805,7 @@ class VlessClient(
                 this.realityClient = realityClient
                 this.realityConnection = realityConn
 
-                // Reality + xhttp uses HTTP/2 (Xray-core dialer.go:80-82)
+                // Reality + xhttp requires HTTP/2.
                 val xhttpConn = XHttpConnection(
                     tlsConnection = realityConn,
                     configuration = xhttpConfig,
@@ -936,24 +830,19 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- XHTTP VLESS Handshake --
-
-    /**
-     * Performs the VLESS handshake over an established XHTTP connection.
-     */
     private suspend fun performXHttpHandshake(
         xhttpConnection: XHttpConnection,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var requestData = VlessProtocol.encodeRequestHeader(
             uuid = configuration.uuid,
             command = command,
             destinationAddress = destinationHost,
             destinationPort = destinationPort,
-            flow = null  // Vision is rejected before reaching here
+            flow = null
         )
 
         if (initialData != null) {
@@ -962,29 +851,21 @@ class VlessClient(
 
         xhttpConnection.send(requestData)
 
+        val baseConn = VlessXHttpConnection(xhttpConnection)
         return if (command == VlessCommand.UDP) {
-            VlessXHttpUdpConnection(xhttpConnection)
+            VlessUdpConnection(baseConn)
         } else {
-            VlessXHttpConnection(xhttpConnection)
+            baseConn
         }
     }
 
-    // =========================================================================
-    // Direct Connection
-    // =========================================================================
-
-    /**
-     * Connects directly to the VLESS server using a NIO socket.
-     * Retries with linear backoff (0, 200, 400, 600, 800 ms) on connection failure,
-     * matching Xray-core.
-     */
     private suspend fun connectDirect(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
-        // Tunneled: use existing tunnel connection (no NioSocket, no retries)
+    ): ProxyConnection {
+        // Tunneled connections reuse the existing tunnel — no NioSocket, no retries.
         if (tunnel != null) {
             tunnelTransport = TunneledTransport(tunnel)
             return performHandshake(
@@ -1019,22 +900,13 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // =========================================================================
-    // Reality Connection
-    // =========================================================================
-
-    /**
-     * Connects to the VLESS server through the Reality protocol.
-     * Retries with linear backoff (0, 200, 400, 600, 800 ms) on connection failure,
-     * matching Xray-core.
-     */
     private suspend fun connectWithReality(
         realityConfig: RealityConfiguration,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -1069,23 +941,14 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // =========================================================================
-    // TLS Connection
-    // =========================================================================
-
-    /**
-     * Connects to the VLESS server through standard TLS.
-     * Retries with linear backoff (0, 200, 400, 600, 800 ms) on connection failure,
-     * matching Xray-core.
-     */
     private suspend fun connectWithTls(
         tlsConfig: TlsConfiguration,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
-        // Tunneled: TLS handshake over existing tunnel connection (no retries)
+    ): ProxyConnection {
+        // Tunneled: TLS handshake over the existing tunnel — no retries.
         if (tunnel != null) {
             val tlsClient = TlsClient(tlsConfig)
             val tlsConn = tlsClient.connect(TunneledTransport(tunnel))
@@ -1124,22 +987,12 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // =========================================================================
-    // TLS Handshake
-    // =========================================================================
-
-    /**
-     * Performs the VLESS handshake over a TLS connection.
-     *
-     * Sends the VLESS request header through the TLS tunnel and returns
-     * a [VlessConnection] wrapper.
-     */
     private suspend fun performTlsHandshake(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         val isVision = isVisionFlow && (command == VlessCommand.TCP || command == VlessCommand.MUX)
 
         var requestData = VlessProtocol.encodeRequestHeader(
@@ -1158,44 +1011,34 @@ class VlessClient(
             ?: throw ProxyError.ConnectionFailed("Connection cancelled")
         tlsConn.send(requestData)
 
-        var vlessConnection: VlessConnection = if (command == VlessCommand.UDP) {
-            VlessTlsUdpConnection(tlsConn)
-        } else {
-            VlessTlsConnection(tlsConn)
+        val baseConn = VlessTlsConnection(tlsConn)
+
+        if (command == VlessCommand.UDP) {
+            return VlessUdpConnection(baseConn)
         }
 
         if (isVision) {
-            // Verify outer TLS is 1.3 (matches Xray-core outbound.go:346-355)
-            validateOuterTlsForVision(vlessConnection)?.let { throw it }
+            // Vision requires outer TLS 1.3.
+            validateOuterTlsForVision(baseConn)?.let { throw it }
 
-            val vision = wrapWithVision(vlessConnection)
+            val vision = wrapWithVision(baseConn)
             if (initialData != null) {
                 vision.send(initialData)
             } else {
                 vision.sendEmptyPadding()
             }
-            vlessConnection = vision
+            return vision
         }
 
-        return vlessConnection
+        return baseConn
     }
 
-    // =========================================================================
-    // Direct Handshake
-    // =========================================================================
-
-    /**
-     * Performs the VLESS handshake over a direct NioSocket connection.
-     *
-     * Sends the VLESS request header and returns a [VlessConnection] wrapper.
-     * For Vision flow, the connection is additionally wrapped in [VlessVisionConnection].
-     */
     private suspend fun performHandshake(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         val isVision = isVisionFlow && (command == VlessCommand.TCP || command == VlessCommand.MUX)
 
         var requestData = VlessProtocol.encodeRequestHeader(
@@ -1206,7 +1049,7 @@ class VlessClient(
             flow = if (isVision) VISION_FLOW else null
         )
 
-        // For Vision flow, initial data needs separate padding -- don't append to header
+        // Vision needs initialData passed through its own padding path; don't append to header.
         if (initialData != null && !isVision) {
             requestData = requestData + initialData
         }
@@ -1215,44 +1058,34 @@ class VlessClient(
             ?: throw ProxyError.ConnectionFailed("Connection cancelled")
         transport.send(requestData)
 
-        var vlessConnection: VlessConnection = if (command == VlessCommand.UDP) {
-            VlessDirectUdpConnection(transport)
-        } else {
-            VlessDirectConnection(transport)
+        val baseConn = VlessDirectConnection(transport)
+
+        if (command == VlessCommand.UDP) {
+            return VlessUdpConnection(baseConn)
         }
 
         if (isVision) {
-            // Verify outer TLS is 1.3 (matches Xray-core outbound.go:346-355)
-            validateOuterTlsForVision(vlessConnection)?.let { throw it }
+            // Vision requires outer TLS 1.3.
+            validateOuterTlsForVision(baseConn)?.let { throw it }
 
-            val vision = wrapWithVision(vlessConnection)
+            val vision = wrapWithVision(baseConn)
             if (initialData != null) {
                 vision.send(initialData)
             } else {
                 vision.sendEmptyPadding()
             }
-            vlessConnection = vision
+            return vision
         }
 
-        return vlessConnection
+        return baseConn
     }
 
-    // =========================================================================
-    // Reality Handshake
-    // =========================================================================
-
-    /**
-     * Performs the VLESS handshake over a Reality connection.
-     *
-     * Sends the VLESS request header through the Reality tunnel and returns
-     * a [VlessConnection] wrapper.
-     */
     private suspend fun performRealityHandshake(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         val isVision = isVisionFlow && (command == VlessCommand.TCP || command == VlessCommand.MUX)
 
         var requestData = VlessProtocol.encodeRequestHeader(
@@ -1271,78 +1104,56 @@ class VlessClient(
             ?: throw ProxyError.ConnectionFailed("Connection cancelled")
         realityConn.send(requestData)
 
-        var vlessConnection: VlessConnection = if (command == VlessCommand.UDP) {
-            VlessRealityUdpConnection(realityConn)
-        } else {
-            VlessRealityConnection(realityConn)
+        val baseConn = VlessRealityConnection(realityConn)
+
+        if (command == VlessCommand.UDP) {
+            return VlessUdpConnection(baseConn)
         }
 
         if (isVision) {
-            // Verify outer TLS is 1.3 (matches Xray-core outbound.go:346-355)
-            validateOuterTlsForVision(vlessConnection)?.let { throw it }
+            // Vision requires outer TLS 1.3.
+            validateOuterTlsForVision(baseConn)?.let { throw it }
 
-            val vision = wrapWithVision(vlessConnection)
+            val vision = wrapWithVision(baseConn)
             if (initialData != null) {
                 vision.send(initialData)
             } else {
                 vision.sendEmptyPadding()
             }
-            vlessConnection = vision
+            return vision
         }
 
-        return vlessConnection
+        return baseConn
     }
 
-    // =========================================================================
-    // TLS Version Check
-    // =========================================================================
-
     /**
-     * Validates that the outer TLS connection is TLS 1.3 when using Vision flow.
-     * Matches Xray-core outbound.go lines 346-355.
-     * Returns an error if the check fails, null if OK or not applicable.
+     * Vision requires outer TLS 1.3 — rejects raw TCP and lower TLS versions.
      */
-    private fun validateOuterTlsForVision(connection: VlessConnection): Exception? {
+    private fun validateOuterTlsForVision(connection: ProxyConnection): Exception? {
         val version = connection.outerTlsVersion
-            ?: return ProxyError.ProtocolError("Vision requires outer TLS or REALITY transport")  // Reject raw TCP (matching iOS)
+            ?: return ProxyError.ProtocolError("Vision requires outer TLS or REALITY transport")
         if (version != TlsVersion.TLS13) {
             return ProxyError.ProtocolError("Vision requires outer TLS 1.3, found $version")
         }
         return null
     }
 
-    // =========================================================================
-    // Vision Wrapping
-    // =========================================================================
-
-    /**
-     * Wraps a VLESS connection with the XTLS Vision layer.
-     *
-     * @param connection The base VLESS connection to wrap.
-     * @return A [VlessVisionConnection] wrapping the provided connection.
-     */
     private fun wrapWithVision(connection: VlessConnection): VlessVisionConnection {
         val uuidBytes = VlessProtocol.uuidToBytes(configuration.uuid)
         val testseed = configuration.testseed.map { it.toInt() }.toIntArray()
         return VlessVisionConnection(connection, uuidBytes, testseed)
     }
 
-    // =========================================================================
-    // gRPC Connection
-    // =========================================================================
-
     /**
-     * Connects to the VLESS server using gRPC transport (bidirectional HTTP/2 stream).
-     *
-     * Mirrors iOS `ProxyClient.connectWithGRPC`. Routes through Reality, TLS, or plain
-     * TCP based on the configuration; when TLS is used, ALPN is forced to `h2`.
+     * gRPC transport (bidirectional HTTP/2 stream). Routes through Reality, TLS,
+     * or plain TCP; TLS connections force ALPN to `h2`.
      */
     private suspend fun connectWithGrpc(
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         val grpcConfig = configuration.grpc
             ?: throw ProxyError.ConnectionFailed("gRPC transport specified but no gRPC configuration")
 
@@ -1366,8 +1177,6 @@ class VlessClient(
         }
     }
 
-    // -- Plain gRPC (TCP -> gRPC -> VLESS) --
-
     private suspend fun connectGrpcPlainWithRetry(
         grpcConfig: GrpcConfiguration,
         authority: String,
@@ -1375,7 +1184,7 @@ class VlessClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -1411,8 +1220,6 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- gRPC over TLS (TCP -> TLS h2 -> gRPC -> VLESS) --
-
     private suspend fun connectGrpcsWithRetry(
         baseTlsConfig: TlsConfiguration,
         grpcConfig: GrpcConfiguration,
@@ -1421,7 +1228,7 @@ class VlessClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -1432,7 +1239,7 @@ class VlessClient(
             }
 
             try {
-                // gRPC requires HTTP/2 — force ALPN to h2 (matches iOS sanitizedGRPCTLSConfiguration).
+                // gRPC requires HTTP/2 — force ALPN to h2.
                 val tlsConfig = GrpcClient.sanitizedTlsConfiguration(baseTlsConfig)
                 val tlsClient = TlsClient(tlsConfig)
                 val tlsConn = if (tunnel != null) {
@@ -1461,8 +1268,6 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- gRPC over Reality (TCP -> Reality -> gRPC -> VLESS) --
-
     private suspend fun connectGrpcRealityWithRetry(
         realityConfig: RealityConfiguration,
         grpcConfig: GrpcConfiguration,
@@ -1471,7 +1276,7 @@ class VlessClient(
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var lastError: Exception? = null
 
         for (attempt in 0 until MAX_RETRY_ATTEMPTS) {
@@ -1482,7 +1287,7 @@ class VlessClient(
             }
 
             try {
-                // Reality handles its own ALPN internally (matches iOS).
+                // Reality handles its own ALPN internally.
                 val realityClientLocal = RealityClient(realityConfig)
                 val realityConn = if (tunnel != null) {
                     realityClientLocal.connect(requireTunnelTransport())
@@ -1512,25 +1317,19 @@ class VlessClient(
         throw lastError ?: ProxyError.ConnectionFailed("All retry attempts failed")
     }
 
-    // -- gRPC VLESS Handshake --
-
-    /**
-     * Performs the VLESS handshake over an established gRPC bidirectional stream.
-     * Vision is rejected before reaching here (gRPC is HTTP/2-framed, not a clean TLS stream).
-     */
     private suspend fun performGrpcHandshake(
         grpcConn: GrpcConnection,
         command: VlessCommand,
         destinationHost: String,
         destinationPort: Int,
         initialData: ByteArray?
-    ): VlessConnection {
+    ): ProxyConnection {
         var requestData = VlessProtocol.encodeRequestHeader(
             uuid = configuration.uuid,
             command = command,
             destinationAddress = destinationHost,
             destinationPort = destinationPort,
-            flow = null  // Vision is rejected before reaching here
+            flow = null
         )
 
         if (initialData != null) {
@@ -1539,10 +1338,11 @@ class VlessClient(
 
         grpcConn.send(requestData)
 
+        val baseConn = VlessGrpcConnection(grpcConn)
         return if (command == VlessCommand.UDP) {
-            VlessGrpcUdpConnection(grpcConn)
+            VlessUdpConnection(baseConn)
         } else {
-            VlessGrpcConnection(grpcConn)
+            baseConn
         }
     }
 }
